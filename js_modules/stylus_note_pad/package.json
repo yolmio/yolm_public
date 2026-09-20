@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "dependencies": {
+    "perfect-freehand": "^1.2.3"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "@zip.js/zip.js": "2.14.1",
+      },
+    },
+  },
+  "packages": {
+    "@zip.js/zip.js": ["@zip.js/zip.js@2.14.1", "", {}, "sha512-ChDAOmIvj061bWlm6Zqy5llk3V2SSES893DT9CSeiLd+YGgm5l950F/HvUpKj5ED0nqfE+cgDgFuxqVQvTMatg=="],
+  }
+}

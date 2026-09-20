@@ -1,0 +1,398 @@
+{
+  "version": 1,
+  "assets": [
+    {
+      "id": "inter-v20-latin",
+      "default": true,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7W0Q5nw.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "e783ecabb4a4d9048cd65cad69b1a22aff70187c73cb4774c8160a00b15136ba",
+        "expected_bytes": 48432,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "inter-v20-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Inter"
+      }
+    },
+    {
+      "id": "manrope-v20-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/manrope/v20/xn7gYHE41ni1AdIRggexSvfedN4.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "249c89202c48edbbde12bf46348d1a7e9d95ad7454ed1c484a2c4faa6343dc63",
+        "expected_bytes": 24576,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "manrope-v20-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Manrope"
+      }
+    },
+    {
+      "id": "jetbrains-mono-v24-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbV2o-flEEny0FZhsfKu5WU4xD7OwGtT0rU.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "4c419ff8fa0a43cabafa1f0bc6d5b01e61995acbb482360ebf25148bab7408ae",
+        "expected_bytes": 40480,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "jetbrains-mono-v24-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/JetBrains+Mono"
+      }
+    },
+    {
+      "id": "noto-sans-v42-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/notosans/v42/o-0bIpQlx3QUlC5A4PNB6Ryti20_6n1iPHjc5a7du3mhPy0.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "7940757f98bec30514eab7579db7fc93a40ff2d6d844c4d5e6fcdf81096662ad",
+        "expected_bytes": 35856,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "noto-sans-v42-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Noto+Sans"
+      }
+    },
+    {
+      "id": "noto-sans-v42-italic-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/notosans/v42/o-0ZIpQlx3QUlC5A4PNr4C5OaxRsfNNlKbCePevtuXOmHS91iw.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "d8af07a2a15a4eddf2cf2960fa7b69e087a109273958fc3313d3f3682d569173",
+        "expected_bytes": 39604,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "noto-sans-v42-italic-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Noto+Sans"
+      }
+    },
+    {
+      "id": "noto-sans-mono-v37-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/notosansmono/v37/BngcUXNETWXI6LwhGYvaxZikqZqK6fBq6kPvUce2oAZ2evCj_9SrdQ.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "b7e70c988353a7ada3602b1130466ce0aa9558e3f49777ee0a64942964b22200",
+        "expected_bytes": 32072,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "noto-sans-mono-v37-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Noto+Sans+Mono"
+      }
+    },
+    {
+      "id": "noto-serif-v33-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/notoserif/v33/ga6daw1J5X9T9RW6j9bNVls-hfgvz8JcMofYTYf6D33WsNFH.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "d25130c308d47d7e19ae1106550da5ba9d01ee46a2a5f53b1c2e1f70c3709cf5",
+        "expected_bytes": 36696,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "noto-serif-v33-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Noto+Serif"
+      }
+    },
+    {
+      "id": "noto-serif-v33-italic-latin",
+      "default": false,
+      "format": "woff2",
+      "type": "font/woff2",
+      "source": {
+        "url": "https://fonts.gstatic.com/s/notoserif/v33/ga6faw1J5X9T9RW6j9bNfFIMZhhWnFTyNZIQD1-_P3_ct_NFiQg.woff2",
+        "allow_redirect_hosts": [
+          "fonts.gstatic.com"
+        ],
+        "expected_blake3": "9500f6ff92c3a16b94b2f8c7987a9d869701e75ca99a9a9cd8063420af02b838",
+        "expected_bytes": 47948,
+        "expected_content_type": "font/woff2"
+      },
+      "publish": {
+        "r2_key_prefix": "fonts",
+        "file_name_base": "noto-serif-v33-italic-latin"
+      },
+      "license": {
+        "spdx": "OFL-1.1",
+        "source_page_url": "https://fonts.google.com/specimen/Noto+Serif"
+      }
+    }
+  ],
+  "faces": [
+    {
+      "id": "inter-v20-latin-200",
+      "asset_id": "inter-v20-latin",
+      "family": "Inter",
+      "style": "normal",
+      "weight": 200,
+      "display": "swap",
+      "preload": true
+    },
+    {
+      "id": "inter-v20-latin-300",
+      "asset_id": "inter-v20-latin",
+      "family": "Inter",
+      "style": "normal",
+      "weight": 300,
+      "display": "swap",
+      "preload": true
+    },
+    {
+      "id": "inter-v20-latin-500",
+      "asset_id": "inter-v20-latin",
+      "family": "Inter",
+      "style": "normal",
+      "weight": 500,
+      "display": "swap",
+      "preload": true
+    },
+    {
+      "id": "inter-v20-latin-600",
+      "asset_id": "inter-v20-latin",
+      "family": "Inter",
+      "style": "normal",
+      "weight": 600,
+      "display": "swap",
+      "preload": true
+    },
+    {
+      "id": "inter-v20-latin-700",
+      "asset_id": "inter-v20-latin",
+      "family": "Inter",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": true
+    },
+    {
+      "id": "manrope-v20-latin-400",
+      "asset_id": "manrope-v20-latin",
+      "family": "Manrope",
+      "style": "normal",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "manrope-v20-latin-500",
+      "asset_id": "manrope-v20-latin",
+      "family": "Manrope",
+      "style": "normal",
+      "weight": 500,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "manrope-v20-latin-600",
+      "asset_id": "manrope-v20-latin",
+      "family": "Manrope",
+      "style": "normal",
+      "weight": 600,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "manrope-v20-latin-700",
+      "asset_id": "manrope-v20-latin",
+      "family": "Manrope",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "manrope-v20-latin-800",
+      "asset_id": "manrope-v20-latin",
+      "family": "Manrope",
+      "style": "normal",
+      "weight": 800,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "jetbrains-mono-v24-latin-400",
+      "asset_id": "jetbrains-mono-v24-latin",
+      "family": "JetBrains Mono",
+      "style": "normal",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "jetbrains-mono-v24-latin-500",
+      "asset_id": "jetbrains-mono-v24-latin",
+      "family": "JetBrains Mono",
+      "style": "normal",
+      "weight": 500,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "jetbrains-mono-v24-latin-700",
+      "asset_id": "jetbrains-mono-v24-latin",
+      "family": "JetBrains Mono",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-v42-latin-400",
+      "asset_id": "noto-sans-v42-latin",
+      "family": "Noto Sans",
+      "style": "normal",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-v42-latin-700",
+      "asset_id": "noto-sans-v42-latin",
+      "family": "Noto Sans",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-v42-italic-latin-400",
+      "asset_id": "noto-sans-v42-italic-latin",
+      "family": "Noto Sans",
+      "style": "italic",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-v42-italic-latin-700",
+      "asset_id": "noto-sans-v42-italic-latin",
+      "family": "Noto Sans",
+      "style": "italic",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-mono-v37-latin-400",
+      "asset_id": "noto-sans-mono-v37-latin",
+      "family": "Noto Sans Mono",
+      "style": "normal",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-sans-mono-v37-latin-700",
+      "asset_id": "noto-sans-mono-v37-latin",
+      "family": "Noto Sans Mono",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-serif-v33-latin-400",
+      "asset_id": "noto-serif-v33-latin",
+      "family": "Noto Serif",
+      "style": "normal",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-serif-v33-latin-700",
+      "asset_id": "noto-serif-v33-latin",
+      "family": "Noto Serif",
+      "style": "normal",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-serif-v33-italic-latin-400",
+      "asset_id": "noto-serif-v33-italic-latin",
+      "family": "Noto Serif",
+      "style": "italic",
+      "weight": 400,
+      "display": "swap",
+      "preload": false
+    },
+    {
+      "id": "noto-serif-v33-italic-latin-700",
+      "asset_id": "noto-serif-v33-italic-latin",
+      "family": "Noto Serif",
+      "style": "italic",
+      "weight": 700,
+      "display": "swap",
+      "preload": false
+    }
+  ]
+}

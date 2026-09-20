@@ -1,0 +1,184 @@
+import { sql } from "std/sql_utils";
+import type { Sql } from "std/sql_utils";
+import type { SparkCapability } from "./index";
+import { hasSparkPermissionGate } from "./permissions";
+
+type ReadCapability = Pick<
+  SparkCapability,
+  "name" | "permission" | "permissions" | "views" | "tables" | "fieldWhitelist"
+>;
+
+export function effectiveCapabilitiesJsonExpr(
+  capabilities: readonly ReadCapability[],
+  storedCapabilities: Sql,
+  ownerId: Sql,
+) {
+  let items: Sql = sql`''`;
+  for (const capability of capabilities) {
+    const hasPermissionGate = capability.permission !== undefined ||
+      capability.permissions !== undefined;
+    const permitted = hasPermissionGate
+      ? sql`(${ownerId} is null or ${
+        hasSparkPermissionGate(
+          capability.permission,
+          capability.permissions,
+          ownerId,
+        )
+      })`
+      : sql`true`;
+    items = sql`${items} || case
+      when ${storedCapabilities} @> json_build_array(${
+      sql.lit(capability.name)
+    }) and ${permitted}
+      then ${sql.lit(`"${capability.name}",`)}
+      else '' end`;
+  }
+  return sql`(case when (${items}) = '' then '[]'
+    else '[' || left(${items}, length(${items}) - 1) || ']' end)::json`;
+}
+
+// Builds scalar definitions for the runtime view/table/field whitelists
+// derived from a JSON skill-name array scalar. View/table whitelists are JSON
+// arrays. Field whitelists are either the object shape used by query
+// validation or the array shape used by dynamic UI accessPolicy.
+
+export function defQueryWhitelists<
+  T extends import("std/statements").IStatementsBase,
+>(
+  s: T,
+  capabilities: readonly ReadCapability[],
+  capabilitiesJsonRef: Sql,
+  prefix: string,
+  opts?: {
+    fieldPolicyShape?: "query" | "ui";
+  },
+) {
+  let viewItems: Sql = sql`''`;
+  let tableItems: Sql = sql`''`;
+  let fieldObjectItems: Sql = sql`''`;
+  let fieldArrayItems: Sql = sql`''`;
+  const fieldPolicyShape = opts?.fieldPolicyShape ?? "query";
+  const fieldTables = [
+    ...new Set(
+      capabilities.flatMap((skill) =>
+        (skill.fieldWhitelist ?? []).map((item) => item.table)
+      ),
+    ),
+  ];
+  for (const skill of capabilities) {
+    const views = skill.views ?? [];
+    const tables = skill.tables ?? [];
+    const guard = sql`${capabilitiesJsonRef} @> json_build_array(${
+      sql.lit(skill.name)
+    })`;
+    if (views.length > 0) {
+      const lit = sql.lit(views.map((v) => `"${v}",`).join(""));
+      viewItems =
+        sql`${viewItems} || case when ${guard} then ${lit} else '' end`;
+    }
+    if (tables.length > 0) {
+      const lit = sql.lit(tables.map((t) => `"${t}",`).join(""));
+      tableItems =
+        sql`${tableItems} || case when ${guard} then ${lit} else '' end`;
+    }
+  }
+  for (const [idx, table] of fieldTables.entries()) {
+    // A capability that lists this table in `tables` but does NOT field-restrict
+    // it grants the table WHOLESALE. When any such capability is held, the table
+    // is whole-access, so its field whitelist must be suppressed — a column
+    // restriction from one capability must not override a wholesale grant from
+    // another (the platform caps a table to its field whitelist the moment the
+    // table appears there at all, so an un-suppressed entry would silently
+    // shrink the wholesale grant). The table stays visible via that capability's
+    // entry in the table whitelist.
+    const wholesaleCaps = capabilities.filter(
+      (skill) =>
+        (skill.tables ?? []).includes(table) &&
+        !(skill.fieldWhitelist ?? []).some((item) => item.table === table),
+    );
+    let fieldItems: Sql = sql`''`;
+    for (const skill of capabilities) {
+      const fields = [
+        ...new Set(
+          (skill.fieldWhitelist ?? [])
+            .filter((item) => item.table === table)
+            .flatMap((item) => item.fields),
+        ),
+      ];
+      if (fields.length === 0) continue;
+      const guard = sql`${capabilitiesJsonRef} @> json_build_array(${
+        sql.lit(skill.name)
+      })`;
+      const lit = sql.lit(fields.map((field) => `"${field}",`).join(""));
+      fieldItems =
+        sql`${fieldItems} || case when ${guard} then ${lit} else '' end`;
+    }
+    if (wholesaleCaps.length > 0) {
+      const wholesaleGuard = wholesaleCaps
+        .map((skill) =>
+          sql`${capabilitiesJsonRef} @> json_build_array(${
+            sql.lit(skill.name)
+          })`
+        )
+        .reduce((a, b) => sql`${a} or ${b}`);
+      fieldItems =
+        sql`case when ${wholesaleGuard} then '' else (${fieldItems}) end`;
+    }
+    const fieldItemsName = `${prefix}_field_items_${idx}`;
+    s.defScalar(fieldItemsName, fieldItems);
+    if (fieldPolicyShape === "query") {
+      const objectPrefix = sql.lit(`${JSON.stringify(table)}:[`);
+      fieldObjectItems = sql`${fieldObjectItems} || case when ${
+        sql.ref(fieldItemsName)
+      } = ''
+          then ''
+          else ${objectPrefix} || left(${sql.ref(fieldItemsName)},
+            length(${sql.ref(fieldItemsName)}) - 1) || '],'
+          end`;
+    } else {
+      const arrayPrefix = sql.lit(
+        `{"table":${JSON.stringify(table)},"fields":[`,
+      );
+      fieldArrayItems = sql`${fieldArrayItems} || case when ${
+        sql.ref(fieldItemsName)
+      } = ''
+          then ''
+          else ${arrayPrefix} || left(${sql.ref(fieldItemsName)},
+            length(${sql.ref(fieldItemsName)}) - 1) || ']},'
+          end`;
+    }
+  }
+  // The item strings are '"a","b",…,' with a trailing comma — strip it with
+  // left() (Yolm's rtrim is single-argument).
+  s.defScalar(`${prefix}_view_items`, viewItems);
+  s.defScalar(
+    `${prefix}_view_whitelist`,
+    sql`case when ${sql.ref(`${prefix}_view_items`)} = '' then '[]'
+      else '[' || left(${sql.ref(`${prefix}_view_items`)},
+        length(${sql.ref(`${prefix}_view_items`)}) - 1) || ']' end`,
+  );
+  s.defScalar(`${prefix}_table_items`, tableItems);
+  s.defScalar(
+    `${prefix}_table_whitelist`,
+    sql`case when ${sql.ref(`${prefix}_table_items`)} = '' then '[]'
+      else '[' || left(${sql.ref(`${prefix}_table_items`)},
+        length(${sql.ref(`${prefix}_table_items`)}) - 1) || ']' end`,
+  );
+  if (fieldPolicyShape === "query") {
+    s.defScalar(`${prefix}_field_object_items`, fieldObjectItems);
+    s.defScalar(
+      `${prefix}_field_whitelist`,
+      sql`case when ${sql.ref(`${prefix}_field_object_items`)} = '' then '{}'
+        else '{' || left(${sql.ref(`${prefix}_field_object_items`)},
+          length(${sql.ref(`${prefix}_field_object_items`)}) - 1) || '}' end`,
+    );
+  } else {
+    s.defScalar(`${prefix}_field_array_items`, fieldArrayItems);
+    s.defScalar(
+      `${prefix}_ui_field_whitelist`,
+      sql`case when ${sql.ref(`${prefix}_field_array_items`)} = '' then '[]'
+        else '[' || left(${sql.ref(`${prefix}_field_array_items`)},
+          length(${sql.ref(`${prefix}_field_array_items`)}) - 1) || ']' end`,
+    );
+  }
+}

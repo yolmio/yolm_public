@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "dependencies": {
+    "@shikijs/engine-javascript": "^3.22.0",
+    "jszip": "^3.10.2",
+    "shiki": "^3.22.0"
+  }
+}

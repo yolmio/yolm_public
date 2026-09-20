@@ -1,0 +1,10 @@
+# Yolm
+
+> Public developer documentation, packages, and browser JS modules.
+
+- [Browser JS modules](js_modules/README.md)
+- [Agent guidance](AGENTS.md)
+- [Documentation index](docs_index.json)
+- [Content manifest](public_manifest.json)
+- [Overview](docs/concepts/overview.md)
+- [Public MCP gateway](https://mcp.yolm.ai/mcp): semantic search and authorized live tenant operations.

@@ -1,0 +1,1 @@
+../../node_modules/pdfjs-dist/wasm/jbig2_nowasm_fallback.js

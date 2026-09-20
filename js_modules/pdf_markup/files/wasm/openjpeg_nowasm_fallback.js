@@ -1,0 +1,1 @@
+../../node_modules/pdfjs-dist/wasm/openjpeg_nowasm_fallback.js

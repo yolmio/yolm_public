@@ -1,0 +1,989 @@
+{
+  "schemaVersion": 1,
+  "documents": [
+    {
+      "path": "docs/ai/forge_api.md",
+      "title": "Forge API skill"
+    },
+    {
+      "path": "docs/ai/forge_artifacts.md",
+      "title": "Forge artifacts skill"
+    },
+    {
+      "path": "docs/ai/forge_blocks.md",
+      "title": "Forge blocks skill"
+    },
+    {
+      "path": "docs/ai/forge_code.md",
+      "title": "Forge code skill"
+    },
+    {
+      "path": "docs/ai/forge_edge.md",
+      "title": "Forge Edge commissioning"
+    },
+    {
+      "path": "docs/ai/forge_investigate.md",
+      "title": "Forge investigation skill"
+    },
+    {
+      "path": "docs/ai/forge_operations.md",
+      "title": "Operational reads"
+    },
+    {
+      "path": "docs/ai/forge_preview.md",
+      "title": "Forge preview skill"
+    },
+    {
+      "path": "docs/ai/forge_procedures.md",
+      "title": "Forge procedures skill"
+    },
+    {
+      "path": "docs/ai/forge_queries.md",
+      "title": "Forge query skill"
+    },
+    {
+      "path": "docs/ai/forge_schema.md",
+      "title": "Forge schema skill"
+    },
+    {
+      "path": "docs/ai/forge_session_history.md",
+      "title": "Session history and review links"
+    },
+    {
+      "path": "docs/ai/forge_testing.md",
+      "title": "Forge testing skill"
+    },
+    {
+      "path": "docs/ai/forge_transfers.md",
+      "title": "Forge file transfers"
+    },
+    {
+      "path": "docs/ai/forge_ui.md",
+      "title": "Forge UI skill"
+    },
+    {
+      "path": "docs/ai/forge_versions.md",
+      "title": "Forge versions skill"
+    },
+    {
+      "path": "docs/ai/issues.md",
+      "title": "Forge issues guide"
+    },
+    {
+      "path": "docs/ai/recording_demos.md",
+      "title": "Recording Polished Demo Videos"
+    },
+    {
+      "path": "docs/ai/review.md",
+      "title": "AI Code Review"
+    },
+    {
+      "path": "docs/ai/system_review.md",
+      "title": "Deployed System Review"
+    },
+    {
+      "path": "docs/api/authentication.md",
+      "title": "API Authentication"
+    },
+    {
+      "path": "docs/api/external_interfaces.md",
+      "title": "External Interfaces"
+    },
+    {
+      "path": "docs/api/files_blobs_exports.md",
+      "title": "Files, Blobs, And Exports"
+    },
+    {
+      "path": "docs/api/overview.md",
+      "title": "API Overview"
+    },
+    {
+      "path": "docs/blocks/accounting.md",
+      "title": "Accounting Block"
+    },
+    {
+      "path": "docs/blocks/ai_providers.md",
+      "title": "AI Providers Block"
+    },
+    {
+      "path": "docs/blocks/api_keys.md",
+      "title": "API Keys Block"
+    },
+    {
+      "path": "docs/blocks/auth.md",
+      "title": "AuthBlock"
+    },
+    {
+      "path": "docs/blocks/availability.md",
+      "title": "Availability Block"
+    },
+    {
+      "path": "docs/blocks/bulk_email_delivery.md",
+      "title": "Bulk Email Delivery Block"
+    },
+    {
+      "path": "docs/blocks/bulk_email_delivery_operations.md",
+      "title": "Bulk email operations and recovery"
+    },
+    {
+      "path": "docs/blocks/calendar_integrations.md",
+      "title": "Calendar Integrations"
+    },
+    {
+      "path": "docs/blocks/comments.md",
+      "title": "CommentsBlock"
+    },
+    {
+      "path": "docs/blocks/connected_account_email_delivery.md",
+      "title": "Connected Account Email Delivery Block"
+    },
+    {
+      "path": "docs/blocks/crm.md",
+      "title": "CrmBlock"
+    },
+    {
+      "path": "docs/blocks/daily_log.md",
+      "title": "Daily Log Block"
+    },
+    {
+      "path": "docs/blocks/dashboard.md",
+      "title": "Dashboards"
+    },
+    {
+      "path": "docs/blocks/dev_log.md",
+      "title": "Dev Log Block"
+    },
+    {
+      "path": "docs/blocks/drive.md",
+      "title": "Drive Block"
+    },
+    {
+      "path": "docs/blocks/email_integrations.md",
+      "title": "Email Integrations"
+    },
+    {
+      "path": "docs/blocks/email_templates.md",
+      "title": "Email Templates Block"
+    },
+    {
+      "path": "docs/blocks/equipment.md",
+      "title": "Equipment Block"
+    },
+    {
+      "path": "docs/blocks/events.md",
+      "title": "Events Block"
+    },
+    {
+      "path": "docs/blocks/glossary.md",
+      "title": "Glossary Block"
+    },
+    {
+      "path": "docs/blocks/gmail_campaign.md",
+      "title": "Gmail Campaign Provider"
+    },
+    {
+      "path": "docs/blocks/kanban_projects.md",
+      "title": "Kanban Projects Block"
+    },
+    {
+      "path": "docs/blocks/locations.md",
+      "title": "Locations Block"
+    },
+    {
+      "path": "docs/blocks/maintenance.md",
+      "title": "Maintenance Block"
+    },
+    {
+      "path": "docs/blocks/manual_stats.md",
+      "title": "Manual Stats Block"
+    },
+    {
+      "path": "docs/blocks/marketing_email_campaign.md",
+      "title": "Marketing Email Campaign Block"
+    },
+    {
+      "path": "docs/blocks/mcp.md",
+      "title": "Tenant MCP connections"
+    },
+    {
+      "path": "docs/blocks/meeting_integrations.md",
+      "title": "Meeting Integrations"
+    },
+    {
+      "path": "docs/blocks/outgoing_webhooks.md",
+      "title": "Outgoing Webhooks Block"
+    },
+    {
+      "path": "docs/blocks/postmark_campaign.md",
+      "title": "Postmark Campaign Provider"
+    },
+    {
+      "path": "docs/blocks/printers.md",
+      "title": "PrintersBlock"
+    },
+    {
+      "path": "docs/blocks/scheduling.md",
+      "title": "Scheduling Block"
+    },
+    {
+      "path": "docs/blocks/solution_blocks.md",
+      "title": "Solution Blocks"
+    },
+    {
+      "path": "docs/blocks/spark.md",
+      "title": "SparkBlock"
+    },
+    {
+      "path": "docs/blocks/table_blocks/address.md",
+      "title": "Address Table Block"
+    },
+    {
+      "path": "docs/blocks/table_blocks/attachments.md",
+      "title": "Attachments Table Block"
+    },
+    {
+      "path": "docs/blocks/table_blocks/kanban_project.md",
+      "title": "Kanban Project Table Block"
+    },
+    {
+      "path": "docs/blocks/table_blocks/notes_list.md",
+      "title": "Notes List Table Block"
+    },
+    {
+      "path": "docs/blocks/table_blocks/synonyms.md",
+      "title": "Synonyms Table Block"
+    },
+    {
+      "path": "docs/blocks/table_blocks/translations.md",
+      "title": "Translations Table Block"
+    },
+    {
+      "path": "docs/blocks/time_tracking.md",
+      "title": "Time Tracking Block"
+    },
+    {
+      "path": "docs/blocks/training.md",
+      "title": "Training Block"
+    },
+    {
+      "path": "docs/blocks/user_notifications.md",
+      "title": "UserNotificationsBlock"
+    },
+    {
+      "path": "docs/blocks/workforce.md",
+      "title": "Workforce Block"
+    },
+    {
+      "path": "docs/coding/imports.md",
+      "title": "Import Patterns"
+    },
+    {
+      "path": "docs/coding/index.md",
+      "title": "Coding Conventions"
+    },
+    {
+      "path": "docs/coding/solution_principles.md",
+      "title": "Solution Development Principles"
+    },
+    {
+      "path": "docs/concepts/apps.md",
+      "title": "Apps"
+    },
+    {
+      "path": "docs/concepts/auth_multi_user.md",
+      "title": "Authentication & Authorization"
+    },
+    {
+      "path": "docs/concepts/benchmarks.md",
+      "title": "Benchmarks"
+    },
+    {
+      "path": "docs/concepts/blocks.md",
+      "title": "Blocks"
+    },
+    {
+      "path": "docs/concepts/common_patterns.md",
+      "title": "Common Patterns"
+    },
+    {
+      "path": "docs/concepts/decision_tables.md",
+      "title": "Decision tables"
+    },
+    {
+      "path": "docs/concepts/differences_from_react.md",
+      "title": "Differences from React"
+    },
+    {
+      "path": "docs/concepts/edges.md",
+      "title": "Edges"
+    },
+    {
+      "path": "docs/concepts/email_templates.md",
+      "title": "Email Templates with MJML"
+    },
+    {
+      "path": "docs/concepts/enum_functions.md",
+      "title": "Enum Functions"
+    },
+    {
+      "path": "docs/concepts/enums.md",
+      "title": "Enums"
+    },
+    {
+      "path": "docs/concepts/execution_phases.md",
+      "title": "Execution Phases"
+    },
+    {
+      "path": "docs/concepts/operational_systems.md",
+      "title": "Operational System Architecture"
+    },
+    {
+      "path": "docs/concepts/outbox.md",
+      "title": "Outbox tables & reactors"
+    },
+    {
+      "path": "docs/concepts/overview.md",
+      "title": "Yolm Overview"
+    },
+    {
+      "path": "docs/concepts/pipelines.md",
+      "title": "Pipelines"
+    },
+    {
+      "path": "docs/concepts/reactors.md",
+      "title": "Reactors"
+    },
+    {
+      "path": "docs/concepts/scheduled_jobs.md",
+      "title": "Scheduled Jobs"
+    },
+    {
+      "path": "docs/concepts/security_headers.md",
+      "title": "Security headers"
+    },
+    {
+      "path": "docs/concepts/service_integrations.md",
+      "title": "Service Integrations"
+    },
+    {
+      "path": "docs/concepts/static_webhooks.md",
+      "title": "Static webhooks"
+    },
+    {
+      "path": "docs/concepts/stored_procedures.md",
+      "title": "Stored procedures"
+    },
+    {
+      "path": "docs/concepts/transforms.md",
+      "title": "Transforms"
+    },
+    {
+      "path": "docs/concepts/utility_functions.md",
+      "title": "Utility Functions"
+    },
+    {
+      "path": "docs/concepts/yom.md",
+      "title": "YOM (Yolm Object Model)"
+    },
+    {
+      "path": "docs/database/advanced_table_features.md",
+      "title": "Advanced Table Features"
+    },
+    {
+      "path": "docs/database/best_practices.md",
+      "title": "Database Design Best Practices"
+    },
+    {
+      "path": "docs/database/custom_form_controls.md",
+      "title": "Custom Form Controls"
+    },
+    {
+      "path": "docs/database/duration_types.md",
+      "title": "Duration Types"
+    },
+    {
+      "path": "docs/database/field_groups.md",
+      "title": "Field Groups"
+    },
+    {
+      "path": "docs/database/field_types.md",
+      "title": "Database Field Types"
+    },
+    {
+      "path": "docs/database/foreign_keys.md",
+      "title": "Foreign Keys"
+    },
+    {
+      "path": "docs/database/money_and_accounting.md",
+      "title": "Money Types and Accounting Patterns"
+    },
+    {
+      "path": "docs/database/overview.md",
+      "title": "Database Definition"
+    },
+    {
+      "path": "docs/database/sample_data.md",
+      "title": "Sample data configuration"
+    },
+    {
+      "path": "docs/database/scalar_functions.md",
+      "title": "Scalar Functions"
+    },
+    {
+      "path": "docs/database/search_config.md",
+      "title": "Search Configuration"
+    },
+    {
+      "path": "docs/database/table_controls.md",
+      "title": "Table form controls"
+    },
+    {
+      "path": "docs/database/virtual_fields.md",
+      "title": "Virtual fields, TTL, and ordering"
+    },
+    {
+      "path": "docs/procedures/base_statements.md",
+      "title": "Base Statements"
+    },
+    {
+      "path": "docs/procedures/cheatsheet.md",
+      "title": "Procedure Statements Cheatsheet"
+    },
+    {
+      "path": "docs/procedures/declaration_liveness.md",
+      "title": "Declaration Liveness Validation"
+    },
+    {
+      "path": "docs/procedures/dom_statements.md",
+      "title": "DOM Statements"
+    },
+    {
+      "path": "docs/procedures/lexical_scoping.md",
+      "title": "Procedure Lexical Scoping"
+    },
+    {
+      "path": "docs/procedures/overview.md",
+      "title": "Procedures Overview"
+    },
+    {
+      "path": "docs/procedures/patterns.md",
+      "title": "Procedure Patterns"
+    },
+    {
+      "path": "docs/procedures/server_statements.md",
+      "title": "Server Statements"
+    },
+    {
+      "path": "docs/procedures/statements_reference.md",
+      "title": "Statement Builder Type Reference"
+    },
+    {
+      "path": "docs/readme.md",
+      "title": "Yolm Documentation Contract"
+    },
+    {
+      "path": "docs/services/ai.md",
+      "title": "AI Services"
+    },
+    {
+      "path": "docs/services/brevo.md",
+      "title": "Brevo Service"
+    },
+    {
+      "path": "docs/services/calendly.md",
+      "title": "Calendly Service"
+    },
+    {
+      "path": "docs/services/google.md",
+      "title": "Google Services"
+    },
+    {
+      "path": "docs/services/http.md",
+      "title": "HTTP Service Helpers"
+    },
+    {
+      "path": "docs/services/hubspot.md",
+      "title": "HubSpot Service"
+    },
+    {
+      "path": "docs/services/microsoft.md",
+      "title": "Microsoft Services"
+    },
+    {
+      "path": "docs/services/postmark.md",
+      "title": "Postmark Email Service"
+    },
+    {
+      "path": "docs/services/postmark_webhooks.md",
+      "title": "Postmark Webhooks"
+    },
+    {
+      "path": "docs/services/quickbooks_iif.md",
+      "title": "QuickBooks IIF Helpers"
+    },
+    {
+      "path": "docs/services/sendgrid.md",
+      "title": "SendGrid Service"
+    },
+    {
+      "path": "docs/services/soap.md",
+      "title": "SOAP Service Helpers"
+    },
+    {
+      "path": "docs/services/solution_services.md",
+      "title": "Solution Service Integrations"
+    },
+    {
+      "path": "docs/services/twilio.md",
+      "title": "Twilio Service"
+    },
+    {
+      "path": "docs/services/zoom.md",
+      "title": "Zoom Services"
+    },
+    {
+      "path": "docs/sql/aggregate_functions.md",
+      "title": "Aggregate Functions"
+    },
+    {
+      "path": "docs/sql/basic_operations.md",
+      "title": "SQL Basic Operations"
+    },
+    {
+      "path": "docs/sql/crypto_functions.md",
+      "title": "Crypto Functions"
+    },
+    {
+      "path": "docs/sql/date_functions.md",
+      "title": "Date and Time Functions"
+    },
+    {
+      "path": "docs/sql/expressions.md",
+      "title": "SQL Expressions"
+    },
+    {
+      "path": "docs/sql/global_functions.md",
+      "title": "Global SQL Functions"
+    },
+    {
+      "path": "docs/sql/interval_type.md",
+      "title": "Interval Type"
+    },
+    {
+      "path": "docs/sql/joins.md",
+      "title": "SQL Joins"
+    },
+    {
+      "path": "docs/sql/json_functions.md",
+      "title": "JSON Functions"
+    },
+    {
+      "path": "docs/sql/json_utils.md",
+      "title": "JSON Utilities"
+    },
+    {
+      "path": "docs/sql/math_functions.md",
+      "title": "Mathematical Functions"
+    },
+    {
+      "path": "docs/sql/overview.md",
+      "title": "Yolm SQL Overview"
+    },
+    {
+      "path": "docs/sql/query_planning.md",
+      "title": "Yolm SQL Query Authoring Notes"
+    },
+    {
+      "path": "docs/sql/random_functions.md",
+      "title": "Random Functions"
+    },
+    {
+      "path": "docs/sql/regex_functions.md",
+      "title": "Regular Expression Functions"
+    },
+    {
+      "path": "docs/sql/sql_tagged_templates.md",
+      "title": "SQL Tagged Templates"
+    },
+    {
+      "path": "docs/sql/string_functions.md",
+      "title": "String Functions"
+    },
+    {
+      "path": "docs/sql/subqueries_ctes.md",
+      "title": "Subqueries and CTEs"
+    },
+    {
+      "path": "docs/sql/table_functions.md",
+      "title": "Table Functions"
+    },
+    {
+      "path": "docs/sql/transaction_queries.md",
+      "title": "Transaction Queries"
+    },
+    {
+      "path": "docs/sql/utility_functions.md",
+      "title": "Utility Functions"
+    },
+    {
+      "path": "docs/sql/window_functions.md",
+      "title": "Window Functions"
+    },
+    {
+      "path": "docs/testing/api_testing.md",
+      "title": "API Testing"
+    },
+    {
+      "path": "docs/testing/assertions.md",
+      "title": "Assertions & Test Utilities"
+    },
+    {
+      "path": "docs/testing/overview.md",
+      "title": "Testing Overview"
+    },
+    {
+      "path": "docs/testing/test_statements.md",
+      "title": "Test Statements API"
+    },
+    {
+      "path": "docs/testing/test_utilities.md",
+      "title": "Test Utilities And Data"
+    },
+    {
+      "path": "docs/ui/action_button.md",
+      "title": "ActionButton"
+    },
+    {
+      "path": "docs/ui/add_to_calendar.md",
+      "title": "AddToCalendar"
+    },
+    {
+      "path": "docs/ui/alert.md",
+      "title": "Alert"
+    },
+    {
+      "path": "docs/ui/auto_dialogs.md",
+      "title": "Auto Insert and Update Dialogs"
+    },
+    {
+      "path": "docs/ui/autocomplete.md",
+      "title": "Autocomplete & Select Components"
+    },
+    {
+      "path": "docs/ui/avatar.md",
+      "title": "Avatar and Badge"
+    },
+    {
+      "path": "docs/ui/blocks_reference.md",
+      "title": "Blocks Reference"
+    },
+    {
+      "path": "docs/ui/breadcrumbs.md",
+      "title": "Breadcrumbs and Link"
+    },
+    {
+      "path": "docs/ui/bulk_merge_import_page.md",
+      "title": "BulkMergeImportPage"
+    },
+    {
+      "path": "docs/ui/button.md",
+      "title": "Button"
+    },
+    {
+      "path": "docs/ui/card.md",
+      "title": "Card"
+    },
+    {
+      "path": "docs/ui/charts.md",
+      "title": "Charts"
+    },
+    {
+      "path": "docs/ui/checkbox.md",
+      "title": "Checkbox & Switch"
+    },
+    {
+      "path": "docs/ui/chip.md",
+      "title": "Chip"
+    },
+    {
+      "path": "docs/ui/colors.md",
+      "title": "Color Palette"
+    },
+    {
+      "path": "docs/ui/control_flow.md",
+      "title": "Control Flow Components"
+    },
+    {
+      "path": "docs/ui/country_select.md",
+      "title": "CountrySelect"
+    },
+    {
+      "path": "docs/ui/dashboards.md",
+      "title": "Dashboards"
+    },
+    {
+      "path": "docs/ui/data.md",
+      "title": "Data Component"
+    },
+    {
+      "path": "docs/ui/data_table.md",
+      "title": "DataTable"
+    },
+    {
+      "path": "docs/ui/data_vs_form.md",
+      "title": "Data, Form, and ActionButton"
+    },
+    {
+      "path": "docs/ui/datagrid.md",
+      "title": "Datagrid"
+    },
+    {
+      "path": "docs/ui/datagrid_virtual_columns.md",
+      "title": "Datagrid Virtual Columns"
+    },
+    {
+      "path": "docs/ui/date_range.md",
+      "title": "Date Range"
+    },
+    {
+      "path": "docs/ui/db_management.md",
+      "title": "DB Management Page"
+    },
+    {
+      "path": "docs/ui/divider.md",
+      "title": "Divider"
+    },
+    {
+      "path": "docs/ui/drawer.md",
+      "title": "Drawer"
+    },
+    {
+      "path": "docs/ui/duration_input.md",
+      "title": "Duration Inputs"
+    },
+    {
+      "path": "docs/ui/dynamic_styling.md",
+      "title": "Dynamic Styling"
+    },
+    {
+      "path": "docs/ui/event_handlers.md",
+      "title": "Event Handlers"
+    },
+    {
+      "path": "docs/ui/field_form_control.md",
+      "title": "FieldFormControl"
+    },
+    {
+      "path": "docs/ui/form.md",
+      "title": "Form Component"
+    },
+    {
+      "path": "docs/ui/form_advanced.md",
+      "title": "Advanced Form Patterns"
+    },
+    {
+      "path": "docs/ui/form_control.md",
+      "title": "FormControl"
+    },
+    {
+      "path": "docs/ui/global_nodes_states.md",
+      "title": "Global nodes & states"
+    },
+    {
+      "path": "docs/ui/icons.md",
+      "title": "Icons"
+    },
+    {
+      "path": "docs/ui/ictx.md",
+      "title": "ICtx — In-Tree Component Context"
+    },
+    {
+      "path": "docs/ui/images.md",
+      "title": "Image components"
+    },
+    {
+      "path": "docs/ui/input.md",
+      "title": "Input"
+    },
+    {
+      "path": "docs/ui/internationalization.md",
+      "title": "Internationalization (i18n)"
+    },
+    {
+      "path": "docs/ui/js_modules.md",
+      "title": "JS Modules"
+    },
+    {
+      "path": "docs/ui/kanban.md",
+      "title": "Kanban"
+    },
+    {
+      "path": "docs/ui/list.md",
+      "title": "List"
+    },
+    {
+      "path": "docs/ui/mobile_capture_scanning.md",
+      "title": "Mobile Capture And Scanning"
+    },
+    {
+      "path": "docs/ui/modal.md",
+      "title": "Modal / ModalDialog"
+    },
+    {
+      "path": "docs/ui/multi_select_dropdown.md",
+      "title": "MultiSelectDropdown"
+    },
+    {
+      "path": "docs/ui/navbar.md",
+      "title": "Navbar"
+    },
+    {
+      "path": "docs/ui/one_time_password.md",
+      "title": "OneTimePasswordInput"
+    },
+    {
+      "path": "docs/ui/operational_ui.md",
+      "title": "Operational UI Components"
+    },
+    {
+      "path": "docs/ui/overview.md",
+      "title": "UI Overview"
+    },
+    {
+      "path": "docs/ui/page_header.md",
+      "title": "PageHeader"
+    },
+    {
+      "path": "docs/ui/page_templates.md",
+      "title": "Solution Page Templates"
+    },
+    {
+      "path": "docs/ui/pdf_markup.md",
+      "title": "PdfMarkup"
+    },
+    {
+      "path": "docs/ui/progress.md",
+      "title": "Progress Indicators"
+    },
+    {
+      "path": "docs/ui/progressive_web_apps.md",
+      "title": "Progressive Web Apps (PWA)"
+    },
+    {
+      "path": "docs/ui/radio.md",
+      "title": "Radio & RadioGroup"
+    },
+    {
+      "path": "docs/ui/record_grid.md",
+      "title": "DatagridPage, RecordPage & DataTablePage"
+    },
+    {
+      "path": "docs/ui/record_page.md",
+      "title": "RecordPage"
+    },
+    {
+      "path": "docs/ui/reporting.md",
+      "title": "Reporting And Dashboards"
+    },
+    {
+      "path": "docs/ui/reusable_helpers.md",
+      "title": "Reusable UI Helpers"
+    },
+    {
+      "path": "docs/ui/routing.md",
+      "title": "Routing"
+    },
+    {
+      "path": "docs/ui/search_dialogs.md",
+      "title": "Search Dialogs"
+    },
+    {
+      "path": "docs/ui/select.md",
+      "title": "Select"
+    },
+    {
+      "path": "docs/ui/select_timezone.md",
+      "title": "Select Timezone"
+    },
+    {
+      "path": "docs/ui/selectable_table.md",
+      "title": "DataTable Selection & DataGrid"
+    },
+    {
+      "path": "docs/ui/sheet.md",
+      "title": "Sheet"
+    },
+    {
+      "path": "docs/ui/sidebar.md",
+      "title": "Sidebar"
+    },
+    {
+      "path": "docs/ui/simple_pivot_table.md",
+      "title": "SimplePivotTable"
+    },
+    {
+      "path": "docs/ui/site_pages.md",
+      "title": "Site pages"
+    },
+    {
+      "path": "docs/ui/slider.md",
+      "title": "Slider"
+    },
+    {
+      "path": "docs/ui/snackbar.md",
+      "title": "Snackbar"
+    },
+    {
+      "path": "docs/ui/solution_components.md",
+      "title": "Solution UI Helper Components"
+    },
+    {
+      "path": "docs/ui/static_table_card.md",
+      "title": "StaticTableCard"
+    },
+    {
+      "path": "docs/ui/style_utils.md",
+      "title": "Style Utilities"
+    },
+    {
+      "path": "docs/ui/styling.md",
+      "title": "Styling and Themes"
+    },
+    {
+      "path": "docs/ui/styling_guide.md",
+      "title": "Styling & Layout"
+    },
+    {
+      "path": "docs/ui/table.md",
+      "title": "Table"
+    },
+    {
+      "path": "docs/ui/tabs.md",
+      "title": "Tabs"
+    },
+    {
+      "path": "docs/ui/templating.md",
+      "title": "Yolm Template Language (YTL)"
+    },
+    {
+      "path": "docs/ui/textarea.md",
+      "title": "Textarea"
+    },
+    {
+      "path": "docs/ui/timeline_pattern.md",
+      "title": "Timeline"
+    },
+    {
+      "path": "docs/ui/tooltip.md",
+      "title": "Tooltip"
+    },
+    {
+      "path": "docs/ui/typography.md",
+      "title": "Typography"
+    },
+    {
+      "path": "docs/ui/website_styling.md",
+      "title": "Website Styling in Yolm"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+../node_modules/pdfjs-dist/build/pdf.min.mjs

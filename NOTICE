@@ -1,0 +1,18 @@
+Yolm developer sources
+
+Yolm-authored material is distributed under Apache-2.0.
+Third-party material retains its original rights and license terms.
+
+Material icon designs in packages/components/material-icons are by Google,
+distributed under Apache-2.0: https://github.com/google/material-design-icons
+The designs are represented as JSON for use by Yolm components.
+
+The adapted DRACOLoader in js_modules/glb_viewer/vendor is from three.js.
+Copyright 2010-2026 three.js authors. The upstream MIT license is retained
+next to that source file. Yolm adaptations supply decoder URLs explicitly
+and support classic-IIFE bundling.
+
+Third-party names and logos identify their respective products. The Yolm
+license does not grant rights to third-party trademarks.
+Dependencies referenced by package manifests are not bundled unless stated
+above and retain their respective upstream licenses.
