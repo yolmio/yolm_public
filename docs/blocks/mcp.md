@@ -10,9 +10,38 @@ tags:
 
 # Tenant MCP connections
 
-Each Forge instance and each system hosting Spark owns its connections. Add
-separate MCP servers in the client for separate systems. There is no central
-account, system picker, connection database, or Connect site.
+Each Forge instance and each system hosting Spark owns its grants. Clients can
+connect through the public gateway or directly to a tenant endpoint.
+
+## Public gateway
+
+The remote Streamable HTTP endpoint is `https://mcp.yolm.ai/mcp`. Browser OAuth
+connects the client, and each attached system requires its own tenant sign-in
+and consent. A direct tenant connection does not grant gateway access.
+
+`yolm_list_systems` lists attachments; `yolm_attach_system` returns a consent URL
+for another system. `forge_inspect` and `spark_inspect` return API references and
+available capabilities. Routed calls take a `domain`. Tenant execution tools
+are prefixed `forge_` or `spark_`; `execRead` becomes `forge_exec_read` or
+`spark_exec_read`. For example:
+
+```json
+{
+  "name": "forge_exec_read",
+  "arguments": {
+    "domain": "example.yolmforge.ai",
+    "code": "text(await searchDocs({query: 'forms'}));"
+  }
+}
+```
+
+[Public documentation and packages](https://github.com/yolmio/yolm_public)
+can be read or cloned without a Yolm login. Documentation search stays available
+through Forge MCP; tenant-specific schemas, source, references and business data
+require authorized MCP access. The public mirror may lag the deployed version.
+Setup and privacy information: <https://yolm.ai/mcp>.
+
+## Direct tenant endpoints
 
 - Forge: `/api/forge/mcp`, setup and consent at `/settings/connected-assistants`.
 - Spark: `/api/spark/mcp`, setup and consent at `<Spark basePath>/connected-assistants`.
@@ -26,7 +55,7 @@ select the external model.
 
 ## Authentication and persistence
 
-Shared code in `blocks/mcp` installs two tenant-owned tables: `mcp_clients`
+For direct tenant OAuth, shared code in `blocks/mcp` installs two tenant-owned tables: `mcp_clients`
 contains registered client metadata; `mcp_connections` progresses from pending
 consent through authorization-code exchange to a live connection. It stores the
 local user, access, capability grant, and hashes of opaque credentials. No
@@ -57,8 +86,9 @@ new consented connection.
 
 MCP transport is stateless: no selected system or session in transport memory,
 no SSE stream or MCP session ID. OAuth grants and action receipts are durable
-application state. Scripts and chat output are not mirrored into native agent
-records. An execution may complete earlier operations before a later failure;
+application state. The client conversation is not copied automatically. Spark
+write executions record submitted code and execution events; explicitly saved
+work, actions and notes persist in the tenant. An execution may complete earlier operations before a later failure;
 a timeout does not mean nothing happened.
 
 ## Access profiles
@@ -76,8 +106,11 @@ implicitly. Revoking a permission also blocks existing grants on subsequent
 calls and action execution.
 
 Both surfaces expose `list_sessions` and `execRead` to read grants. Write grants
-add `create_session` and `exec`. `execRead` has `readOnlyHint: true` and a closed
-execution environment. These annotations are backed by a separate tool set and checks at tool
+add `create_session` and `exec`. `execRead` has `readOnlyHint: true`.
+Session listing and creation are closed-world operations. Forge read execution
+is bounded to tenant resources; Spark read functions may query external
+services, so Spark execution advertises `openWorldHint: true` even for reads.
+Write execution advertises `destructiveHint: true`. These annotations are backed by checks at tool
 execution boundaries. Mutating tools reject read-only execution before running
 their procedures; query and file tools retain their existing input restrictions.
 Temporary query processing and binary scratch storage remain available.
@@ -106,7 +139,9 @@ to the live version. Supplying a version ID resolves its owning session.
 `createArtifact`, `listArtifacts`, `showArtifact`, `showPreview`, and `recordDemo`
 reuse the native session artifact and timeline implementations. Externally
 created artifacts carry an external source; no synthetic Forge agent is needed.
-Initialization shares native Forge guidance and reads that system's references.
+Initialization returns an API reference and the system's reference-file index.
+It does not inject the native agent persona or the content of
+`references/context.md`. Reference files remain readable as requested task data.
 
 ## Spark, sessions and skills
 
@@ -123,11 +158,13 @@ processing-backed `outputWidth` region renderer requires Act access.
 
 Functions are read-only by the Spark contract and are available in Read and Act
 profiles, subject to capability permissions. Writes belong in actions, which
-are unavailable in Read. Initialization reads AGENTS.md, the
-skill index, permitted capability catalog and governed document index. Load
-selected `Skills/<name>/SKILL.md` and capability documents using `tools.readFile`
-and `tools.readCapability`. Initialization is a snapshot; reread guidance when
-it changes.
+are unavailable in Read. Initialization returns a technical API reference,
+permitted capability catalog and governed document index. It does not inject
+the native agent persona, workspace `AGENTS.md`, or skill-following directives.
+Workspace files remain readable as task data through `tools.listFiles` and
+`tools.readFile`; `tools.readCapability` returns schemas and operation contracts.
+The catalog is an initialization snapshot; runtime permission checks apply to
+every operation. Native Yolm agent guidance is unchanged.
 
 Each action call is a new operation. Actions return `action_id` and status;
 `tools.actionReceipt({receiptId: action_id})` retrieves the outcome. There are
