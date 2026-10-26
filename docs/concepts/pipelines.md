@@ -13,8 +13,8 @@ tags:
 
 Pipelines are designed for **bulk data loading and transformation** in a
 streaming fashion. Stages run in dependency order; set `parallelize: true` on
-a stage when its row work is safe to run in parallel. A pipeline operates over
-rows from Yolm database tables; it does not read CSV or Parquet files directly.
+a stage when its row or batch work is safe to run in parallel. A pipeline
+operates over tables in Yolm databases; it does not read files directly.
 
 They are the primary mechanism for:
 
@@ -24,10 +24,12 @@ They are the primary mechanism for:
 - Handling per-row processing, sequentially by default or in parallel when
   explicitly enabled
 
-If your source data is a CSV or Parquet file, import it into a Yolm database
-first with Studio's database import tools. The pipeline then reads from the
-table created in that source database. See [Forge transfers](../ai/forge_transfers.md)
-for the supported import and export workflow.
+If your source data is in CSV, TSV, JSON Lines, JSON, or Parquet files, import
+it into a Yolm source database first with Studio, Forge, or
+`yolm pipeline import`. The pipeline can then read the imported tables
+directly; it does not require derived files or precomputed batch payloads. See
+[Source imports](source_imports.md) for formats, type rules, and
+`yolm-import.json`, and [Forge transfers](../ai/forge_transfers.md) for uploads.
 
 ## Basic Structure
 
@@ -42,13 +44,9 @@ system.addPipeline({
   name: "import_users",
   setup: (s) => {
     // Optional: Run before import starts
-    s.startTransaction();
-    s.modify(sql`insert into db.import_log (message) values ('Starting import')`);
-    s.commitTransaction();
   },
   stages: [
     {
-      name: "users",
       source: "imports.users",  // Yolm database table: <database>.<table>
       dependencies: [],          // Other stages this depends on
       process: (s) => {
@@ -62,9 +60,6 @@ system.addPipeline({
   ],
   finalize: (s) => {
     // Optional: Run after import completes
-    s.startTransaction();
-    s.modify(sql`insert into db.import_log (message) values ('Import complete')`);
-    s.commitTransaction();
   },
 });
 ```
@@ -104,6 +99,10 @@ Stages are only needed when the pipeline should process rows from source tables.
 
 Pipeline stages read from Yolm database tables. Use the `source` field to name the source database and table:
 
+Table-backed stages are keyed by their `<database>.<table>` source and cannot
+specify `name`; dependencies refer to that source key. `name` is only for
+query-backed and source-less stages.
+
 ```typescript
 {
   source: "imports.users",  // Format: "<database_name>.<table_name>"
@@ -120,6 +119,68 @@ Pipeline stages read from Yolm database tables. Use the `source` field to name t
 The source database must already exist and contain the table before the pipeline
 runs. For file-based data, use Studio's database import tools to import CSV or
 Parquet into a Yolm database, then point the pipeline at that database table.
+
+### Query sources and set-based batches
+
+Use a read-only query as the source when a stage needs a join, projection,
+aggregate, union, or rows from multiple pinned source databases. Query-backed
+stages require an explicit `name` and `processBatch`. Each invocation receives
+a read-only procedure table called `batch` with the query's output columns.
+The procedure can use set-based SQL and write multiple database tables; one
+invocation is one atomic transaction.
+
+```typescript
+{
+  name: "import_order_fees",
+  source: {
+    query: sql`
+      select orders.external_id, orders.fee, existing.id as order_id
+      from imports.orders orders
+      left join db.orders existing on existing.external_id = orders.external_id
+      where orders.fee <> 0
+    `,
+  },
+  processBatch: (s) => {
+    s.modify(sql`
+      insert into db.order_expenses (order_id, amount)
+      select order_id, fee from batch where order_id is not null
+    `);
+  },
+}
+```
+
+The query runs once against a stable stage-start snapshot. Earlier stage writes
+are visible; writes made by this stage do not enter its remaining source rows.
+Batch size adapts to runtime pressure, and row order and batch composition are
+not guaranteed. Set `parallelize: true` only when independent batches can
+commit in any order. A table source can also use `processBatch`; `process`
+retains the original per-row `record` behavior. Specify exactly one of the two
+processing modes.
+
+Set `keepTogetherBy` to query-output column names when every row with an equal
+key tuple must reach the same `processBatch` invocation:
+
+```typescript
+{
+  name: "import_invoice_items",
+  source: {
+    query: sql`
+      select order_id, case_id, researcher_code, amount
+      from imports.invoice_items
+    `,
+  },
+  keepTogetherBy: ["order_id", "case_id", "researcher_code"],
+  processBatch: (s) => {
+    // All rows for one key tuple are present together in the read-only batch.
+  },
+}
+```
+
+Grouping orders the complete source by those keys, so use it only when
+batch-boundary correctness requires it. A group may grow beyond the adaptive
+row target, but the stage fails rather than splitting a group that exceeds the
+hard memory limit. Grouping does not otherwise make batch order or parallel
+completion order observable.
 
 ### Source schema helpers
 
@@ -157,7 +218,6 @@ system.addPipeline({
   name: "import_orders",
   stages: [
     {
-      name: "customers",
       source: "imports.customers",
       dependencies: [],
       process: (s) => {
@@ -168,13 +228,12 @@ system.addPipeline({
       },
     },
     {
-      name: "orders",
       source: "imports.orders",
-      dependencies: ["customers"],  // Wait for customers first
+      dependencies: ["imports.customers"],  // Wait for customers first
       process: (s) => {
         s.modify(sql`
-          insert into db.orders (id, customer_id, total)
-          values (record.id, record.customer_id, record.total)
+          insert into db.orders (id, customer_id, order_date)
+          values (record.id, record.customer_id, record.order_date)
         `);
       },
     },
@@ -196,15 +255,13 @@ Pipelines can transform data while loading it:
         sku,
         name,
         price,
-        category,
-        created_at
+        category
       )
       values (
         upper(trim(record.sku)),
         trim(record.name),
         cast(record.price as decimal(10,2)),
-        coalesce(record.category, 'uncategorized'),
-        current_timestamp
+        coalesce(record.category, 'uncategorized')
       )
     `);
   },
@@ -213,7 +270,7 @@ Pipelines can transform data while loading it:
 
 ## Handling Duplicates
 
-Use MERGE or conditional logic to handle duplicates:
+Use `merge` or conditional logic to handle duplicates:
 
 ```typescript
 {
@@ -225,10 +282,10 @@ Use MERGE or conditional logic to handle duplicates:
       using (select record.sku as sku, record.name as name, record.price as price) as src
       on db.products.sku = src.sku
       when matched then
-        update set name = src.name, price = src.price, updated_at = current_timestamp
+        update set name = src.name, price = src.price
       when not matched then
-        insert (sku, name, price, created_at)
-        values (src.sku, src.name, src.price, current_timestamp)
+        insert (sku, name, price)
+        values (src.sku, src.name, src.price)
     `);
   },
 }
@@ -241,15 +298,9 @@ Load a complete dataset with related tables:
 ```typescript
 system.addPipeline({
   name: "import_ecommerce_data",
-  setup: (s) => {
-    s.startTransaction();
-    s.modify(sql`delete from db.import_errors`);
-    s.commitTransaction();
-  },
   stages: [
     // Stage 1: Import categories (no dependencies)
     {
-      name: "categories",
       source: "imports.categories",
       dependencies: [],
       process: (s) => {
@@ -261,29 +312,21 @@ system.addPipeline({
     },
     // Stage 2: Import products (depends on categories)
     {
-      name: "products",
       source: "imports.products",
-      dependencies: ["categories"],
+      dependencies: ["imports.categories"],
+      // Skip products whose category was not imported
+      where: sql`exists (select 1 from db.categories where id = record.category_id)`,
       process: (s) => {
-        s.if(sql`exists (select 1 from db.categories where id = record.category_id)`, (s) => {
-          s.modify(sql`
-            insert into db.products (id, name, category_id, price)
-            values (record.id, record.name, record.category_id, record.price)
-          `);
-        });
-        s.else((s) => {
-          s.modify(sql`
-            insert into db.import_errors (source, record_id, error)
-            values ('products', record.id, 'Invalid category_id')
-          `);
-        });
+        s.modify(sql`
+          insert into db.products (id, name, category_id, price)
+          values (record.id, record.name, record.category_id, record.price)
+        `);
       },
     },
     // Stage 3: Import inventory (depends on products)
     {
-      name: "inventory",
       source: "imports.inventory",
-      dependencies: ["products"],
+      dependencies: ["imports.products"],
       process: (s) => {
         s.modify(sql`
           update db.products
@@ -293,65 +336,59 @@ system.addPipeline({
       },
     },
   ],
-  finalize: (s) => {
-    s.startTransaction();
-    s.modify(sql`
-      insert into db.import_log (completed_at, error_count)
-      select current_timestamp, count(*) from db.import_errors
-    `);
-    s.commitTransaction();
-  },
 });
 ```
+
+Do not add import log or import error tables. The source database still holds
+every row, so list skipped rows with a query against it, for example
+`select * from imports.products where category_id not in (select id from imports.categories)`.
+Transaction history records when each imported row was written; see
+[Transaction queries](../sql/transaction_queries.md).
 
 ## Running Pipelines
 
 ### Preparing Source Data
 
 - Pipeline sources are Yolm database tables named as `<database_name>.<table_name>`.
-- CSV and Parquet files can be imported into a Yolm database with Studio's
-  database import tools before running the pipeline. See [Forge transfers](../ai/forge_transfers.md).
+- CSV, TSV, JSON Lines, JSON, and Parquet files are imported into a source
+  database before running the pipeline. See [Source imports](source_imports.md)
+  and [Forge transfers](../ai/forge_transfers.md).
+- Inspect a source database locally with
+  `yolm query --source <database> -q "..."`.
 - Source table columns become fields accessible via `record.<field_name>` in the stage procedure.
 
 ## Error Handling
 
-Handle errors within the process procedure:
+Validate within the process procedure. Fail the stage with a clear message
+when a row cannot be imported correctly, rather than silently dropping it or
+writing it to an error table:
 
 ```typescript
 {
   source: "imports.users",
   process: (s) => {
-    // Validate before inserting
     s.if(sql`record.email is null or record.email = ''`, (s) => {
-      s.modify(sql`
-        insert into db.import_errors (source, record_id, error)
-        values ('users', record.id, 'Missing email')
+      s.throwError(sql`
+        'Missing email for imported user ' || cast(record.id as string)
       `);
     });
-    s.else((s) => {
-      s.try({
-        body: (s) => {
-          s.modify(sql`
-            insert into db.users (name, email)
-            values (record.name, record.email)
-          `);
-        },
-        catch: (s) => {
-          s.modify(sql`
-            insert into db.import_errors (source, record_id, error)
-            values ('users', record.id, 'Insert failed')
-          `);
-        },
-      });
-    });
+    s.modify(sql`
+      insert into db.users (name, email)
+      values (record.name, record.email)
+    `);
   },
 }
 ```
 
+To find every invalid row before running the pipeline, query the source
+database directly, for example
+`select id from imports.users where email is null or email = ''`.
+
 ## Performance Considerations
 
 - Pipelines process data in a streaming fashion, minimizing memory usage
-- Stages without dependencies can run in parallel
+- Stages run in dependency order. Rows or batches within a stage run
+  sequentially unless the stage sets `parallelize: true`
 - Use batch inserts where possible for better performance. For static seed or
   demo data, prefer one `insert ... values (...), (...)` statement per table
   shape, or `with rows(...) as (values ...) insert ... select ...` when rows
@@ -374,14 +411,14 @@ Handle errors within the process procedure:
     s.if(sql`exists (select 1 from db.records where id = record.id)`, (s) => {
       s.modify(sql`
         update db.records
-        set value = record.value, updated_at = current_timestamp
+        set value = record.value
         where id = record.id
       `);
     });
     s.else((s) => {
       s.modify(sql`
-        insert into db.records (id, value, created_at)
-        values (record.id, record.value, current_timestamp)
+        insert into db.records (id, value)
+        values (record.id, record.value)
       `);
     });
   },
@@ -390,22 +427,21 @@ Handle errors within the process procedure:
 
 ### Data Validation
 
+Filter rows with the stage's `where` option. Rejected rows stay in the source
+database, so query them there instead of copying them to a rejection table:
+
 ```typescript
 {
   source: "imports.orders",
+  where: sql`
+    record.amount > 0
+    and record.customer_id is not null
+  `,
   process: (s) => {
-    s.defScalar("is_valid", sql`
-      record.amount > 0
-      and record.customer_id is not null
-      and is_valid_email(record.email)
+    s.modify(sql`
+      insert into db.orders (customer_id, amount)
+      values (record.customer_id, record.amount)
     `);
-
-    s.if(sql`is_valid`, (s) => {
-      s.modify(sql`insert into db.orders ...`);
-    });
-    s.else((s) => {
-      s.modify(sql`insert into db.rejected_orders ...`);
-    });
   },
 }
 ```

@@ -153,54 +153,29 @@ db.table("client", (table) => {
 
 ### Referenced Table Configuration
 
-When a table is referenced by foreign keys:
+When a search-driven control (such as a record select) targets a table without
+`name`, `title`, or `first_name`/`last_name`, give that table a display name
+and search configuration:
 
 ```typescript
-// This table will be referenced by other tables
-db.table("sys_users", (table) => {
-  table.email("email").notNull();
-  table.recordDisplayName(["email"], (email) => email);
+// Referenced by a record select on interaction.vendor
+db.table("vendor", (table) => {
+  table.string("code", 20).notNull().unique();
+  table.recordDisplayName(["code"], (code) => code);
   table.searchConfig({
-    fields: [{ field: "email", priority: 1 }]
+    fields: [{ field: "code", priority: 1 }]
   });
 });
 
-// This table has a foreign key to sys_users
 db.table("interaction", (table) => {
-  table.fk("owner", "sys_users").notNull();
+  table.fk("vendor", "vendor").notNull();
   table.string("subject", 200).notNull();
 });
 ```
 
-### Common Mistakes
-
-**Incorrect:** Search-driven record selector targeting a table without display
-name/search configuration
-```typescript
-db.table("sys_users", (table) => {
-  table.email("email").notNull();
-  // Missing search config!
-});
-
-db.table("interaction", (table) => {
-  table.fk("owner", "sys_users").notNull(); // FK alone is valid; a search-driven selector still needs config
-});
-```
-
-**Correct:** Referenced table with search config
-```typescript
-db.table("sys_users", (table) => {
-  table.email("email").notNull();
-  table.recordDisplayName(["email"], (email) => email);
-  table.searchConfig({
-    fields: [{ field: "email", priority: 1 }]
-  });
-});
-
-db.table("interaction", (table) => {
-  table.fk("owner", "sys_users").notNull(); // Works correctly
-});
-```
+Without the display name and search configuration, the foreign key itself is
+still valid; only search-driven controls that perform ranked lookup on
+`vendor` fail.
 
 ## Using Search in Queries
 
@@ -246,6 +221,9 @@ The ranked search `style` is one of:
 ## Review Checklist
 
 When creating tables:
-1. Does the table have standard search fields? If not, add search configuration
-2. Is the table referenced by other tables? If yes, ensure it has search configuration
-3. For each foreign key in your table, verify the referenced table has search configuration
+1. Does the table have standard display fields (`name`, `title`, or
+   `first_name`/`last_name`)? If not, and records are searched or selected by
+   search-driven controls, add a display name and search configuration.
+2. For each foreign key edited through a search-driven control, verify the
+   referenced table has display/search configuration. Plain foreign keys do
+   not require it.

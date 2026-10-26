@@ -12,6 +12,7 @@ related:
   - ai/review.md
   - database/best_practices.md
   - sql/query_planning.md
+  - procedures/occ.md
   - coding/solution_principles.md
 ---
 
@@ -28,14 +29,14 @@ Read, in order:
 1. `docs/ai/review.md` — the core rubric and severity weighting.
 2. The system summary and relevant source files — business context and the
    actual schema, routes, and integrations.
-3. The system's `core.tsx` or `system.tsx` — schema and block wiring; the shape
+3. The system's `core.tsx` — schema and block wiring; the shape
    of everything else.
 
 ## Schema Review Comes First
 
 These systems are deployed with live data. Schema changes have different deploy
 classes, but every unnecessary table or field remains durable debt: additions
-consume physical IDs, removals retain orphaned physical data, automatic
+consume physical IDs, removals leave orphaned data until a transform, automatic
 backfills rewrite data, and incompatible changes require a transform or
 database swap. Review schema before touching app code:
 
@@ -61,8 +62,9 @@ database swap. Review schema before touching app code:
 
 - App files are large by design; pages should still be mostly composition of
   blocks/components with content. Flag page-local mini-frameworks.
-- Data fetching via `Data`, mutations via `Form`, refresh via `s.refetch()`
-  after mutation flows.
+- Data fetching via `Data`; record edits via `Form`; commands via
+  `ActionButton` or `ActionMenuItem`. These refetch on success, so flag manual
+  `s.refetch()` calls that repeat it.
 - Event handlers use SQL event values and the statement builder; no
   React-runtime idioms — Yolm TSX is not React.
 
@@ -81,8 +83,18 @@ database swap. Review schema before touching app code:
 
 ## Tests
 
-- Behavior changes need relevant automated test coverage and, for app-visible
-  flows, a `previewScript` rehearsal. Flag changed flows with no evidence.
+For concurrent write paths, follow the core review's transaction checklist and
+[OCC patterns](../procedures/occ.md). Include competing UI, API, reactor, and
+scheduled writers in the workload; a reactor's own concurrency limit does not
+serialize those other writers. Report the observed conflict kind and retry
+cost separately from suspected source-level causes. Preserve durable job
+ownership and all-or-nothing batch semantics when recommending smaller work.
+
+- Behavior changes need verification evidence sized to the change (see [Change
+  Size](review.md#change-size-verification-and-review)): a preview look for
+  minor app-visible changes, a `previewScript` click-through for larger ones.
+  Flag changed flows with no evidence. New tests follow
+  [Tests](review.md#tests).
 
 ## Verification
 

@@ -1,3 +1,7 @@
+import {
+  TranslationReviewPage,
+  TranslationReviewsPage,
+} from "./translation_reviews";
 import { Alert } from "components/alert";
 import { AuthBlock } from "blocks/auth";
 import { sql } from "std/sql_utils";
@@ -17,6 +21,7 @@ import { TrainingAdminAssessmentsPage } from "./assessments";
 import { TrainingAdminAudiencesPage } from "./audiences";
 import { TrainingAdminCourseAssignPage } from "./course_assignment";
 import { TrainingAdminCoursePage } from "./course_editor";
+import { TrainingAdminCoursePreview } from "./course_preview";
 import { TrainingAdminCourseValidationsPage } from "./course_validations";
 import { TrainingAdminCoursesPage } from "./courses";
 import { TrainingAdminDashboardPage } from "./dashboard";
@@ -67,6 +72,14 @@ export function TrainingAdminRoutes(
   );
   return (
     <>
+      <Route path={childPath("/translation-reviews")}>
+        <TranslationReviewsPage block={props.block} admin />
+      </Route>
+      <Route
+        path={childPath("/translation-reviews/{translation_review_id:id}")}
+      >
+        <TranslationReviewPage block={props.block} admin />
+      </Route>
       <Route path={childPath("/dashboard")}>
         {requireAnyPermission(
           adminPermissions,
@@ -83,6 +96,12 @@ export function TrainingAdminRoutes(
         {requirePermission(
           permissions.manageLibrary,
           <TrainingAdminCoursePage block={props.block} />,
+        )}
+      </Route>
+      <Route path={childPath("/courses/{course_id:id}/preview")}>
+        {requirePermission(
+          permissions.manageLibrary,
+          <TrainingAdminCoursePreview block={props.block} />,
         )}
       </Route>
       <Route path={childPath("/courses")}>

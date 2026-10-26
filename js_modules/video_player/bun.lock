@@ -1,0 +1,40 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "@videojs/html": "10.1.0",
+      },
+    },
+  },
+  "packages": {
+    "@lit-labs/ssr-dom-shim": ["@lit-labs/ssr-dom-shim@1.6.0", "", {}, "sha512-VHb0ALPMTlgKjM6yIxxoQNnpKyUKLD04VzeQdsiXkMqkvYlAHxq9glGLmgbb889/1GsohSOAjvQYoiBppXFqrQ=="],
+
+    "@lit/context": ["@lit/context@1.1.6", "", { "dependencies": { "@lit/reactive-element": "^1.6.2 || ^2.1.0" } }, "sha512-M26qDE6UkQbZA2mQ3RjJ3Gzd8TxP+/0obMgE5HfkfLhEEyYE3Bui4A5XHiGPjy0MUGAyxB3QgVuw2ciS0kHn6A=="],
+
+    "@lit/reactive-element": ["@lit/reactive-element@2.1.2", "", { "dependencies": { "@lit-labs/ssr-dom-shim": "^1.5.0" } }, "sha512-pbCDiVMnne1lYUIaYNN5wrwQXDtHaYtg7YEFPeW+hws6U47WeFvISGUWekPGKWOP1ygrs0ef0o1VJMk1exos5A=="],
+
+    "@videojs/core": ["@videojs/core@10.1.0", "", { "dependencies": { "@videojs/media": "10.1.0", "@videojs/store": "10.1.0", "@videojs/utils": "10.1.0" } }, "sha512-jETPa4qmI5JzKRj0FoMSuh7hNwY4BQMvLVrwjZ8vW3tC00f2TzBsiilSAtg5GPy6DIdupWCd9x0MlPTAzomhiw=="],
+
+    "@videojs/element": ["@videojs/element@10.1.0", "", { "dependencies": { "@lit/context": "^1.1.0" } }, "sha512-BxkSMpEDjasLFVpq/mZr01JBG+L4JpFcNUvH0QFllQMYdNaTHyWbKgh3wvsj3mc/y5NK+uKH8X/rYtWdBSKlgw=="],
+
+    "@videojs/html": ["@videojs/html@10.1.0", "", { "dependencies": { "@videojs/core": "10.1.0", "@videojs/element": "10.1.0", "@videojs/media": "10.1.0", "@videojs/native-hls-video": "10.1.0", "@videojs/spf": "10.1.0", "@videojs/store": "10.1.0", "@videojs/utils": "10.1.0" }, "peerDependencies": { "@videojs/cloudflare-video": "10.1.0", "@videojs/dash-video": "10.1.0", "@videojs/google-cast": "10.1.0", "@videojs/hlsjs-video": "10.1.0", "@videojs/mux-audio": "10.1.0", "@videojs/mux-data": "10.1.0", "@videojs/mux-video": "10.1.0", "@videojs/playerjs-video": "10.1.0", "@videojs/shaka-video": "10.1.0", "@videojs/spotify-audio": "10.1.0", "@videojs/tiktok-video": "10.1.0", "@videojs/twitch-video": "10.1.0", "@videojs/vimeo-video": "10.1.0", "@videojs/wistia-video": "10.1.0", "@videojs/youtube-video": "10.1.0" }, "optionalPeers": ["@videojs/cloudflare-video", "@videojs/dash-video", "@videojs/google-cast", "@videojs/hlsjs-video", "@videojs/mux-audio", "@videojs/mux-data", "@videojs/mux-video", "@videojs/playerjs-video", "@videojs/shaka-video", "@videojs/spotify-audio", "@videojs/tiktok-video", "@videojs/twitch-video", "@videojs/vimeo-video", "@videojs/wistia-video", "@videojs/youtube-video"] }, "sha512-8gC8/Wm9ZZtqWzRmiA++QYmlxkPYskl0TUu/5EW4u7vosu35kMU5ZGT2DcL4o+SwxuBMHKSez1MlJhh9cnthPw=="],
+
+    "@videojs/media": ["@videojs/media@10.1.0", "", { "dependencies": { "@videojs/utils": "10.1.0" } }, "sha512-Ene6V7Es+Wddcj/Pzy+7+SbZq5H6M3L3ZdhwWHtoP6AULVt096Pn/PJl4L4W1Vypx9xxRP//ZftVv52eu5clww=="],
+
+    "@videojs/native-hls-video": ["@videojs/native-hls-video@10.1.0", "", { "dependencies": { "@videojs/media": "10.1.0", "@videojs/spf": "10.1.0", "@videojs/utils": "10.1.0" } }, "sha512-0Kfngb1iczF/vEPH0nOpcYveb4J6SyPBbWQNXgWBbBDS1ZGFZKpJ8YPo8zvyyHmnZQIatheEeUGCJaRPfVOYwQ=="],
+
+    "@videojs/spf": ["@videojs/spf@10.1.0", "", { "dependencies": { "@videojs/media": "10.1.0", "@videojs/utils": "10.1.0", "signal-polyfill": "^0.2.2" } }, "sha512-RLfhkIJ81mAKO8d0/yNfEUVIxASl/WxEih0Kix9S5MKI5GCiJTjVtIGsqN+C8T2a3OZ1+GT5wTTPewnDshGDbw=="],
+
+    "@videojs/store": ["@videojs/store@10.1.0", "", { "dependencies": { "@videojs/utils": "10.1.0", "react-compiler-runtime": "^1.0.0" }, "peerDependencies": { "@videojs/element": "10.1.0", "react": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@videojs/element", "react"] }, "sha512-73oWIql+pECjlr4mBPUfgZyvAXJ4wNT1Me4ZgCIzeUUMUqns5OqJSIaRj1jcoWemwROLvKQUVhOVY5JgQ1nDww=="],
+
+    "@videojs/utils": ["@videojs/utils@10.1.0", "", {}, "sha512-2Nd5Wzf27ioxEGIJ8u/9jzFSuqNiB1XfCH6fny2XicbCNhsAWnwQrwtyPM6kRvkJbtIHLdQvRwnWpxke20ia0w=="],
+
+    "react": ["react@19.3.1", "", {}, "sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw=="],
+
+    "react-compiler-runtime": ["react-compiler-runtime@1.0.0", "", { "peerDependencies": { "react": "^17.0.0 || ^18.0.0 || ^19.0.0 || ^0.0.0-experimental" } }, "sha512-rRfjYv66HlG8896yPUDONgKzG5BxZD1nV9U6rkm+7VCuvQc903C4MjcoZR4zPw53IKSOX9wMQVpA1IAbRtzQ7w=="],
+
+    "signal-polyfill": ["signal-polyfill@0.2.2", "", {}, "sha512-p63Y4Er5/eMQ9RHg0M0Y64NlsQKpiu6MDdhBXpyywRuWiPywhJTpKJ1iB5K2hJEbFZ0BnDS7ZkJ+0AfTuL37Rg=="],
+  }
+}

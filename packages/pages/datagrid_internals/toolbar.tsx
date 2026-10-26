@@ -250,7 +250,7 @@ export function DatagridToolbar(props: ToolbarProps) {
                     size="sm"
                     value={sql`coalesce(q, '')`}
                     onInput={(s) => {
-                      s.setQueryParam("q", sql`target_value`, sql.true);
+                      s.setQueryParam("q", sql`target_value`);
                     }}
                     sx={{ width: "min(300px, 100%)" }}
                   />
@@ -354,8 +354,7 @@ export function DatagridToolbar(props: ToolbarProps) {
                     color="primary"
                     size="sm"
                     onClick={(s) => {
-                      s.increment("reset_key");
-                      dynamicDatagridCtx.clearChangesInToolbar(s);
+                      dynamicDatagridCtx.resetView(s);
                     }}
                   >
                     Discard changes
@@ -403,8 +402,7 @@ export function DatagridToolbar(props: ToolbarProps) {
                                 );
                               },
                               finally: (s) => {
-                                s.increment("reset_key");
-                                dynamicDatagridCtx.clearChangesInToolbar(s);
+                                dynamicDatagridCtx.resetView(s);
                                 s.setScalar("proc_in_progress", false);
                               },
                             });

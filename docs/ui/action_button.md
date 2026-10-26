@@ -6,97 +6,34 @@ tags:
   - components
   - action
   - mutation
+related:
+  - ui/button.md
+  - ui/form.md
+  - ui/data_vs_form.md
+  - ui/data.md
 ---
 
 # ActionButton
 
-The `ActionButton` component wraps a standard `Button` with server-action handling: loading states, error snackbars or inline alerts, optional success messages, and confirmation dialogs. It also protects against double-clicks and automatically refetches the enclosing `Data` on success.
+`ActionButton` wraps `Button` with a guarded server action: loading state,
+double-click protection, error snackbar or inline alert, optional success
+snackbar and confirmation dialog, and a refetch on success.
+
+Before adding or changing server actions, follow
+[Own The Generated-Code Cost](../ai/forge_procedures.md#own-the-generated-code-cost).
+Trace copies emitted by repeated buttons, menu options, and route reuse. Do not
+add substantial duplicated database logic: put shared work in stored procedures,
+not another inlining TypeScript helper, and report pre-existing duplication for
+a cleanup task. Preserve transaction ownership and the action lifecycle below.
 
 ```tsx
-import { ActionButton } from "std/action_button";
-```
+import {
+  ActionButton,
+  ActionIconButton,
+  ActionMenuItem,
+  FileActionButton,
+} from "std/action_button";
 
-Use `ActionButton` instead of hand-rolling `tryServer` + manual loading/error
-scalars for command-style actions.
-
-`ActionButton` is not a form primitive. If the user is creating or editing row
-fields, use [`Form`](./form.md) with `Form.SubmitButton`. There is no
-`Form.ActionButton`; use `ActionButton` alongside `Form` only for a separate
-command that is not the form submit.
-
-## Choosing Form, ActionButton, Or Button
-
-| Need | Use |
-| --- | --- |
-| Create, update, upsert, or bulk-edit rows from user-entered fields | `Form.Insert`, `Form.Update`, `Form.Merge`, or the `Many` variants |
-| Submit a normal field-editing form | `Form.SubmitButton` |
-| Run a server command with no field form: delete, approve, send, sync, recalculate, import, archive | `ActionButton` |
-| Put that server command in a menu | `ActionMenuItem` |
-| Toggle a modal, change tabs, update local filters, or set UI-only state | `Button` with an event handler |
-| Collect a few temporary command inputs, then run a command | `Data local` or `Form.Temporary` for state, then `ActionButton` for the command |
-
-The boundary is about user intent:
-
-- If the user is editing record fields, `Form` owns the mutation lifecycle,
-  validation, dirty state, touched state, errors, nested rows, and submit button.
-- If the user is pressing a command button, `ActionButton` owns loading, errors,
-  success feedback, confirmation, double-click protection, and `Data` refetch.
-- If the handler is not server work, keep it as a normal `Button` handler.
-
-Do not replace `Form` with raw inputs plus `ActionButton` for ordinary inserts
-or updates. That duplicates form behavior and usually loses validation and
-field-level error handling.
-
-## Basic Usage
-
-```tsx
-<ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`delete from db.todos where id = todo.id`);
-    s.commitTransaction();
-  }}
-  successMessage="Todo deleted"
->
-  Delete
-</ActionButton>
-```
-
-## Replacing Manual tryServer Buttons
-
-Before: a command button with hand-rolled waiting state, server call, and refetch.
-
-```tsx
-<Data
-  local
-  procedure={(s) => {
-    s.defScalar("sync_waiting", sql.false);
-  }}
->
-  <Button
-    loading={sql`sync_waiting`}
-    onClick={(s) => {
-      s.setScalar("sync_waiting", sql.true);
-      s.commitUiTreeChanges();
-      s.tryServer({
-        body: (s) => {
-          s.callStoredProcedure("sync_contacts");
-          s.refetch();
-        },
-        finally: (s) => {
-          s.setScalar("sync_waiting", sql.false);
-        },
-      });
-    }}
-  >
-    Sync Contacts
-  </Button>
-</Data>
-```
-
-After: the same command with `ActionButton`.
-
-```tsx
 <ActionButton
   action={(s) => {
     s.callStoredProcedure("sync_contacts");
@@ -107,89 +44,122 @@ After: the same command with `ActionButton`.
 </ActionButton>
 ```
 
-`ActionButton` handles loading, prevents duplicate clicks, reports errors, and
-refetches the enclosing `Data` on success.
+## Choosing Form, ActionButton, Or Button
 
-## With Confirmation Dialog
+| Need | Use |
+| --- | --- |
+| Create, update, upsert, or bulk-edit rows from user-entered fields | `Form.Insert`, `Form.Update`, `Form.Merge`, or the `Many` variants |
+| Submit a normal field-editing form | `Form.SubmitButton` |
+| Run a server command with no field form: delete, approve, send, sync, recalculate, import, archive | `ActionButton` / `ActionIconButton` |
+| Put that server command in a menu | `ActionMenuItem` |
+| Upload a file and run a server command on it | `FileActionButton` / `FileActionIconButton` |
+| Toggle a modal, change tabs, update local filters, or set UI-only state | `Button` with an event handler |
+| Collect a few temporary command inputs, then run a command | `Data local` or `Form.Temporary` for state, then `ActionButton` |
 
-Pass `confirm` to gate the action on a user confirmation:
+`ActionButton` is not a form primitive. Raw inputs plus `ActionButton` for an
+ordinary insert/update loses validation, dirty state, and field errors; use
+[`Form`](./form.md). There is no `Form.ActionButton`; place an `ActionButton`
+next to a `Form` only for a separate command.
+
+## Lifecycle
+
+On click (or confirm), the generated handler:
+
+1. Returns early if the action is already running (double-click guard).
+2. Runs `beforeActionClient` (client), sets the loading scalar, clears errors.
+3. Calls `s.tryServer` whose body runs `action`, then `onSuccess`, then the
+   refetch (when `refetch` is true). `action` and `onSuccess` are both
+   `UiServerStatements`, i.e. **server-side**, inside the same `tryServer`.
+4. On error, stores a message and runs `onError` (client). Errors thrown on
+   purpose (`thrown_error`) show their message verbatim; others show
+   `type: message`.
+5. On success, runs `afterSuccessClient` (client): close a modal, clear a
+   selection, navigate.
+
+Refetch increments `global_refetch_key` (the same as `s.refetch()`), so every
+non-`local` `Data` without `noRefetch` re-runs. Do not add a manual
+`s.refetch()` to `action`; pass `refetch={false}` only when you intentionally
+skip it.
 
 ```tsx
 <ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`delete from db.projects where id = project.id`);
-    s.commitTransaction();
-  }}
+  color="danger"
   confirm={{
     description: "This will permanently delete the project and all its tasks.",
     confirmText: "Delete Project",
   }}
-  color="danger"
+  action={(s) => {
+    s.startTransaction();
+    s.modify(sql`delete from db.tasks where project = project.id`);
+    s.modify(sql`delete from db.projects where id = project.id`);
+    s.commitTransaction();
+  }}
+  afterSuccessClient={(s) => s.navigate(sql.lit`/projects`)}
 >
   Delete Project
 </ActionButton>
 ```
 
-## Error Display
+## Non-Obvious Props
 
-Errors are shown as a snackbar by default. Use `errorDisplay` to change the behavior:
+- `confirm: { description?, confirmText?, prepare?, disabled? }` opens a confirmation dialog first.
+  The dialog's confirm button is always `color="danger"`; it shows errors in
+  an inline alert inside the dialog and closes only on success. On
+  `ActionButton`, `errorDisplay` is ignored when `confirm` is set.
+- `confirm.prepare` loads server data when the dialog opens. Its state is shared
+  by `description`, `disabled`, and the confirmed `action`. Confirmation is disabled
+  until the load succeeds, including while refreshing or after a load failure.
+  A failed action refreshes these details before another attempt. Use `disabled`
+  for additional eligibility checks. Revalidate any displayed forecast or scope
+  inside the mutation transaction; loading a confirmation does not lock records.
+- `errorDisplay`: `"snackbar"` (default), `"inline"` (an `Alert` under the
+  button; good in dialogs and dense panels), or `"none"` (handle it in
+  `onError`).
+- `successMessage` (string or SQL) shows a success snackbar for 3.5s.
+- `preventDefault` (default `true`) calls `event.preventDefault()` on click.
+- All other `Button` props pass through except `onClick` and `loading`.
+
+See `ActionButtonProps` in `std/action_button` for the full contract.
+
+## Variants
+
+- `ActionIconButton`: `IconButton` with a required `icon`; shows a spinner in
+  place of the icon while running. Same props as `ActionButton`.
+- `ActionMenuItem`: a `Menu.Item` inside `Menu.Content`. Takes `icon`,
+  `children`, `action`, `confirm`, `successMessage`, `refetch`, `onSuccess`,
+  `afterSuccessClient`, `onError`. `errorDisplay` is only `"snackbar"` or
+  `"none"`; there is no `preventDefault` or `beforeActionClient`. With
+  `confirm`, the menu stays open until the dialog closes.
+- `FileActionButton` / `FileActionIconButton`: render a hidden file input
+  inside the button. `action(s, file)` receives `file.uuid`, `name`, `type`,
+  `lastModified`, and `size` for the first selected file, which is transferred
+  to the server. `inputProps` (e.g. `accept`) pass to the `<input>`. No
+  `confirm`.
 
 ```tsx
-// Default — shows a Snackbar on error
-<ActionButton action={saveAction}>Save</ActionButton>
-
-// Show an inline Alert below the button instead
-<ActionButton action={saveAction} errorDisplay="inline">
-  Save
-</ActionButton>
-
-// Suppress error UI entirely (handle it yourself)
-<ActionButton action={saveAction} errorDisplay="none">
-  Save
-</ActionButton>
+<Menu>
+  <Menu.Button>Options</Menu.Button>
+  <Menu.Content>
+    <ActionMenuItem
+      icon="CheckCircle"
+      successMessage="Task completed"
+      action={(s) => {
+        s.startTransaction();
+        s.modify(sql`update db.tasks set status = 'completed' where id = task.id`);
+        s.commitTransaction();
+      }}
+    >
+      Mark Complete
+    </ActionMenuItem>
+  </Menu.Content>
+</Menu>
 ```
-
-## Disabling Automatic Refetch
-
-By default the enclosing `Data` is refetched after the action succeeds. Disable this if you are managing the refresh yourself:
-
-```tsx
-<ActionButton action={markReadAction} refetch={false}>
-  Mark as Read
-</ActionButton>
-```
-
-## onSuccess Callback
-
-Run additional UI state changes after the server action succeeds:
-
-```tsx
-<ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`insert into db.notes (content) values (ui.draft_text)`);
-    s.commitTransaction();
-  }}
-  onSuccess={(s) => {
-    s.setScalar("draft_text", sql.lit``);
-  }}
-  successMessage="Note saved"
->
-  Save Note
-</ActionButton>
-```
-
-Use `onSuccess` for client-side cleanup after the server work completes. Common
-uses are closing a modal, clearing temporary scalars, or resetting a local
-selection. Keep server writes in `action`, not `onSuccess`.
 
 ## Temporary Command Inputs
 
-For command dialogs that need one or two temporary inputs, keep that state in
-`Data local` or `Form.Temporary`, then run the server command through
-`ActionButton`. Use `Form` instead when those inputs are normal editable fields
-for a row.
+For a command that needs one or two temporary inputs, keep them in `Data local`
+(or `Form.Temporary`) and run the command with `ActionButton`. If the inputs are
+normal row fields, use `Form.Update` instead.
 
 ```tsx
 <Data
@@ -198,221 +168,37 @@ for a row.
     s.defScalar("reason", sql.lit``);
   }}
 >
-  <Input
-    value={sql`reason`}
-    onInput={(s) => {
-      s.setScalar("reason", sql`target_value`);
-    }}
-  />
+  <Input bindScalar="reason" />
   <ActionButton
+    color="danger"
     disabled={sql`length(trim(reason)) = 0`}
     errorDisplay="inline"
+    confirm={{ description: "Cancel this order?" }}
     action={(s) => {
       s.startTransaction();
       s.modify(sql`
         update db.orders
-        set status = 'cancelled',
-            cancellation_reason = reason
+        set status = 'cancelled', cancellation_reason = ui.reason
         where id = order.id
-      `);
-      s.modify(sql`
-        insert into db.order_activity (order_id, note)
-        values (order.id, reason)
       `);
       s.commitTransaction();
     }}
-    onSuccess={(s) => {
+    afterSuccessClient={(s) => {
       s.setScalar("reason", sql.lit``);
     }}
-    confirm={{ description: "Cancel this order?" }}
-    color="danger"
   >
     Cancel Order
   </ActionButton>
 </Data>
 ```
 
-If `reason` is part of a normal order edit form, use `Form.Update` and
-`Form.Field` instead.
+## Common Mistakes
 
-## Props
-
-`ActionButton` accepts all `Button` props except `onClick` and `loading`.
-
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `action` | `(s: UiServerStatements) => void` | **required** | Server-side code to run inside `tryServer` |
-| `successMessage` | `string \| Sql` | - | Message shown in a success Snackbar |
-| `errorDisplay` | `"snackbar" \| "inline" \| "none"` | `"snackbar"` | How to display errors |
-| `refetch` | `boolean` | `true` | Whether to refetch enclosing `Data` on success |
-| `preventDefault` | `boolean` | `true` | Calls `event.preventDefault()` on click |
-| `confirm` | `{ description?: Node; confirmText?: Node }` | - | Optional confirmation dialog |
-| `onSuccess` | `(s: UiServerStatements) => void` | - | Callback fired after the action succeeds |
-
-**Important**: `color` and `variant` are generation-time strings only, not SQL expressions. Same rules as `Button`.
-
----
-
-# ActionMenuItem
-
-`ActionMenuItem` is the menu-item variant of `ActionButton`. Use it inside a `Menu` for actions that need loading, error, and confirm behavior.
-
-```tsx
-import { ActionMenuItem } from "std/action_button";
-```
-
-## Basic Usage
-
-```tsx
-<Menu>
-  <Menu.Button>Options</Menu.Button>
-  <Menu.Content>
-    <ActionMenuItem
-      action={(s) => {
-        s.startTransaction();
-        s.modify(sql`update db.tasks set status = 'completed' where id = task.id`);
-        s.commitTransaction();
-      }}
-      icon="CheckCircle"
-      successMessage="Task completed"
-    >
-      Mark Complete
-    </ActionMenuItem>
-    <ActionMenuItem
-      action={(s) => {
-        s.startTransaction();
-        s.modify(sql`delete from db.tasks where id = task.id`);
-        s.commitTransaction();
-      }}
-      icon="Delete"
-      confirm={{ description: "Delete this task?" }}
-    >
-      Delete
-    </ActionMenuItem>
-  </Menu.Content>
-</Menu>
-```
-
-## Props
-
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `action` | `(s: UiServerStatements) => void` | **required** | Server-side code to run |
-| `children` | `Node` | **required** | Menu item label |
-| `icon` | `IconName` | - | Material icon shown on the left |
-| `successMessage` | `string \| Sql` | - | Success snackbar message |
-| `errorDisplay` | `"snackbar" \| "none"` | `"snackbar"` | How to display errors |
-| `refetch` | `boolean` | `true` | Refetch enclosing `Data` on success |
-| `confirm` | `{ description?: Node; confirmText?: Node }` | - | Optional confirmation dialog |
-| `onSuccess` | `(s: UiServerStatements) => void` | - | Callback after action succeeds |
-
-## Common Patterns
-
-### Delete button with inline error inside a dialog
-
-```tsx
-<ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`delete from db.customers where id = customer.id`);
-    s.commitTransaction();
-  }}
-  errorDisplay="inline"
-  confirm={{ description: "Delete this customer?" }}
-  color="danger"
->
-  Delete
-</ActionButton>
-```
-
-### Menu item that resets a filter
-
-```tsx
-<ActionMenuItem
-  action={(s) => {
-    s.setScalar("status_filter", sql.null);
-  }}
-  refetch={false}
-  icon="FilterListOff"
->
-  Clear Filter
-</ActionMenuItem>
-```
-
-### Status transition command
-
-```tsx
-<ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`
-      update db.invoices
-      set status = 'approved'
-      where id = invoice.id
-    `);
-    s.modify(sql`
-      insert into db.invoice_activity (invoice_id, event)
-      values (invoice.id, 'approved')
-    `);
-    s.commitTransaction();
-  }}
-  confirm={{ description: "Approve this invoice?" }}
-  successMessage="Invoice approved"
->
-  Approve
-</ActionButton>
-```
-
-### Form submit plus separate command
-
-Use `Form.SubmitButton` for the form save. Use `ActionButton` only for a
-separate command outside the form submit path.
-
-```tsx
-<Form>
-  <Form.Update table="customers" where={sql`id = customer.id`}>
-    <Form.Field field="name" />
-    <Form.Field field="email" />
-    <Form.ErrorAlert />
-    <Form.SubmitButton>Save</Form.SubmitButton>
-  </Form.Update>
-</Form>
-
-<ActionButton
-  action={(s) => {
-    s.startTransaction();
-    s.modify(sql`update db.customers set archived = true where id = customer.id`);
-    s.commitTransaction();
-  }}
-  confirm={{ description: "Archive this customer?" }}
->
-  Archive
-</ActionButton>
-```
-
-## Common Misuse
-
-| Misuse | Use instead |
+| Mistake | Use instead |
 | --- | --- |
-| Raw `Button` + `s.tryServer` + loading scalar for delete/approve/sync | `ActionButton` |
-| `MenuItem` + custom server handler for row actions | `ActionMenuItem` |
-| Raw inputs + `ActionButton` to insert or update a row | `Form.Insert`, `Form.Update`, or `Form.Merge` |
-| `ActionButton` to submit a field-editing form | `Form.SubmitButton` |
-| Manual `s.refetch()` after every command button | Default `ActionButton` refetch, unless `refetch={false}` is intentional |
-| Server writes in `onSuccess` | Put writes in `action`; reserve `onSuccess` for UI cleanup |
-| Dynamic SQL for `color` / `variant` | Render separate variants with `Show` / `Switch` |
-
-## Migration Checklist
-
-When reviewing an existing command button:
-
-1. If it edits user-entered row fields, migrate to `Form` instead.
-2. If it runs a server command, replace raw `Button` / `MenuItem` handlers with
-   `ActionButton` / `ActionMenuItem`.
-3. Move server writes into the `action` callback.
-4. Keep related writes inside `s.startTransaction()` / `s.commitTransaction()`.
-5. Use `confirm` for destructive or irreversible actions.
-6. Use `errorDisplay="inline"` inside dialogs or dense panels where a snackbar
-   would be easy to miss.
-7. Remove manual loading/error scalars that only existed for the command button.
-8. Rely on default refetch unless the surrounding `Data` intentionally opts out.
+| Raw `Button` / `Menu.Item` + `s.tryServer` + loading scalar for a command | `ActionButton` / `ActionMenuItem` |
+| Raw inputs + `ActionButton` to insert or update a row, or as a form submit | `Form.Insert` / `Form.Update` / `Form.Merge` + `Form.SubmitButton` |
+| Treating `onSuccess` as client cleanup | `onSuccess` runs on the server; use `afterSuccessClient` for UI cleanup |
+| `ActionMenuItem` for UI-only work such as clearing a filter (needless server round trip) | Plain `Menu.Item` `onClick` |
+| Manual `s.refetch()` inside `action` | Default `refetch` |
+| Several related writes without a transaction | Wrap them in `s.startTransaction()` / `s.commitTransaction()` |

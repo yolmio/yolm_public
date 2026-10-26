@@ -16,9 +16,9 @@ Window functions perform calculations across a set of rows related to the curren
 The `OVER` clause defines the window:
 
 ```sql
-function() OVER (
-  [PARTITION BY expr, ...]
-  [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST], ...]
+function() over (
+  [partition by expr, ...]
+  [order by expr [asc|desc] [nulls first|last], ...]
   [frame_clause]
 )
 ```
@@ -112,7 +112,7 @@ select
   ) as first_book
 from book;
 
--- Last value (note: default frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+-- Last value (note: default frame is range between unbounded preceding and current row)
 select
   title,
   last_value(title) over (
@@ -195,7 +195,7 @@ The frame defines which rows relative to the current row are included in the win
 ### Frame Syntax
 
 ```sql
-{ ROWS | RANGE } BETWEEN frame_start AND frame_end
+{ rows | range } between frame_start and frame_end
 ```
 
 Frame bounds:
@@ -221,7 +221,7 @@ select
   ) as running_total
 from transactions;
 
--- RANGE: all rows with same order value included
+-- range: all rows with same order value included
 select
   date,
   amount,
@@ -235,13 +235,13 @@ from transactions;
 ### Common Frame Patterns
 
 ```sql
--- Running total (default with ORDER BY)
+-- Running total (default with order by)
 sum(amount) over (order by date)
--- Equivalent to: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+-- Equivalent to: range between unbounded preceding and current row
 
 -- Full partition total
 sum(amount) over (partition by category)
--- Equivalent to: RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+-- Equivalent to: range between unbounded preceding and unbounded following
 
 -- All rows in partition
 first_value(name) over (

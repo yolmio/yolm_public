@@ -1,7 +1,7 @@
 ---
 title: Forge investigation skill
-description: Production evidence gathering using executions, metrics, current data, tx_op WAL history, and per-table version views.
-tags: [ai, forge, investigation, production, wal]
+description: "Use to inspect production data, behavior, or history: queries, captured executions, live requests, metrics, service usage, and jobs."
+tags: [ai, forge, skill, investigation, production]
 related:
   - sql/transaction_queries.md
   - sql/query_planning.md

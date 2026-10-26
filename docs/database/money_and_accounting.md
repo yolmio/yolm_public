@@ -1,372 +1,149 @@
 ---
-title: Money Types and Accounting Patterns
-description: Best practices for handling money, financial calculations, and double-entry accounting in Yolm.
+title: Money and Decimal Types
+description: Reference for table.money and table.decimal fields, precision, scale, signed vs unsigned defaults, integer cents, rounding, and effective-dated rate lookups.
 tags:
   - database
   - money
-  - accounting
+  - decimal
   - finance
-  - patterns
+related:
+  - database/field_types.md
+  - domains/accounting.md
+  - database/advanced_table_features.md
 ---
 
-# Money Types and Accounting Patterns
+# Money and Decimal Types
+
+This page is the type reference for currency amounts. For modeling a ledger,
+invoices, and payments, see [Accounting Domain Model](../domains/accounting.md).
 
 ## Money Type
 
-Yolm provides a specialized `money` type for storing currency values with proper precision:
+`table.money(name)` stores a currency amount as a fixed-point decimal, which
+avoids floating-point rounding errors:
 
 ```typescript
-db.table("orders", (table) => {
-  table.money("total_amount");
-  table.money("tax_amount");
-  table.money("discount_amount");
+db.table("payments", (table) => {
+  table.money("amount").notNull();
+  table.money("fee_amount");
 });
 ```
 
-### Money Storage
-
-By default, `table.money("amount")` creates a fixed-point decimal money field
-with precision 13 and scale 2. This avoids floating-point precision issues
-without requiring you to store cents manually.
-
-If you want explicit integer minor-unit storage, pass an integer backing type:
-
-```typescript
-table.money("amount_cents", "BigInt");
-```
-
-A bare `table.money("amount")` is signed and can hold negative values (useful
-for credits/adjustments). If you pass an explicit `{ precision, scale }` object,
-the field defaults to unsigned — add `signed: true` when negatives are needed.
+Money values are written as decimal literals:
 
 ```sql
--- Inserting decimal money values
-insert into db.invoices (total) values (15.00);    -- $15.00
+insert into db.payments (amount) values (15.00);  -- $15.00
 ```
 
-### Integer Minor-Unit Pattern
+## Precision, Scale, and Sign
 
-When a money field is explicitly backed by an integer type, store values in
-minor units such as cents. Be careful when converting from another cents scalar:
+The signed default differs between `money` and `decimal` when you pass
+explicit options:
+
+| Declaration | Storage | Negative values |
+| --- | --- | --- |
+| `table.money("amount")` | decimal(13, 2) | allowed (signed) |
+| `table.money("amount", { precision: 13, scale: 2 })` | decimal(13, 2) | **rejected** (unsigned) |
+| `table.money("amount", { precision: 13, scale: 2, signed: true })` | decimal(13, 2) | allowed |
+| `table.decimal("rate", { precision: 9, scale: 4 })` | decimal(9, 4) | allowed (signed) |
+| `table.decimal("rate", { precision: 9, scale: 4, signed: false })` | decimal(9, 4) | rejected |
+| `table.money("amount_cents", "BigInt")` | bigint minor units | allowed |
+| `table.money("amount_cents", "BigUint")` | unsigned bigint minor units | rejected |
+
+Use the bare `money` form for amounts that can be negative, such as
+adjustments, credits, and refunds. Use explicit precision without `signed`
+when negatives are invalid, for example debit and credit columns; the type
+then enforces non-negativity without a check constraint. Add `signed: true`
+whenever you pass `{ precision, scale }` for an amount that may go negative.
+
+## Integer Minor Units
+
+Pass an integer type to store whole minor units (such as cents) instead of a
+decimal. Convert deliberately when moving between the two representations:
 
 ```typescript
-// In a reactor calculating fees
-s.defScalar("rate_amount_billed", sql`3500::bigint`);  // $35.00 in cents
-
-// For integer-backed money fields, insert the cents value directly.
-s.modify(sql`
-  insert into db.order_expenses (amount_billed)
-  values (rate_amount_billed)
-`);
-
-// For decimal money fields, convert cents to a decimal dollar amount.
-s.modify(sql`
-  insert into db.order_expenses (amount_billed)
-  values (rate_amount_billed / 100.0)
-`);
+db.table("ledger_amounts", (t) => {
+  t.money("amount_cents", "BigInt");
+  t.money("price");
+});
 ```
 
-### Rate Calculation Pattern
-
-When storing rates as bigints (cents) and converting to decimal money fields:
-
-```typescript
-// Rates stored as bigint (cents)
-s.defScalar("rate_amount_incurred", sql`2000::bigint`);  // $20.00
-s.defScalar("researcher_payment", sql`1500::bigint`);    // $15.00
-
-// Insert into decimal money fields - divide cents by 100
-s.modify(sql`
-  insert into db.order_expenses (
-    amount_incurred,      -- money type
-    amount_paid_researcher  -- money type
-  ) values (
-    rate_amount_incurred / 100.0,
-    researcher_payment / 100.0       -- Explicit division for clarity
-  )
-`);
+```sql
+-- decimal money -> integer cents
+round(rate_amount * 100)::bigint
+-- integer cents -> decimal money
+3500 / 100.0  -- 35.00
 ```
 
-## Hierarchical Rate Lookups
+Prefer the decimal default unless an external system exchanges integer minor
+units. Mixing the two in one calculation without converting is the most
+common money bug.
 
-Real-world pricing often involves hierarchical rate structures (client-specific, jurisdiction-specific, default rates):
+## Rounding
+
+Multiplying money by a quantity, rate, or percentage can produce more decimal
+places than the field stores. Round explicitly with `round(value, 2)` at the
+point where a calculated amount becomes a stored amount, and compute totals
+from stored line amounts so they match what customers see.
+
+## Effective-Dated Rates
+
+Prices and rates that change over time are rows with an effective date range,
+not updates to a single value. Nullable scope columns let one table hold
+defaults and overrides:
 
 ```typescript
-/**
- * Priority: Client + Jurisdiction + SearchType > Client + Jurisdiction > Client > Default
- */
+db.table("customer_rates", (t) => {
+  t.fk("customer_id", "customers"); // null = applies to every customer
+  t.enum("service_type"); // null = applies to every service type
+  t.money("amount").notNull();
+  t.date("effective_from").notNull();
+  t.date("effective_to"); // exclusive; null = open-ended
+  t.check({
+    fields: ["effective_from", "effective_to"],
+    errorMessage: () => sql.lit`effective_to must be after effective_from`,
+    check: ([from, to]) => sql`${to} is null or ${from} < ${to}`,
+  });
+});
+```
+
+Look up the most specific rate in effect on a date. The specificity score
+prefers a customer-specific rate over a service-specific one, and either over
+the default:
+
+```typescript
 s.defScalar(
-  "applicable_rate",
-  sql`
-    COALESCE(
-      (
-        SELECT rate
-        FROM db.client_rates cr
-        WHERE cr.rate_type = 'search_fee'
-          AND (cr.client_id = order.client_id OR cr.client_id IS NULL)
-          AND (cr.jurisdiction_id = order.jurisdiction_id OR cr.jurisdiction_id IS NULL)
-          AND (cr.search_type = order.search_type OR cr.search_type IS NULL)
-          AND current_date BETWEEN cr.effective_from AND COALESCE(cr.effective_to, '2099-12-31'::date)
-        ORDER BY
-          (CASE WHEN cr.client_id IS NOT NULL THEN 4 ELSE 0 END) +
-          (CASE WHEN cr.jurisdiction_id IS NOT NULL THEN 2 ELSE 0 END) +
-          (CASE WHEN cr.search_type IS NOT NULL THEN 1 ELSE 0 END) DESC,
-          cr.effective_from DESC
-        LIMIT 1
-      ),
-      3500::bigint  -- Default $35 client rate (in cents)
-    )
-  `,
+  "rate_amount",
+  sql`(
+    select amount
+    from db.customer_rates
+    where (customer_id = p_customer_id or customer_id is null)
+      and (service_type = p_service_type or service_type is null)
+      and effective_from <= p_on_date
+      and (effective_to is null or p_on_date < effective_to)
+    order by
+      case when customer_id is null then 0 else 2 end
+        + case when service_type is null then 0 else 1 end desc,
+      effective_from desc
+    limit 1
+  )`,
 );
 ```
 
-### Rate Table Pattern
+Pass the order or service date as `p_on_date` to price historical work with
+the rate that applied then. A null result means no rate matched; handle it
+explicitly rather than falling back to a hard-coded amount.
 
-```typescript
-db.table("client_rates", (table) => {
-  table.fk("client_id", "clients");  // NULL = applies to all clients
-  table.fk("jurisdiction_id", "jurisdictions");  // NULL = all jurisdictions
-  table.enum("search_type", "search_type");  // NULL = all search types
-  table.enum("rate_type", "rate_type").notNull();
+## Pitfalls
 
-  table.money("amount_billed");  // What we charge the client
-  table.money("amount_incurred");  // What it costs us
-  table.bool("company_pays").notNull();  // Does company absorb cost?
-
-  table.date("effective_from").notNull();
-  table.date("effective_to");  // NULL = no end date
-});
-```
-
-## Double-Entry Accounting Pattern
-
-Implementing proper accounting with debits and credits:
-
-### Chart of Accounts
-
-```typescript
-system.enum_({
-  name: "account",
-  values: [
-    // Assets (debit = increase, credit = decrease)
-    "cash",
-    "accounts_receivable",
-    "unbilled_ar",
-
-    // Liabilities (credit = increase, debit = decrease)
-    "accounts_payable",
-    "accrued_research",
-
-    // Revenue (credit = increase, debit = decrease)
-    "service_revenue",
-
-    // Expenses (debit = increase, credit = decrease)
-    "cogs_researcher_fees",
-    "cogs_court_fees",
-  ],
-});
-
-db.table("journal_entries", (table) => {
-  table.enum("book", "book").notNull();  // statutory, management, tax
-  table.date("entry_date").notNull();
-  table.enum("status", "ledger_status").notNull();
-  table.enum("account", "account").notNull();
-  table.money("amount").notNull();  // Positive = debit, Negative = credit
-  table.enum("entry_type", "journal_entry_type").notNull();
-
-  table.fk("period_id", "gl_periods");
-  table.fk("order_id", "orders");
-  table.fk("client_id", "clients");
-  table.fk("researcher_id", "researchers");
-
-  table.string("calculation_note", 500);
-});
-```
-
-> The bundled accounting block (`packages/blocks/accounting`) instead uses
-> double-entry rows with separate `money("debit")` and `money("credit")`
-> columns. The single signed-`amount` design above is a simpler alternative;
-> use whichever fits the system.
-
-### Revenue Recognition
-
-```typescript
-// When order completes, recognize revenue
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, order_id, client_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'unbilled_ar'::enums.account,
-    expense.amount_billed,  -- Positive = DEBIT (asset increases)
-    'revenue'::enums.journal_entry_type,
-    period_id,
-    order.id,
-    order.client_id,
-    'Revenue recognition for order ' || order.reference
-  )
-`);
-
-// Contra entry - credit revenue
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, order_id, client_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'service_revenue'::enums.account,
-    -expense.amount_billed,  -- Negative = CREDIT (revenue increases)
-    'revenue'::enums.journal_entry_type,
-    period_id,
-    order.id,
-    order.client_id,
-    'Service revenue for ' || order.reference
-  )
-`);
-```
-
-### Invoice Reclassification
-
-```typescript
-// When invoice is generated, reclassify unbilled_ar to accounts_receivable
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, ar_invoice_id, client_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'accounts_receivable'::enums.account,
-    invoice_total,  -- DEBIT
-    'revenue'::enums.journal_entry_type,
-    period_id,
-    invoice_id,
-    client_id,
-    'Invoice reclassification - unbilled to billed AR'
-  )
-`);
-
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, ar_invoice_id, client_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'unbilled_ar'::enums.account,
-    -invoice_total,  -- CREDIT (reduce unbilled)
-    'revenue'::enums.journal_entry_type,
-    period_id,
-    invoice_id,
-    client_id,
-    'Invoice reclassification - unbilled to billed AR'
-  )
-`);
-```
-
-### Expense Recognition
-
-```typescript
-// Record researcher expense
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, order_id, researcher_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'cogs_researcher_fees'::enums.account,
-    expense.amount_paid_researcher,  -- DEBIT (expense increases)
-    'expense'::enums.journal_entry_type,
-    period_id,
-    order.id,
-    researcher_id,
-    'Researcher cost for order ' || order.reference
-  )
-`);
-
-// Create liability
-s.modify(sql`
-  INSERT INTO db.journal_entries (
-    book, entry_date, status, account, amount,
-    entry_type, period_id, order_id, researcher_id, calculation_note
-  ) VALUES (
-    'statutory'::enums.book,
-    current_date,
-    'posted'::enums.ledger_status,
-    'accrued_research'::enums.account,
-    -expense.amount_paid_researcher,  -- CREDIT (liability increases)
-    'expense'::enums.journal_entry_type,
-    period_id,
-    order.id,
-    researcher_id,
-    'Accrued researcher payment for ' || order.reference
-  )
-`);
-```
-
-## Financial Reporting Queries
-
-### Trial Balance
-
-```sql
-select
-  account,
-  sum(amount) as balance
-from db.journal_entries
-where period_id = current_period_id
-  and status = 'posted'::enums.ledger_status
-group by account
-order by account
-```
-
-### Income Statement
-
-```sql
-select
-  'Revenue' as category,
-  sum(case when account = 'service_revenue'::enums.account then -amount else 0 end) as amount
-from db.journal_entries
-where period_id = current_period_id
-  and status = 'posted'::enums.ledger_status
-
-union all
-
-select
-  'Cost of Goods Sold' as category,
-  sum(case
-    when account in ('cogs_researcher_fees'::enums.account, 'cogs_court_fees'::enums.account)
-    then amount
-    else 0
-  end) as amount
-from db.journal_entries
-where period_id = current_period_id
-  and status = 'posted'::enums.ledger_status
-```
-
-## Best Practices
-
-1. **Use money type for currency** - Avoids floating-point precision issues
-2. **Store rates as bigints (cents) only when needed** - Explicit minor-unit storage can be useful, but convert deliberately when writing decimal money fields
-3. **Always use transactions** - Ensure debits = credits atomically
-4. **Validate entries sum to zero** - Implement checks in application logic
-5. **Use effective dates for rates** - Support historical accuracy and future changes
-6. **Track periods** - Associate entries with accounting periods for closing
-7. **Separate books** - statutory, management, tax may have different rules
-8. **Add calculation notes** - Audit trail for how amounts were calculated
-
-## Common Pitfalls
-
-1. **Mixing cents and decimal money** - Convert bigint cents to decimal amounts before writing decimal money fields
-2. **Mixing types** - Be explicit about bigint vs money vs double
-3. **Forgetting contra entries** - Every debit needs a credit
-4. **Rate priority bugs** - Test hierarchical lookups thoroughly
-5. **Missing effective date checks** - Rates should be time-bounded
+- **Floating-point amounts.** Never store currency in `real` or `double`
+  fields.
+- **Unsigned by accident.** `money` with explicit `{ precision, scale }` is
+  unsigned; refunds and adjustments then fail to insert.
+- **Cents and decimals mixed.** Convert integer minor units before writing a
+  decimal money field, and the reverse.
+- **Stored totals.** Derive totals and balances from line rows with queries
+  or views instead of storing them; see
+  [Accounting Domain Model](../domains/accounting.md#derived-values).
+- **Open-ended overlaps.** Two rates with the same scope and overlapping
+  dates make the lookup ambiguous; end the old rate when adding a new one.

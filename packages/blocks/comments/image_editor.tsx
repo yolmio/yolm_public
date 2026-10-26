@@ -4,7 +4,37 @@ import type { MentionsConfig } from "components/lexical/components/lexical_edito
 import { Data } from "std/data";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
+import { system } from "std/system";
 import { Show, useUniqueId } from "std/ui";
+
+/** Keeps the upload write out of every route that renders a comment editor. */
+export function registerCommentImageEditorProcedures() {
+  system.storedProcedure({
+    name: "comments_store_uploaded_image",
+    transaction: "caller",
+    inputScalars: [
+      { name: "comment_upload_request", type: "Json" },
+      {
+        name: "uploaded_comment_image_hash",
+        type: { type: "Bytes", maxLength: 32 },
+      },
+      { name: "p_content_type", type: "String" },
+    ],
+    procedure: (s) => {
+      s.modify(
+        sql`update db.comment_images set created_at = now()
+                where public_id = cast(comment_upload_request->>'id' as uuid)
+                  and uploaded_by_user_id = current_user and comment_id is null
+                  and blob_hash = uploaded_comment_image_hash`,
+      );
+      s.modify(
+        sql`insert into db.comment_images(public_id, uploaded_by_user_id, blob_hash, content_type)
+                values (cast(comment_upload_request->>'id' as uuid), current_user, uploaded_comment_image_hash, p_content_type)
+                on conflict (public_id) do nothing`,
+      );
+    },
+  });
+}
 
 export function CommentImageEditor(props: {
   id: Sql | string;
@@ -98,23 +128,20 @@ export function CommentImageEditor(props: {
                 defHashScalar: "uploaded_comment_image_hash",
               });
               s.startTransaction();
-              s.modify(
-                sql`update db.comment_images set created_at = now()
-                where public_id = cast(comment_upload_request->>'id' as uuid)
-                  and uploaded_by_user_id = current_user and comment_id is null
-                  and blob_hash = uploaded_comment_image_hash`,
-              );
-              s.modify(
-                sql`insert into db.comment_images(public_id, uploaded_by_user_id, blob_hash, content_type)
-                values (cast(comment_upload_request->>'id' as uuid), current_user, uploaded_comment_image_hash, comment_dom_image.type)
-                on conflict (public_id) do nothing`,
-              );
+              s.callStoredProcedure("comments_store_uploaded_image", {
+                inputScalars: {
+                  comment_upload_request: sql`comment_upload_request`,
+                  uploaded_comment_image_hash: sql`uploaded_comment_image_hash`,
+                  p_content_type: sql`comment_dom_image.type`,
+                },
+              });
               s.setScalar(
                 "ui.comment_image_result",
                 sql`json_build_object(
                 'id', comment_upload_request->>'id',
                 'src', '/api/comment-images/' || (comment_upload_request->>'id'),
                 'blobHash', bytes.to_hex(uploaded_comment_image_hash),
+                'retryAfterMs', 82800000,
                 'contentType', comment_dom_image.type
               )`,
               );

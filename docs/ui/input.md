@@ -6,245 +6,99 @@ tags:
   - components
   - input
   - form
+related:
+  - ui/textarea.md
+  - ui/form.md
+  - ui/form_control.md
+  - ui/styling.md
 ---
 
 # Input
 
-The Input component renders a styled text input with support for decorators, icons, error states, and two-way binding to UI scalars or record fields.
+`Input` renders a styled single-line `<input>` with optional icons and
+decorators, bound to a UI scalar or record field.
 
 ```tsx
 import { Input } from "components/input";
+
+<Input bindScalar="search_query" startIcon="Search" placeholder="Search..." />
 ```
 
-## Basic Usage
+For editing database row fields, use [`Form`](./form.md) with `Form.Field`
+rather than a bare `Input`; `Form` owns validation, errors, and submit.
+
+## Value Binding
+
+Use exactly one mode; combining them throws.
+
+- `bindScalar="name"`: value is `ui.name`; `onInput` sets it to `target_value`.
+- `bindRecordField="record.field"` (or `ui.record.field`): value is the field;
+  `onInput` runs `update record set field = target_value`. A path without a
+  record part throws.
+- `value` (a SQL expression, not a JS string) plus `onInput`: custom handling.
+  `target_value` is the current text, also passed as the second argument.
 
 ```tsx
 <Input
-  value={sql`input_text`}
-  onInput={(s) => s.setScalar("input_text", sql`target_value`)}
-  placeholder={sql.lit`Enter text...`}
+  value={sql`code`}
+  onInput={(s, newValue) => s.setScalar("code", sql`upper(${newValue})`)}
 />
 ```
 
-**Important:** `value` is a SQL expression evaluated at runtime. `placeholder`
-and `type` may be plain strings or SQL expressions; use `sql` tagged templates
-for dynamic values.
-
-## Binding Shortcuts
-
-Instead of manually wiring `value` and `onInput`, use `bindScalar` or `bindRecordField` for automatic two-way binding.
-
-### bindScalar
-
-Binds the input to a UI scalar. Automatically sets `value` to `ui.<scalar>` and generates an `onInput` handler that calls `setScalar`.
-
-```tsx
-<Data procedure={(s) => {
-  s.defScalar("search_query", sql.lit``);
-}}>
-
-<Input bindScalar="search_query" placeholder={sql.lit`Search...`} />
-```
-
-### bindRecordField
-
-Binds the input to a field on a record or table row. The field path must include the record name (e.g., `form.name` or `ui.form.name`).
-
-```tsx
-<Input bindRecordField="form.title" placeholder={sql.lit`Title`} />
-```
-
-**Note:** You cannot combine `bindScalar`, `bindRecordField`, `value`, or `onInput` with each other. Use exactly one binding approach.
-
-## Common Props
-
-Use the exported TypeScript props for the full `Input` contract. The solution
-patterns agents usually need are:
-
-- Choose exactly one binding mode: `bindScalar`, `bindRecordField`, or
-  `value` + `onInput`.
-- `placeholder`, `value`, `type`, `error`, `disabled`, and `autoFocus` may be
-  SQL expressions when runtime state controls them.
-- `variant`, `color`, `size`, `className`, `startIcon`, and `endIcon` are
-  generation-time values. Use `<Show>` / `<Switch>` if runtime state needs a
-  different variant or color.
-- `size` supports `"xs"`, `"sm"`, `"md"`, and `"lg"`.
-- Use `startDecorator` / `endDecorator` for custom TSX content such as buttons
-  or spinners.
-
-## Icons and Decorators
-
-### startIcon / endIcon
-
-Shorthand for placing a Material Design icon inside the input. Pass the icon name as a string.
-
-```tsx
-<Input startIcon="Search" placeholder={sql.lit`Search...`} bindScalar="search_query" />
-<Input endIcon="Visibility" value={sql`password_field`} type="password" />
-```
-
-### startDecorator / endDecorator
-
-For custom content (styled icons, spinners, buttons) use decorator props. These accept any TSX node.
+`onInput` fires on every keystroke. Keyboard handlers read `event.key`:
 
 ```tsx
 <Input
-  value={sql`editing_text`}
-  endDecorator={
-    <Show when={sql`saving_edit`}>
-      <CircularProgress size="sm" />
-    </Show>
-  }
-/>
-```
-
-**Note:** You cannot use both `startIcon` and `startDecorator` (or `endIcon` and `endDecorator`) at the same time.
-
-## Event Handling
-
-### onInput
-
-Fires on every keystroke. Use `target_value` to access the current input value.
-
-```tsx
-<Input
-  value={sql`input_text`}
-  onInput={(s) => s.setScalar("input_text", sql`target_value`)}
-/>
-```
-
-The second argument `newValue` is also available as a convenience:
-
-```tsx
-<Input
-  value={sql`input_text`}
-  onInput={(s, newValue) => {
-    s.setScalar("input_text", newValue);
-  }}
-/>
-```
-
-### onKeyDown
-
-Respond to specific key presses using `event.key`:
-
-```tsx
-<Input
-  value={sql`input_text`}
+  bindScalar="query"
   onKeyDown={(s) => {
-    s.if(sql`event.key = 'Enter'`, (s) => {
-      // Submit logic
-    });
     s.if(sql`event.key = 'Escape'`, (s) => {
-      s.setScalar("input_text", sql.lit``);
+      s.setScalar("query", sql.lit``);
     });
   }}
 />
 ```
 
-## Error State
+## Non-Obvious Props
 
-Pass a SQL boolean expression to `error` to show danger-colored styling:
+- SQL-capable: `value`, `placeholder`, `type` (also plain strings), `error`,
+  `disabled`, `autoFocus`.
+- Generation-time: `variant`, `color`, `size`, `className`, `startIcon`,
+  `endIcon`. They follow the shared
+  [styling props](./styling.md#color-variant-and-size); defaults `outlined` /
+  `neutral` / `md`.
+- `error` (SQL boolean) toggles danger styling at runtime.
+- `startIcon` / `endIcon` take a Material icon name; `startDecorator` /
+  `endDecorator` take any node (a spinner, an `IconButton`). Using both on the
+  same side throws.
+- Inside a `FormControl`, the input's `id` defaults to the control's id so the
+  `FormLabel` links automatically.
+- `type="color"` gets dedicated styling for the native color picker.
+- Remaining `<input>` attributes pass through.
+
+See `InputProps` in `components/input` for the full contract.
 
 ```tsx
-<Input
-  bindScalar="email"
-  error={sql`length(email) > 0 and position('@' in email) = 0`}
-  placeholder={sql.lit`Email address`}
-/>
-```
-
-## With FormControl
-
-Wrap Input in a `FormControl` with `FormLabel` for accessible labeled inputs. The `id` is automatically linked between the label and input.
-
-```tsx
-import { FormControl } from "components/form_control";
-import { FormLabel } from "components/form_label";
-
-<FormControl fullWidth sx={{ mb: 2 }}>
-  <FormLabel htmlFor="email">Email</FormLabel>
+<FormControl>
+  <FormLabel>Email</FormLabel>
   <Input
     bindScalar="login_email"
     type="email"
-    placeholder="john@example.com"
-    id="email"
-    fullWidth
+    error={sql`length(login_email) > 0 and position('@' in login_email) = 0`}
+    endDecorator={
+      <Show when={sql`checking_email`}>
+        <CircularProgress size="sm" />
+      </Show>
+    }
   />
 </FormControl>
 ```
 
-## Common Patterns
-
-### Search Input
-
-```tsx
-<Data procedure={(s) => {
-  s.defScalar("search_query", sql.lit``);
-}}>
-
-<Input
-  placeholder={sql.lit`Search`}
-  bindScalar="search_query"
-  startIcon="Search"
-  className="md:w-[30%]"
-/>
-```
-
-### Controlled Input with Server Submit
-
-```tsx
-<Data procedure={(s) => {
-  s.defScalar("input_text", sql.lit``);
-}}>
-
-<Input
-  value={sql`input_text`}
-  onInput={(s) => s.setScalar("input_text", sql`target_value`)}
-  onKeyDown={(s) => {
-    s.if(sql`event.key = 'Enter'`, (s) => {
-      s.tryServer({
-        body: (s) => {
-          s.startTransaction();
-          s.modify(sql`insert into db.todos (title) values (ui.input_text)`);
-          s.commitTransaction();
-          s.increment("ui.refresh_key");
-        },
-        catch: (s) => s.setScalar("error", sql.lit`Failed to save`),
-      });
-    });
-  }}
-/>
-```
-
-### Color Picker
-
-The Input component supports `type="color"` with special styling for the native color picker:
-
-```tsx
-<Input type="color" value={sql`selected_color`} size="sm" />
-```
-
 ## Common Mistakes
 
-```tsx
-// ❌ WRONG - Using a JS string for value
-<Input value="hello" />
-
-// ✅ CORRECT - Use SQL expressions
-<Input value={sql`my_scalar`} />
-<Input value={sql.lit`hello`} />
-
-// ❌ WRONG - Combining bindScalar with value or onInput
-<Input bindScalar="name" value={sql`name`} />
-<Input bindScalar="name" onInput={(s) => s.setScalar("name", sql`target_value`)} />
-
-// ✅ CORRECT - Use one approach
-<Input bindScalar="name" />
-
-// ❌ WRONG - Using SQL for color or variant
-<Input color={sql`'primary'`} variant={sql`'outlined'`} />
-
-// ✅ CORRECT - Static strings only
-<Input color="primary" variant="outlined" />
-```
+- `value="hello"`: `value` must be SQL (``sql`my_scalar` `` or
+  ``sql.lit`hello` ``).
+- Combining `bindScalar` / `bindRecordField` with `value` or `onInput`.
+- Saving with `s.tryServer` from `onKeyDown` or `onInput`. Use `Form` for field
+  edits or [`ActionButton`](./action_button.md) for a command; both refetch
+  on success by default.
+  There is no `refresh_key` scalar.

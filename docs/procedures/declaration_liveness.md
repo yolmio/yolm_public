@@ -152,8 +152,8 @@ Read the table from the children:
 <Data procedure={(s) => {
   s.defTable("users", sql`select id, name from db.users`);
 }}>
-  <Each table="users" recordName="user">
-    <p>{sql`user.name`}</p>
+  <Each table="users" recordName="user_record">
+    <p>{sql`user_record.name`}</p>
   </Each>
 </Data>
 ```

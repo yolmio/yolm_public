@@ -1,6 +1,8 @@
 import { sql } from "../std/sql_utils";
 import type { Sql } from "../std/sql_utils";
 import type { StyleObject } from "std/style_types";
+import { backLinkAttrs } from "./utils";
+import type { BackLinkOpts } from "./utils";
 
 const styles: StyleObject = {
   color: "primary-500",
@@ -12,10 +14,21 @@ const styles: StyleObject = {
 /**
 Just wraps the <a> tag, but has nicer styling integrated with the theme.
 
+Set `backLink` on a link that returns to a parent or list page: it returns to
+the most recent earlier history entry for `href`'s path, restoring that page's
+filters and scroll, and is a plain link to `href` otherwise.
+
 @category Routing Component
  */
-export function Link(props: JSX.IntrinsicElements["a"]) {
-  return <a {...props} sx={props.sx ? [styles, props.sx] : styles} />;
+export function Link(props: JSX.IntrinsicElements["a"] & BackLinkOpts) {
+  const { backLink, ...rest } = props;
+  return (
+    <a
+      {...rest}
+      {...backLinkAttrs(props.href, backLink)}
+      sx={props.sx ? [styles, props.sx] : styles}
+    />
+  );
 }
 
 /**

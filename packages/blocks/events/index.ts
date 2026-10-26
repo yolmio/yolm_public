@@ -49,6 +49,21 @@ export interface AppendPhysicalTraceOptions {
   toCustodianUserId?: NumericExpr;
 }
 
+export interface EventStore {
+  readonly supportsCausality: boolean;
+  readonly supportsIdempotency: boolean;
+  registerAggregateType(type: RegisteredEventType): void;
+  registerEventType(type: RegisteredEventType): void;
+  emit<T extends IServerBaseStatements>(s: T, opts: EmitEventOptions): void;
+  appendPhysicalTrace<T extends IServerBaseStatements>(
+    s: T,
+    opts: AppendPhysicalTraceOptions,
+  ): void;
+  idempotencyKeyAvailable(key: Sql): Sql;
+  aggregateIdForIdempotencyKey(key: Sql, aggregateType: string): Sql;
+  activityQuery(recordType: string, recordId: NumericExpr): Sql;
+}
+
 /**
  * Shared SQL event store for typed, domain-owned events.
  *
@@ -58,6 +73,8 @@ export interface AppendPhysicalTraceOptions {
  * cross-domain read model; it is not the source of truth for domain behavior.
  */
 export class EventsBlock implements Block {
+  readonly supportsCausality = true;
+  readonly supportsIdempotency = true;
   blockName = "EventsBlock";
   blockDisplayName = "Events";
   componentDependencies: string[] = [];
@@ -235,6 +252,28 @@ export class EventsBlock implements Block {
         ${opts.effectiveAt ?? sql`now()`}
       )
     `);
+  }
+
+  idempotencyKeyAvailable(key: Sql) {
+    return sql`not exists(select 1 from db.events where idempotency_key = ${key})`;
+  }
+
+  aggregateIdForIdempotencyKey(key: Sql, aggregateType: string) {
+    return sql`(select aggregate_id from db.events where idempotency_key = ${key} and aggregate_type = ${
+      sql.lit(aggregateType)
+    } limit 1)`;
+  }
+
+  activityQuery(recordType: string, recordId: NumericExpr) {
+    return sql`
+      select ev.id, ev.event_type, ev.summary, ev.effective_at, ev.recorded_at
+      from db.events ev
+      join db.event_bindings binding on binding.event_id = ev.id
+      where binding.record_type = ${sql.lit(recordType)}
+        and binding.record_id = ${recordId}
+      order by ev.effective_at desc, ev.id desc
+      limit 25
+    `;
   }
 
   validate() {

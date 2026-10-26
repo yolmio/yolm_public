@@ -14,29 +14,38 @@ Yolm SQL provides functions for generating random values, useful for testing, sa
 Functions are available in the `random.*` namespace or as `rand_*`
 non-namespaced aliases.
 
+`random.real`, `random.double`, `random.int`, `random.bigint`, `random.bool`,
+and `random.uuid` draw from the runtime's random source, which is seeded and
+deterministic in simulation and tests. Do not use them for secrets. Use
+`random.bytes` / `crypto.random_bytes`, which always read the cryptographically
+secure system generator.
+
 ## Signatures
 
 | Function | Aliases | Result |
 | --- | --- | --- |
-| `random.real()` | `rand_real()`, `random()` | `double` in `[0, 1)` |
+| `random.real()` | `rand_real()`, `random()` | `double` in `[0, 1)`, generated at 32-bit precision |
 | `random.double()` | `rand_double()` | `double` in `[0, 1)` |
 | `random.int()` | `rand_int()` | random `int` |
-| `random.int(max)` | `rand_int(max)` | random `int` in `[0, max)` |
-| `random.int(min, max)` | `rand_int(min, max)` | random `int` in `[min, max)` |
 | `random.bigint()` | `rand_bigint()` | random `bigint` |
-| `random.bigint(max)` | `rand_bigint(max)` | random `bigint` in `[0, max)` |
-| `random.bigint(min, max)` | `rand_bigint(min, max)` | random `bigint` in `[min, max)` |
 | `random.bool()` | `rand_bool()` | random boolean |
 | `random.uuid()` | `rand_uuid()`, `uuid()`, `gen_random_uuid()` | UUID v4 |
-| `random.bytes(length)` | `crypto.random_bytes(length)`, `random_bytes(length)`, `gen_random_bytes(length)` | secure random bytes |
+| `random.bytes(length)` | `crypto.random_bytes(length)`, `random_bytes(length)`, `gen_random_bytes(length)` | cryptographically secure random `bytes` (server only) |
+
+`random.int` and `random.bigint` also accept optional bound arguments, but the
+current engine does not apply them consistently: the compiled query path
+ignores them, and the interpreter ignores a single bound and treats two bounds
+as an inclusive `[min, max]` range. For a bounded value, scale
+`random.double()` instead; see [Bounded Integers](#bounded-integers).
 
 ## Random Numbers
 
 ### random.real()
 
-Generates a random 32-bit float in [0, 1). Use it inside a larger real-typed
-expression; for a bare value or in `order by`, use
-[`random.double()`](#randomdouble) instead, which avoids a float-type mismatch.
+Generates a random number in [0, 1). The result is typed `double`, but the
+value is produced by a 32-bit float generator. Prefer
+[`random.double()`](#randomdouble), especially for a bare value or in
+`order by`, where the 32-bit runtime value can mismatch the `double` type.
 
 Aliases: `rand_real()`, `random()`
 
@@ -59,38 +68,37 @@ select random.double();
 
 ### random.int()
 
-Generates a random 32-bit signed integer. With bounds, the upper bound is
-exclusive.
+Generates a random 32-bit signed integer across the full range.
 
 Alias: `rand_int()`
 
 ```sql
 select random.int();
 -- Random integer from -2147483648 to 2147483647
-
-select random.int(100);
--- Random integer in range [0, 100)
-
-select random.int(1, 101);
--- Random integer in range [1, 101)
 ```
 
 ### random.bigint()
 
-Generates a random 64-bit signed integer. With bounds, the upper bound is
-exclusive.
+Generates a random 64-bit signed integer across the full range.
 
 Alias: `rand_bigint()`
 
 ```sql
 select random.bigint();
 -- Random large integer
+```
 
-select random.bigint(1000000);
--- Random bigint in range [0, 1000000)
+### Bounded Integers
 
-select random.bigint(1, 1000000);
--- Random bigint in range [1, 1000000)
+Scale `random.double()` and cast; casting a `double` to `int` truncates toward
+zero.
+
+```sql
+-- Random integer in [0, 100)
+select cast(random.double() * 100 as int);
+
+-- Random integer in [1, 6]
+select 1 + cast(random.double() * 6 as int);
 ```
 
 ## Random Boolean
@@ -131,9 +139,9 @@ insert into items (id, name) values (random.uuid(), 'New Item');
 
 ### random.bytes(length) / crypto.random_bytes(length)
 
-Generates cryptographically secure random bytes.
-
-Aliases: `random_bytes()`, `gen_random_bytes()`
+Generates cryptographically secure random bytes from the system generator.
+`random.bytes`, `crypto.random_bytes`, `random_bytes`, and `gen_random_bytes`
+are the same function. Server only.
 
 ```sql
 select crypto.random_bytes(16);
@@ -147,7 +155,8 @@ select bytes.to_hex(crypto.random_bytes(16));
 -- 'a1b2c3d4e5f6789012345678901234ab'
 ```
 
-Use `crypto.random_bytes` when security matters (tokens, keys, salts).
+Use `random.bytes` / `crypto.random_bytes` when security matters (tokens,
+keys, salts).
 
 ## Common Patterns
 
@@ -156,11 +165,11 @@ Use `crypto.random_bytes` when security matters (tokens, keys, salts).
 ```sql
 -- Random 10% sample
 select * from large_table
-where random.real() < 0.1;
+where random.double() < 0.1;
 
 -- Random N rows (approximate)
 select * from products
-where random.real() < 100.0 / (select count(*) from products)
+where random.double() < 100.0 / (select count(*) from products)
 limit 100;
 ```
 
@@ -192,18 +201,19 @@ limit 5;
 select
   id,
   name,
-  round(random.real() * 100, 2) as price
+  round(random.double() * 100, 2) as price
 from products;
 
--- Random dates in range
+-- Random dates in 2023 (% keeps the dividend's sign, so derive the
+-- offset from random.double() rather than random.int() % 365)
 select
-  date '2023-01-01' + (random.int() % 365) as random_date
+  date '2023-01-01' + cast(random.double() * 365 as int) as random_date
 from series.int(1, 100);
 
 -- Random status
 select
   id,
-  case (abs(random.int()) % 3)
+  case cast(random.double() * 3 as int)
     when 0 then 'pending'
     when 1 then 'active'
     when 2 then 'completed'
@@ -237,7 +247,7 @@ with weighted as (
 )
 select *
 from weighted
-where cumulative_weight >= random.real() * total_weight
+where cumulative_weight >= random.double() * total_weight
 order by cumulative_weight
 limit 1;
 ```
@@ -249,7 +259,7 @@ limit 1;
 select
   user_id,
   case
-    when random.real() < 0.5 then 'control'
+    when random.double() < 0.5 then 'control'
     else 'treatment'
   end as test_group
 from users;
@@ -258,6 +268,8 @@ from users;
 ## Notes
 
 - Random functions generate new values for each row/evaluation
-- Results are not reproducible across queries (no seed support)
-- For cryptographic purposes, always use `crypto.random_bytes`
-- `random.*` functions are faster but not cryptographically secure
+- Results are not reproducible across queries in production (no seed support)
+- For cryptographic purposes, always use `random.bytes` /
+  `crypto.random_bytes`
+- The other `random.*` functions use the runtime's random source, which is
+  deterministic in simulation and tests, so they are not suitable for secrets

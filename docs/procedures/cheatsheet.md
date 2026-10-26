@@ -1,265 +1,89 @@
 ---
 title: Procedure Statements Cheatsheet
-description: Compact reference for common Yolm procedure statements, control flow, transactions, requests, and debugging helpers.
+description: One-page index of common Yolm procedure statements, control flow, transactions, server calls, and debugging helpers.
 tags:
   - procedures
   - cheatsheet
+related:
+  - procedures/base_statements.md
+  - procedures/server_statements.md
+  - procedures/dom_statements.md
+  - procedures/patterns.md
 ---
 
 # Procedure Statements Cheatsheet
 
-Quick reference for commonly used procedure statements. See [base-statements](./base_statements.md), [dom-statements](./dom_statements.md), [server-statements](./server_statements.md), and [patterns](./patterns.md) for full details.
+One-line reminders only. Details and options live in
+[base statements](./base_statements.md),
+[server statements](./server_statements.md),
+[DOM statements](./dom_statements.md), and [patterns](./patterns.md).
 
-## Variable Declarations
-
-### scalar - Single value
-
-```typescript
-s.defScalar("count", sql`0`);
-s.defScalar("name", sql.lit`John`);
-s.defScalar("total", sql`(select count(*) from db.users)`);
-```
-
-### defScalar - Explicit type (nullable)
+## Declarations And Scalars ([base](./base_statements.md#variable-declarations))
 
 ```typescript
-s.defScalar("result", { type: "String" });                    // starts as null
-s.defScalar("user_id", { type: "BigInt", expr: sql`some_id` });
-s.defScalar("amount", { type: { type: "Decimal", precision: 10, scale: 2, signed: false } });
-```
-
-### record - Single row
-
-```typescript
-s.defRecord("user", sql`select * from db.users where id = ${userId}`);
-// Access: sql`user.name`, sql`user.email`
-// Null check: sql`user.id is not null`
-```
-
-### table - Multiple rows
-
-```typescript
+s.defScalar("count", sql`0`);                              // typed from expr
+s.defScalar("result", { type: "String" });                 // starts null
+s.defRecord("user_record", sql`select * from db.users where id = ${userId}`);
 s.defTable("orders", sql`select * from db.orders where user_id = ${userId}`);
-// Use with <Each table="orders" recordName="order">
+s.setScalar("count", sql`count + 1`);
+s.increment("count"); s.decrement("count", 5); s.toggle("is_active");
 ```
 
-## Scalar Operations
+## Control Flow ([base](./base_statements.md#control-structures))
 
 ```typescript
-s.setScalar("counter", sql`counter + 1`);
-s.increment("counter");            // +1
-s.increment("counter", 5);         // +5
-s.decrement("counter");            // -1
-s.toggle("is_active");             // flips boolean
+s.if(cond, then, else?); s.elseIf(cond, then); s.else(then); s.unless(cond, then);
+s.cases({ cases: [{ condition, body }], default });
+s.while(cond, body); s.loop(body); s.loopN(sql`5`, body);
+s.forEachTable("orders", "order", body); s.forEachQuery(query, "row", body);
+s.forEachTableWithOpts({ table, where, orderBy, cursorName, body });
+s.break(); s.breakIf(cond); s.continue(); s.continueIf(cond);
+s.return(expr?); s.returnIf(cond, expr?);
+s.block("name", body); s.exitBlockIf(cond, "name");
 ```
 
-## Control Flow
-
-### if / elseIf / else
+## Errors ([base](./base_statements.md#exception-handling))
 
 ```typescript
-s.if(sql`count > 0`, (s) => { /* ... */ });
-s.if(sql`count > 0`, (s) => { /* then */ }, (s) => { /* else */ });
-
-s.if(sql`count > 10`, (s) => { /* ... */ });
-s.elseIf(sql`count > 0`, (s) => { /* ... */ });
-s.else((s) => { /* ... */ });
+s.throwError(sql.lit`Invalid input`); s.throwErrorIf(cond, sql.lit`No records`);
+s.try({ body, errorName: "err", catch, finally });   // err.message, err.type
 ```
 
-### unless
+## Server ([server](./server_statements.md))
 
 ```typescript
-s.unless(sql`is_empty`, (s) => { /* runs when NOT is_empty */ });
-```
-
-### cases (switch-like)
-
-```typescript
-s.cases({
-  cases: [
-    { condition: sql`status = 'pending'`, body: (s) => { /* ... */ } },
-    { condition: sql`status = 'approved'`, body: (s) => { /* ... */ } },
-  ],
-  default: (s) => { /* ... */ },
-});
-```
-
-## Loops
-
-### while
-
-```typescript
-s.while(sql`counter < 10`, (s) => s.increment("counter"));
-```
-
-### forEachTable / forEachQuery
-
-```typescript
-s.forEachTable("users", "user", (s) => {
-  s.debugExpr(sql`user.name`);
-});
-
-s.forEachTableWithOpts({
-  table: "db.orders",
-  where: sql`status = 'pending'`,
-  orderBy: sql`created_at desc`,
-  cursorName: "order",
-  body: (s) => { /* ... */ },
-});
-
-s.forEachQuery(sql`select * from db.users where active`, "user", (s) => {
-  s.debugExpr(sql`user.name`);
-});
-```
-
-### loop / loopN
-
-```typescript
-s.loop((s) => { s.breakIf(sql`done`); });
-s.loopN(sql`5`, (s) => { /* runs 5 times */ });
-```
-
-### break / continue
-
-```typescript
-s.break();
-s.breakIf(sql`condition`);
-s.continue();
-s.continueIf(sql`condition`);
-```
-
-## Data Modification
-
-```typescript
-s.modify(sql`insert into db.todos (title) values (${title})`);
 s.modify(sql`update db.todos set done = true where id = ${id}`);
-s.modify(sql`delete from db.todos where id = ${id}`);
+s.startTransaction(); s.commitTransaction(); s.rollbackTransaction();
+s.request({ uri, method, json, defReceiveJson: "data" });   // keep outside transactions
 ```
 
-## Transactions
+## UI / DOM ([dom](./dom_statements.md))
+
+Mutations from the UI: use `Form` for edited record fields and `ActionButton`
+for commands; both own loading, errors, and refetch. See
+[mutation loading and error states](./patterns.md#mutation-loading-and-error-states).
 
 ```typescript
-s.startTransaction();
-s.modify(sql`insert into db.todos (title) values ('Buy milk')`);
-s.commitTransaction();
-// or
-s.rollbackTransaction();
+s.server(body); s.tryServer({ body, errorName, catch, finally });  // escape hatch
+s.refetch();                    // re-run Data queries after a raw server write
+s.commitUiTreeChanges();        // flush pending UI state before slow work
+s.navigate(sql.lit`/dashboard`); s.setQueryParam("page", sql`2`);
 ```
 
-## tryServer Pattern
-
-From event handlers (DomStatements), call server-side code with error handling:
+## Debugging ([base](./base_statements.md#debug))
 
 ```typescript
-s.setScalar("loading", sql.true);
-s.commitUiTreeChanges();  // flush UI changes immediately
-
-s.tryServer({
-  body: (s) => {
-    s.startTransaction();
-    s.modify(sql`insert into db.todos (title) values (ui.input_text)`);
-    s.commitTransaction();
-    s.increment("ui.refresh_key");
-  },
-  errorName: "server_error",
-  catch: (s) => {
-    s.debugExpr(sql`server_error.message`);
-    s.setScalar("error_msg", sql.lit`Something went wrong`);
-  },
-  finally: (s) => {
-    s.setScalar("loading", sql.false);
-  },
-});
+s.debug("message"); s.debugExpr(sql`user_record.name`); s.debugQuery(sql`select * from db.users`);
 ```
 
-### Simple server call (no error handling)
+## Where Statements Are Available
 
-```typescript
-s.server((s) => {
-  s.modify(sql`insert into db.todos (title) values ('task')`);
-});
-```
+| Statement | Context |
+|-----------|---------|
+| declarations, control flow, `modify`, `try`, `debug*` | All |
+| `startTransaction` / `commitTransaction` / `request` | Server |
+| `server` / `tryServer` / `commitUiTreeChanges` | DOM |
+| `refetch`, `navigate` | DOM and UI server |
 
-## Error Handling
-
-### throwError
-
-```typescript
-s.throwError(sql.lit`Invalid input`);
-s.throwError(sql.lit`Not found`, sql.lit`User does not exist`);
-s.throwErrorIf(sql`count = 0`, sql.lit`No records`);
-s.throwErrorUnless(sql`is_valid`, sql.lit`Validation failed`);
-```
-
-### try / catch / finally
-
-```typescript
-s.try({
-  body: (s) => { /* risky operation */ },
-  errorName: "err",
-  catch: (s) => s.debugExpr(sql`err.message`),
-  finally: (s) => { /* cleanup */ },
-});
-```
-
-## UI Operations
-
-### commitUiTreeChanges
-
-Flushes pending UI state changes to the DOM before continuing (e.g. show a spinner before a server call):
-
-```typescript
-s.setScalar("loading", sql.true);
-s.commitUiTreeChanges();
-// UI now shows loading state
-```
-
-### navigate
-
-```typescript
-s.navigate(sql.lit`/dashboard`);
-s.navigate(sql.lit`/dashboard`, sql`true`);  // replace history entry
-s.setQueryParam("page", sql`2`);
-```
-
-## Debugging
-
-```typescript
-s.debug("Processing user data");       // static message
-s.debugExpr(sql`user.name`);           // log expression value
-s.debugQuery(sql`select * from db.users`);  // log query results
-```
-
-## Blocks
-
-```typescript
-s.block((s) => { /* scoped block */ });
-
-s.block("my_block", (s) => {
-  s.exitBlockIf(sql`condition`, "my_block");  // early exit
-});
-```
-
-## Quick Reference Table
-
-| Statement | Context | Purpose |
-|-----------|---------|---------|
-| `defScalar` | All | Declare single value |
-| `defRecord` | All | Declare single row |
-| `defTable` | All | Declare result set |
-| `setScalar` | All | Update scalar value |
-| `increment` / `decrement` | All | Adjust numeric scalar |
-| `toggle` | All | Flip boolean scalar |
-| `modify` | All | INSERT/UPDATE/DELETE |
-| `if` / `elseIf` / `else` | All | Conditional branching |
-| `while` / `loop` / `loopN` | All | Loops |
-| `forEachTable` / `forEachQuery` | All | Row iteration |
-| `throwError` | All | Raise error |
-| `try` | All | Error handling |
-| `debug` / `debugExpr` | All | Logging |
-| `startTransaction` | Server | Begin transaction |
-| `commitTransaction` | Server | Commit transaction |
-| `rollbackTransaction` | Server | Rollback transaction |
-| `server` / `tryServer` | DOM | Call server from UI |
-| `commitUiTreeChanges` | DOM | Flush UI changes |
-| `navigate` | DOM / Server | Page navigation |
+See [statement builder type reference](./statements_reference.md) for the
+full type hierarchy.

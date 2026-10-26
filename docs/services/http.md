@@ -37,10 +37,8 @@ api.post("/event", {
       sql`cf_connecting_ip`,
     );
 
-    s.modify(sql`
-      insert into db.audit_log (event, ip, ts)
-      values ('login', ${clientIp}, now())
-    `);
+    s.defScalar("client_ip", clientIp);
+    // use client_ip for rate limiting, geo checks, or the response...
   },
 });
 ```
@@ -97,21 +95,23 @@ for (const route of legacyRouteVariants("SearchOrder", "GetSearchOrders")) {
 `requireHeaderApiKey(s, opts)` reads an API key header, rejects missing keys,
 and checks the value against a SQL query that returns allowed keys as a single
 `value` column. If the query returns no rows, all non-empty keys are rejected.
+Keep the keys in an encrypted server-side static secret rather than a database
+config table.
 
 ```typescript
 import { requireHeaderApiKey } from "services/http";
+import { getStaticSecret } from "std/services";
 import { sql } from "std/sql_utils";
 
 api.post("/legacy", {
   procedure: (s) => {
     requireHeaderApiKey(s, {
       scalarName: "legacy_api_key",
+      // `LEGACY_API_KEYS` is a static secret holding `|`-separated keys
       allowedKeys: sql`
-        select split.value
-        from db.app_configs
-        left join string.split(config_value, '|') as split
-        where config_key = 'ApiKeys'
-          and split.value != ''
+        select value
+        from string.split(${getStaticSecret(sql.lit`LEGACY_API_KEYS`)}, '|')
+        where value != ''
       `,
       missingMessage: sql.lit`API Key is missing.`,
       unauthorizedMessage: sql.lit`Unauthorized client.`,

@@ -23,6 +23,7 @@ import type { DomStatements, StateStatements } from "std/statements";
 import { createStyles, getVariantStyle } from "std/style_utils";
 import { system } from "std/system";
 import { Each, Route, Show } from "std/ui";
+import type { Node } from "std/ui";
 import { Data } from "std/data";
 
 const styles = createStyles({
@@ -2301,6 +2302,11 @@ export interface DbManagementPageProps {
   allow?: BooleanExpr;
   /** Number of columns rendered in the query result table. */
   queryColumnCount?: number;
+  /**
+   * Wraps the route content (inside the `<Route>`). Useful for adding
+   * authorization or layout wrappers while keeping the page self-routing.
+   */
+  wrapper?: (children: Node) => Node;
 }
 
 /**
@@ -2424,9 +2430,11 @@ Component that provides a page for database management tasks, including SQL quer
 
  */
 export function DbManagementPage(props: DbManagementPageProps = {}) {
+  const content = <DbManagement {...props} />;
+  const wrapped = props.wrapper ? props.wrapper(content) : content;
   return (
     <Route path={props.path ?? "/db-management"} title="Database Management">
-      <DbManagement {...props} />
+      {wrapped}
     </Route>
   );
 }

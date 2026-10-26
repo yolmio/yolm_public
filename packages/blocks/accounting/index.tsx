@@ -65,6 +65,9 @@ const tabStyles = {
  * - ap_bills (already exists)
  * - client_rates (already exists)
  * - researcher_rates (already exists)
+ *
+ * @deprecated New systems use `LedgerBlock` (blocks/ledger) with
+ * `LedgerDocumentsBlock`, `LedgerBankingBlock`, and `LedgerAssetsBlock`.
  */
 export class AccountingBlock implements Block {
   blockName = "AccountingBlock";

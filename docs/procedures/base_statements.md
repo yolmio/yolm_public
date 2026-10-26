@@ -15,7 +15,7 @@ These statements are available in all procedure types.
 ## Data Modification
 
 ```typescript
-s.modify(sql`INSERT INTO db.users (name) VALUES ('John')`);
+s.modify(sql`insert into db.users (name) values ('John')`);
 ```
 
 ## Flow Control
@@ -53,7 +53,7 @@ s.returnUnless(condition, sql`value`);
 ### Tables
 
 ```typescript
-s.defTable('temp_users', sql`SELECT * FROM db.users WHERE active = true`);
+s.defTable('temp_users', sql`select * from db.users where active = true`);
 
 s.defTable('temp_users', {
   fields: [
@@ -66,7 +66,7 @@ s.defTable('temp_users', {
 ### Records
 
 ```typescript
-s.defRecord('user_info', sql`SELECT name, email FROM db.users WHERE id = 1`);
+s.defRecord('user_info', sql`select name, email from db.users where id = 1`);
 
 s.defRecord('user', {
   fields: [
@@ -80,7 +80,7 @@ s.defRecord('user', {
 
 ```typescript
 // defScalar(name, expr) - requires an expression
-s.defScalar('total_count', sql`(SELECT COUNT(*) FROM db.users)`);
+s.defScalar('total_count', sql`(select count(*) from db.users)`);
 s.defScalar('name', sql.lit`John`);
 
 // defScalar(name, opts) - declare type explicitly, expression optional
@@ -149,7 +149,7 @@ s.while(sql`counter < 10`, (s) => s.increment('counter'));
 s.forEachTable('temp_users', 'user', (s) => s.debug('Processing user'));
 
 // For each query result
-s.forEachQuery(sql`SELECT * FROM db.users`, 'user', (s) => s.debug('Processing'));
+s.forEachQuery(sql`select * from db.users`, 'user', (s) => s.debug('Processing'));
 
 // Infinite loop with break
 s.loop((s) => {
@@ -162,6 +162,13 @@ s.loopN(sql`5`, (s) => s.debug('Iteration'));
 ```
 
 ## Exception Handling
+
+Catching an error does not roll back an active transaction. At the transaction's
+owning boundary, use `s.rollbackIfInTransaction()` before starting another
+transaction in the catch (including a failure-logging helper). Caller-owned
+stored procedures propagate failures to their owning caller. See
+[transaction cleanup in error handlers](../api/external_interfaces.md#transaction-cleanup-in-error-handlers)
+for a safe example and required failure-path tests.
 
 ```typescript
 s.try({
@@ -188,8 +195,8 @@ s.block('my_block', (s) => {
 
 ```typescript
 s.debug('Processing user data');
-s.debugExpr(sql`user.name`);
-s.debugQuery(sql`SELECT * FROM db.users`);
+s.debugExpr(sql`user_record.name`);
+s.debugQuery(sql`select * from db.users`);
 ```
 
 ## Cursor Operations
@@ -198,7 +205,7 @@ For iterating over large datasets efficiently:
 
 ```typescript
 // Create query cursor
-s.createQueryCursor('user_cursor', sql`SELECT * FROM db.users`);
+s.createQueryCursor('user_cursor', sql`select * from db.users`);
 
 // Move cursor to next row
 s.advanceCursor('user_cursor');

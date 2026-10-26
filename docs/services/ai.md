@@ -10,9 +10,15 @@ related:
   - blocks/ai_providers.md
   - blocks/spark.md
   - services/solution_services.md
+  - sql/ai_decisions.md
 ---
 
 # AI Services
+
+For classification, probability filters, routing to fixed outcomes, or scoring
+against a rubric, prefer the provider-independent
+[AI decision SQL functions](../sql/ai_decisions.md). Use the generation helpers
+below for prose, arbitrary JSON extraction, and tool calls.
 
 Use `services/ai` when system code needs direct model calls from server-side
 statements. For admin-configurable providers, prefer
@@ -21,6 +27,7 @@ statements. For admin-configurable providers, prefer
 ```ts
 import {
   anthropic,
+  cerebras,
   deepseek,
   gemini,
   generateJson,
@@ -29,6 +36,7 @@ import {
   groq,
   openai,
 } from "services/ai";
+import { sql } from "std/sql_utils";
 ```
 
 ## Model Factories
@@ -129,7 +137,9 @@ is required:
 | `services/ai_simple_tools` | `SimpleTool`, `SimpleHooks`, `GenerateOptions`, `generateTools` | You need transactional execution of model-selected application tools. |
 
 The lower-level generation helpers still run inside server statement builders;
-they do not provide a general TypeScript runtime. They use the same static
-secret and external-service opt-in rules as the higher-level factories. Keep
+they do not provide a general TypeScript runtime. They read the same static
+secrets as the higher-level factories. Neither layer exposes an `optIn`
+option, so these calls stay gated when the runtime puts external services in
+[opt-in mode](./solution_services.md#external-service-opt-in). Keep
 provider-specific code behind a small system helper when the rest of the
 application should remain provider-neutral.

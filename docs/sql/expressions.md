@@ -26,10 +26,10 @@ select * from products where price >= 100;
 Null-safe inequality (treats NULL as a comparable value).
 
 ```sql
--- Regular comparison: NULL = NULL is NULL (not true)
+-- Regular comparison: null = null is null (not true)
 select null = null;  -- null
 
--- IS DISTINCT FROM: NULL is not distinct from NULL
+-- is distinct from: null is not distinct from null
 select null is distinct from null;      -- false
 select null is distinct from 1;         -- true
 select 1 is distinct from 2;            -- true
@@ -102,7 +102,7 @@ from users;
 
 ## EXISTS
 
-Checks whether a subquery returns any rows. More efficient than `IN` for existence checks.
+Checks whether a subquery returns any rows. More efficient than `in` for existence checks.
 
 ```sql
 -- Authors with at least one bestseller
@@ -204,12 +204,12 @@ from products;
 ```
 
 Available checks:
-- `IS TRUE` - exactly true
-- `IS FALSE` - exactly false
-- `IS NOT TRUE` - false or null
-- `IS NOT FALSE` - true or null
-- `IS NULL` - null
-- `IS NOT NULL` - true or false
+- `is true` - exactly true
+- `is false` - exactly false
+- `is not true` - false or null
+- `is not false` - true or null
+- `is null` - null
+- `is not null` - true or false
 
 ## LIKE / ILIKE
 
@@ -223,19 +223,19 @@ select * from users where name like 'John%';        -- starts with John
 select * from users where email like '%@gmail.com'; -- ends with @gmail.com
 select * from users where name like '%Smith%';      -- contains Smith
 select * from users where code like 'A__';          -- A followed by 2 chars
-
--- Case-insensitive
-select * from users where name ilike '%john%';
+select * from users where name ilike '%john%';      -- always case-insensitive
 ```
 
-### ESCAPE clause
-
-```sql
--- Match literal % character
-select * from products where discount like '50\%' escape '\';
-```
+`like` follows the collation of the left operand. The default collation is
+`NoCase`, so `like` on a field or literal without a `Binary` collation is
+already case-insensitive; `ilike` is case-insensitive regardless
+of collation. See [Pattern Matching](./string_functions.md#pattern-matching)
+for the `escape` clause and collation examples.
 
 ## Arithmetic Expressions
+
+See [Mathematical Functions](./math_functions.md) for operator semantics,
+including integer division and division by zero (which returns null).
 
 ```sql
 select
@@ -259,64 +259,46 @@ select flags << 1;  -- shift left
 select flags >> 1;  -- shift right
 ```
 
-Use `power(base, exponent)` for exponentiation; `^` is not the exponent
-operator in Yolm SQL.
+`^` is not an exponent operator; see
+[power](./math_functions.md#power-pow).
 
 ## String Concatenation
 
 ```sql
 select first_name || ' ' || last_name as full_name from users;
-select 'Order #' || order_id as order_label from orders;
 ```
 
-When both operands are JSON, `||` performs JSON concatenation instead; see
+See [String Functions](./string_functions.md#concatenation) for `||`,
+`concat`, and `concat_ws`. When both operands are JSON, `||` performs JSON concatenation instead; see
 [JSON Functions](./json_functions.md).
 
 ## Type Casting
 
-### :: Operator (PostgreSQL syntax)
+`cast(value as type)`, the PostgreSQL-style `value::type` operator, and
+`try_cast` / `safe_cast` (null instead of an error on invalid conversion) are
+supported. See [Type Conversion](./global_functions.md#type-conversion) for
+examples and the supported target types.
 
 ```sql
 select '123'::int;
-select 123::text;
-select '2023-01-15'::date;
-select price::decimal(10,2);
-```
-
-### CAST Function
-
-```sql
-select cast('123' as int);
-select cast(price as text);
-select cast('2023-01-15' as date);
-```
-
-### TRY_CAST (Safe casting)
-
-Returns NULL instead of error on invalid conversion.
-
-```sql
 select try_cast('not a number' as int);  -- null
-select try_cast('123' as int);           -- 123
-select try_cast('invalid' as date);      -- null
-select safe_cast('123' as int);          -- 123
 ```
 
 ## Collation
 
-Use `collate nocase` for case-insensitive comparison or ordering.
+String comparison and ordering use an explicit `collate` clause if present,
+otherwise the field's collation (default `db.collation`), otherwise the system
+default (`system.collation`). Both defaults are `NoCase` (case-insensitive)
+unless configured as `"Binary"`.
+Use `collate binary` for a case-sensitive comparison and `collate nocase` to
+force a case-insensitive one. Unknown collation names are rejected. See
+[Collation](./string_functions.md#collation) for examples.
 
 ```sql
-select *
-from users
-where name collate nocase = 'alice';
-
 select name
 from users
-order by name collate nocase;
+order by name collate binary;
 ```
-
-Unknown collation names are rejected.
 
 ## Regex Operators
 
@@ -364,33 +346,8 @@ from (
 
 ## Conditional Expressions
 
-### COALESCE
-
-Returns first non-null value.
-
-```sql
-select coalesce(nickname, first_name, 'Anonymous') as display_name
-from users;
-```
-
-### NULLIF
-
-Returns null if arguments are equal.
-
-```sql
-select value / nullif(divisor, 0) as safe_division;  -- avoids /0 error
-select nullif(status, 'unknown') as clean_status;     -- null if 'unknown'
-```
-
-### GREATEST / LEAST
-
-```sql
-select greatest(a, b, c) as max_value;
-select least(a, b, c) as min_value;
-
--- Clamp to range
-select greatest(0, least(100, value)) as clamped;
-```
+`coalesce`, `nullif`, `greatest`, and `least` are documented in
+[Global SQL Functions](./global_functions.md#null-handling).
 
 ## Operator Precedence
 
@@ -402,12 +359,12 @@ From highest to lowest:
 4. `* / %` (multiplication, division, modulo)
 5. `+ -` (addition, subtraction)
 6. `||` (string concatenation)
-7. `BETWEEN IN LIKE ILIKE`
+7. `between in like ilike`
 8. `< > = <= >= <>`
-9. `IS NULL`, `IS NOT NULL`
-10. `NOT`
-11. `AND`
-12. `OR`
+9. `is null`, `is not null`
+10. `not`
+11. `and`
+12. `or`
 
 Use parentheses to clarify complex expressions:
 ```sql

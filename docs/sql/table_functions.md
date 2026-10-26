@@ -99,6 +99,9 @@ order by daily.value;
 Because `series.daily` includes the start date plus `count` additional dates,
 this generates 13 weekly buckets starting from the most recent Thursday.
 
+This range join re-scans `db.deliveries` per date; for large tables use
+[`time_bucket_gapfill`](date_functions.md#per-period-series).
+
 ### series.monthly / series.yearly
 
 Signatures:
@@ -163,47 +166,10 @@ select value, ordinal from string.split('apple,banana,cherry', ',');
 
 ## Regex Table Functions
 
-### regex.split
-
-Splits a string into rows using a regex pattern.
-
-Signatures:
-
-```sql
-regex.split(input string, pattern string)
-regexp_split_to_table(input string, pattern string)
-```
-
-Returns `value string, ordinal int`.
-
-```sql
-select value, ordinal from regex.split('one1two2three', '[0-9]');
--- one, 0
--- two, 1
--- three, 2
-```
-
-### regex.matches
-
-Finds all regex matches in a string, returning each as a row.
-
-Signatures:
-
-```sql
-regex.matches(input string, pattern string)
-regex.matches(input string, pattern string, 'g')
-regexp_matches(input string, pattern string)
-regexp_matches(input string, pattern string, 'g')
-```
-
-Returns `value string, ordinal int`. The optional third argument exists for
-PostgreSQL-style calls; only the literal flag `'g'` is accepted.
-
-```sql
-select value, ordinal from regex.matches('abc123def456', '[0-9]+');
--- 123, 0
--- 456, 1
-```
+`regex.split` (alias `regexp_split_to_table`) and `regex.matches` (alias
+`regexp_matches` in a `from` clause) return `value string, ordinal int`. Their
+signatures and examples are documented in
+[Regular Expression Functions](./regex_functions.md#regexsplit-table-function).
 
 ## CSV Functions
 
@@ -332,26 +298,7 @@ select field_0, field_1 from xlsx.rows(file_bytes, 'Sheet1', 1, 3);
 
 ## JSON Functions
 
-### json.array_each
-
-Expands a JSON array to rows.
-
-Aliases: `json.array_elements`, `json_array_elements`
-
-```sql
-select value, index from json.array_each('[1, "text", true]'::json);
-```
-
-Returns `value json, index int`.
-
-### json.object_each
-
-Expands a JSON object to rows.
-
-Aliases: `json.each`, `json_each`
-
-```sql
-select key, value from json.object_each('{"a": 1, "b": 2}'::json);
-```
-
-Returns `key string, value json`.
+`json.array_each` (aliases `json.array_elements`, `json_array_elements`)
+returns `value json, index int`. `json.object_each` (aliases `json.each`,
+`json_each`) returns `key string, value json`. Examples are documented in
+[JSON Functions](./json_functions.md#table-functions).

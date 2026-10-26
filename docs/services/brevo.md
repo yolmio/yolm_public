@@ -32,8 +32,8 @@ brevo.contacts.lists.listAll({ resultTable: "brevo_lists" })(s);
 | `apiKey` | `Sql` | API key expression. Defaults to `getStaticSecret('BREVO_API_KEY')`. |
 | `webhookBaseName` | `string` | Prefix for static webhook keys. Default `"brevo"`. |
 
-All request helpers accept `optIn?: BooleanExpr` when external-service calls
-are gated in the current environment.
+All request helpers accept `optIn?: BooleanExpr`; see
+[External-Service Opt-In](./solution_services.md#external-service-opt-in).
 
 ## Contacts
 

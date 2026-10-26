@@ -17,16 +17,18 @@ and item names.
 
 ## Headers
 
-Use `quickBooksIifHeader(rowType, fields)` for a single `!ROWTYPE` header,
-`quickBooksInvoiceIifHeaders()` for the standard invoice header block as a
-generation-time string, or `quickBooksInvoiceIifHeaderRows()` for the same
-headers as a SQL expression.
+Use `quickBooksIifHeader(rowType, fields)` for a single tab-delimited header
+row (pass the row type without `!`; the helper adds it), and
+`quickBooksInvoiceIifHeaders()` for the standard invoice header block
+(`!TRNS`, `!SPL`, `!ENDTRNS`). Both return generation-time strings; wrap them
+in `sql.lit(...)` to use them in SQL. `quickBooksInvoiceIifHeaderRows()`
+returns the same invoice header block as a SQL expression.
 
 ```typescript
 import { quickBooksInvoiceIifHeaderRows } from "services/quickbooks_iif";
 import { sql } from "std/sql_utils";
 
-s.setScalar(
+s.defScalar(
   "iif_content",
   sql`${quickBooksInvoiceIifHeaderRows()} || E'\n'`,
 );
@@ -38,8 +40,11 @@ constants are available when you need to build a custom header block.
 
 ## Rows
 
-`quickBooksIifRow(cells)` returns a SQL expression that joins string, number,
-and SQL cells with tabs.
+`quickBooksIifRow(cells)` returns a SQL expression that joins cells with tabs.
+Cells are `QuickBooksIifCell` values (`Sql | string | number`): strings and
+numbers become SQL string literals, and `Sql` cells are composed as-is. An
+empty array returns an empty string. The helper builds one row; join rows with
+`E'\n'` yourself, and end each transaction with an `ENDTRNS` row.
 
 ```typescript
 import { quickBooksIifRow } from "services/quickbooks_iif";

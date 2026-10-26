@@ -1,3 +1,5 @@
+import { assertEmailTemplateEditable } from "./editing";
+import { FormFieldWithVariables, VariableInsertMenu } from "./variable_menu";
 import { Button } from "components/button";
 import { ButtonGroup } from "components/button_group";
 import { FormControl } from "components/form_control";
@@ -8,7 +10,6 @@ import { LabelOnLeftFormField } from "components/label_on_left_form_field";
 import { LabelOnTopFormField } from "components/label_on_top_form_field";
 import { MaterialIcon } from "components/material_icon";
 import type { IconName } from "components/material_icon_names";
-import { Menu } from "components/menu";
 import { Select } from "components/select";
 import { Sheet } from "components/sheet";
 import { Snackbar } from "components/snackbar";
@@ -39,7 +40,6 @@ import {
 import type { Node } from "std/ui";
 import { Data } from "std/data";
 import { Form, useCursorHelper, useFieldHelper } from "std/form";
-import type { Color } from "components/types";
 
 // Helper function to execute Lexical editor commands via JS module
 function execLexicalCmd(
@@ -111,13 +111,14 @@ function TextContent() {
   return (
     <Data
       local
-      watch={[cursor.field("text_content").value]}
+      noRefetch
       procedure={(s) => {
-        s.defScalar("local_editor_handle", sql.lit``);
+        s.defScalar("local_editor_handle", sql`random.uuid()::string`);
+        s.defScalar("synced_editor_content", { type: "Json" });
       }}
     >
       <div
-        contentEditable
+        contentEditable={false}
         sx={{
           cursor: "text",
           width: "100%",
@@ -204,6 +205,20 @@ function TextContent() {
           },
         }}
         id={containerId}
+        onMount={(s) => {
+          s.setScalar(
+            "synced_editor_content",
+            cursor.field("text_content").value,
+          );
+          callLexicalModule(
+            s,
+            "init",
+            sql`ui.local_editor_handle`,
+            sql`json_build_object('handle', ui.local_editor_handle,
+              'containerId', ${containerId},
+              'initialContent', ${cursor.field("text_content").value})`,
+          );
+        }}
         onFocus={(s) => {
           s.setScalar("editor_handle", sql`local_editor_handle`);
         }}
@@ -216,6 +231,22 @@ function TextContent() {
           on: {
             "lexical_editor.ready": (s) => {
               s.setScalar("editor_handle", sql`local_editor_handle`);
+            },
+            "lexical_editor.contentChanged": (s) => {
+              s.setScalar(
+                "synced_editor_content",
+                sql`event.payload_json->'editorState'`,
+              );
+              s.if(
+                sql`cast(synced_editor_content as string) is distinct from
+                cast(${cursor.field("text_content").value} as string)`,
+                (s) => {
+                  cursor.field("text_content").setValue(
+                    s,
+                    sql`synced_editor_content`,
+                  );
+                },
+              );
             },
             "lexical_editor.stateChanged": (s) => {
               // Sync UI state with actual editor formatting state from event payload
@@ -235,27 +266,29 @@ function TextContent() {
             },
           },
         }}
-      >
-        Text content
-      </div>
+      />
       <Effect
-        watch={[sql`local_editor_handle`]}
-        triggerOnMount
+        watch={[cursor.field("text_content").value]}
         onChange={(s) => {
-          s.if(sql`local_editor_handle = ''`, (s) => {
-            s.setScalar("local_editor_handle", sql`random.uuid()`);
-            s.setScalar("editor_handle", sql`local_editor_handle`);
-            callLexicalModule(
-              s,
-              "init",
-              sql`ui.local_editor_handle`,
-              sql`json_build_object(
-                'handle', ui.local_editor_handle,
-                'containerId', ${containerId},
-                'initialContent', ${cursor.field("text_content").value}
-              )`,
-            );
-          });
+          s.if(
+            sql`local_editor_handle != '' and cast(synced_editor_content as string)
+            is distinct from cast(${
+              cursor.field("text_content").value
+            } as string)`,
+            (s) => {
+              s.setScalar(
+                "synced_editor_content",
+                cursor.field("text_content").value,
+              );
+              callLexicalModule(
+                s,
+                "setContentFromJson",
+                sql`ui.local_editor_handle`,
+                sql`json_build_object('handle', ui.local_editor_handle,
+                'editorState', synced_editor_content)`,
+              );
+            },
+          );
         }}
       />
     </Data>
@@ -1263,132 +1296,6 @@ function TextToolbar({ children }: { children: Node }) {
   );
 }
 
-// Component to wrap form fields with variable insertion capability
-function FormFieldWithVariables(props: {
-  children: Node;
-  fieldName: string;
-}) {
-  if (usePhase() === "gather") {
-    return props.children;
-  }
-
-  const fieldHelper = useFieldHelper();
-
-  return (
-    <div className="flex gap-2 items-end">
-      <div className="flex-1">{props.children}</div>
-      <VariableInsertMenu
-        onClick={(s, key) => {
-          const currentValue = fieldHelper.value || sql.lit``;
-          s.if(sql`${currentValue} = '' or ${currentValue} is null`, (s) => {
-            fieldHelper.setValue(s, sql.lit`{{${key}}}`);
-          }).else((s) => {
-            fieldHelper.setValue(
-              s,
-              sql.concat(currentValue, sql.lit` {{${key}}}`),
-            );
-          });
-        }}
-      />
-    </div>
-  );
-}
-
-// Component to insert variables into email templates
-function VariableInsertMenu(props: {
-  onClick?: (s: DomStatements, key: string) => void;
-  variableType?: "recipient" | "link";
-}) {
-  let variables: Record<string, string> = {};
-
-  try {
-    const explicitVariables = props.variableType === "link"
-      ? useBlockOptional(EmailTemplatesBlock)?.getLinkVariables()
-      : useBlockOptional(EmailTemplatesBlock)?.getRecipientVariables();
-    variables = explicitVariables ?? {};
-
-    const handleClick = props.onClick || ((s: DomStatements, key: string) => {
-      callLexicalModule(
-        s,
-        "focus",
-        sql`editor_handle`,
-        sql`json_build_object('handle', editor_handle)`,
-      );
-      execLexicalCmd(s, "insertText", { text: sql.lit(`{{${key}}}`) });
-    });
-
-    return (
-      <Menu>
-        <Menu.IconButton
-          variant="outlined"
-          color={"neutral" as Color}
-          size="sm"
-          aria-controls="email-variables-menu"
-          aria-haspopup="true"
-          icon="Code"
-        />
-        <Menu.Content className="max-h-[200px] overflow-auto">
-          {Object.entries(variables).map(([key, description]) => (
-            <Menu.Item
-              onClick={(s) => {
-                handleClick(s, key);
-              }}
-            >
-              {sql.concat(
-                sql.lit`{{${key}}} - `,
-                sql.lit(description || key),
-              )}
-            </Menu.Item>
-          ))}
-        </Menu.Content>
-      </Menu>
-    );
-  } catch (_error) {
-    // If variable lookup fails, show a basic set of variables.
-    const defaultVariables = {
-      email: "Recipient email address",
-      name: "Recipient name",
-    };
-
-    const handleClick = props.onClick || ((s: DomStatements, key: string) => {
-      callLexicalModule(
-        s,
-        "focus",
-        sql`editor_handle`,
-        sql`json_build_object('handle', editor_handle)`,
-      );
-      execLexicalCmd(s, "insertText", { text: sql.lit(`{{${key}}}`) });
-    });
-
-    return (
-      <Menu>
-        <Menu.IconButton
-          variant="outlined"
-          color={"neutral" as Color}
-          size="sm"
-          aria-controls="email-variables-menu"
-          aria-haspopup="true"
-          icon="Code"
-        />
-        <Menu.Content className="max-h-[200px] overflow-auto">
-          {Object.entries(defaultVariables).map(([key, description]) => (
-            <Menu.Item
-              onClick={(s) => {
-                handleClick(s, key);
-              }}
-            >
-              {sql.concat(
-                sql.lit`{{${key}}} - `,
-                sql.lit(description),
-              )}
-            </Menu.Item>
-          ))}
-        </Menu.Content>
-      </Menu>
-    );
-  }
-}
-
 function FontSizeInput() {
   return (
     <Input
@@ -1803,7 +1710,17 @@ function RichTextToolbar() {
       <LinkPopover />
 
       {/* Group 8: Variables */}
-      <VariableInsertMenu />
+      <VariableInsertMenu
+        onClick={(s, key) => {
+          callLexicalModule(
+            s,
+            "focus",
+            sql`editor_handle`,
+            sql`json_build_object('handle', editor_handle)`,
+          );
+          execLexicalCmd(s, "insertText", { text: sql.lit(`{{${key}}}`) });
+        }}
+      />
     </TextToolbar>
   );
 }
@@ -2336,6 +2253,7 @@ export function AdvancedEmailEditorLexical(props: AdvancedEmailEditorProps) {
         defaultFieldComponent={LabelOnLeftFormField}
         keepHistory
         beforeTransactionCommit={(s) => {
+          assertEmailTemplateEditable(s, sql`editor_record_id`);
           s.setScalar(
             "editor_record_id",
             sql`coalesce(editor_record_id, last_record_id(db.email_templates))`,
@@ -2421,6 +2339,7 @@ export function AdvancedEmailEditorLexical(props: AdvancedEmailEditorProps) {
                 <Form.SubmitButton size="sm" startIcon="Save">
                   Save Changes
                 </Form.SubmitButton>
+                <Form.ErrorAlert mode="all" />
               </div>
             </Sheet>
 
@@ -2694,7 +2613,7 @@ export function AdvancedEmailEditorLexical(props: AdvancedEmailEditorProps) {
                       <LabelOnTopFormField label="Template Name" size="sm" />
                     </Form.Field>
                     <Form.Field field="subject">
-                      <FormFieldWithVariables fieldName="subject">
+                      <FormFieldWithVariables>
                         <LabelOnTopFormField label="Subject Line" size="sm" />
                       </FormFieldWithVariables>
                     </Form.Field>

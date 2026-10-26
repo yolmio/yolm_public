@@ -221,39 +221,10 @@ export function DevCancelPage(props: DevCancelPageProps) {
                               appointmentTable: devDefinedEventType.tableName,
                               appointmentId: sql`appointment_record.id`,
                             });
-                          if (
-                            devDefinedEventType.notifications?.cancellationEmail
-                          ) {
-                            schedulingBlock.enqueueBackgroundTask(s, {
-                              taskType: "email_dev",
-                              appointmentTable: devDefinedEventType.tableName,
-                              appointmentId: sql`appointment_record.id`,
-                              emailType: "invitee_cancellation_email",
-                              insideTransaction: true,
-                            });
-                          }
-                          if (
-                            devDefinedEventType.notifications
-                              ?.hostCancellationEmail
-                          ) {
-                            schedulingBlock.enqueueBackgroundTask(s, {
-                              taskType: "email_dev",
-                              appointmentTable: devDefinedEventType.tableName,
-                              appointmentId: sql`appointment_record.id`,
-                              emailType: "host_cancellation_email",
-                              insideTransaction: true,
-                            });
-                          }
-                          schedulingBlock.enqueueBackgroundTask(s, {
-                            taskType: "calendar_delete",
-                            appointmentTable: devDefinedEventType.tableName,
+                          schedulingBlock.enqueueDevDefinedAppointmentTasks(s, {
+                            eventType: devDefinedEventType,
                             appointmentId: sql`appointment_record.id`,
-                            insideTransaction: true,
-                          });
-                          schedulingBlock.enqueueBackgroundTask(s, {
-                            taskType: "meeting_delete",
-                            appointmentTable: devDefinedEventType.tableName,
-                            appointmentId: sql`appointment_record.id`,
+                            change: "cancelled",
                             insideTransaction: true,
                           });
                           s.commitTransaction();

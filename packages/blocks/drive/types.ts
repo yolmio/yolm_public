@@ -72,6 +72,10 @@ export interface FileVersionCreatedEvent {
   contentType: Sql;
   byteLength: Sql;
   sysUserId: Sql;
+  /** Requested language for a publish-on-upload lifecycle; null uses its default. */
+  language?: Sql;
+  /** URL representation, written before lifecycle/publication callbacks. */
+  externalUrl?: Sql;
 }
 
 export interface FileVersionAccessContext {
@@ -103,6 +107,23 @@ export interface DriveExtension {
   name: string;
   initialize: (files: DriveBlockContract) => void;
   validate?: (files: DriveBlockContract) => void;
+  /** Persist representation content before any version lifecycle callbacks. */
+  writeVersionContent?: (
+    s: ServerStatementsBase<any>,
+    event: FileVersionCreatedEvent,
+  ) => void;
+  /** Opt a space into replacement between this extension's compatible formats. */
+  canChangeVersionContentType?: (
+    spaceId: Sql,
+    previousType: Sql,
+    nextType: Sql,
+  ) => Sql;
+  /** Validate metadata both before accepting upload bytes and when saving. */
+  versionUploadMetadataError?: (context: {
+    spaceId: Sql;
+    contentType: Sql;
+    externalUrl: Sql;
+  }) => Sql;
   onVersionCreated?: (
     s: ServerStatementsBase<any>,
     event: FileVersionCreatedEvent,
@@ -148,6 +169,8 @@ export interface DriveLifecycle extends DriveExtension {
 }
 
 export interface FileViewerRenderProps {
+  /** Controlled revision selected by the reader; file versions may be shared. */
+  controlledRevisionId?: Sql;
   fileSpaceId: Sql;
   fileItemId: Sql;
   fileVersionId: Sql;
@@ -240,6 +263,13 @@ export interface DriveBlockContract {
   ): Sql;
   canCreateFileSql(context: FileCreateAccessContext): Sql;
   canCreateVersionSql(context: FileVersionCreateAccessContext): Sql;
+  versionUploadMetadataErrorSql(opts: {
+    itemId?: Sql;
+    spaceId?: Sql;
+    fileName: Sql;
+    contentType: Sql;
+    externalUrl?: Sql;
+  }): Sql;
   canUpdateItemMetadataSql(context: FileItemUpdateAccessContext): Sql;
   versionBlobUrl(versionId: Sql, blobHash?: Sql): Sql;
   createFileVersion<T extends ServerStatementsBase<any>>(
@@ -308,6 +338,10 @@ export interface CreateFileVersionOpts {
   note?: Sql;
   sysUserId: Sql;
   intoVersion?: string;
+  /** Start a published replacement in this language within the version writer. */
+  language?: Sql;
+  /** Validated and persisted by the external-link representation extension. */
+  externalUrl?: Sql;
 }
 
 export interface CreateFileItemOpts {

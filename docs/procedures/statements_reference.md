@@ -79,10 +79,9 @@ from any server context (UI service procs, scheduled jobs, tests):
 import type { IServerBaseStatements } from "std/statements";
 import { sql } from "std/sql_utils";
 
-function logAudit(s: IServerBaseStatements, message: Sql) {
+function archiveTask(s: IServerBaseStatements, taskId: Sql) {
   s.startTransaction();
-  s.modify(sql`insert into db.audit_log (message, ts)
-                values (${message}, now())`);
+  s.modify(sql`update db.tasks set status = 'archived' where id = ${taskId}`);
   s.commitTransaction();
 }
 ```

@@ -15,21 +15,22 @@ import { Textarea } from "components/textarea";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
 import { sql } from "std/sql_utils";
+import { system } from "std/system";
 import { Each, Show } from "std/ui";
 import type { TrainingBlock } from "../index.tsx";
+import type { TrainingBlockOpts } from "../types.ts";
 import {
   audienceMatchesEmployeeSql,
   employeeName,
   personTable,
 } from "../helpers";
-import { EmptyState } from "../shared";
+import { EmptyState, PageShell } from "../shared";
 import {
   adminSelectClass,
   AudienceMultiSelect,
   NotificationVariableInsertMenu,
   notificationVariableToken,
   PersonMultiSelect,
-  TrainingAdminFrame,
 } from "./shared";
 
 function notificationRuleEventsSql() {
@@ -85,9 +86,12 @@ export function TrainingAdminNotificationsPage(
         });
       }}
     >
-      <TrainingAdminFrame>
+      <PageShell
+        title="Training notifications"
+        subtitle="The messages people receive about their training, and the events that send them."
+      >
         <NotificationTemplatesWorkspace block={props.block} />
-      </TrainingAdminFrame>
+      </PageShell>
     </Data>
   );
 }
@@ -97,22 +101,6 @@ export function NotificationTemplatesWorkspace(
 ) {
   return (
     <div className="flex flex-col gap-5">
-      <Card variant="outlined">
-        <CardHeader>
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-            <Button
-              component="a"
-              href={props.block.opts.content.routes.adminBasePath}
-              variant="outlined"
-              color="neutral"
-              startIcon="Article"
-            >
-              Back to library
-            </Button>
-          </div>
-        </CardHeader>
-      </Card>
-
       <Data
         procedure={(s) => {
           s.defTable(
@@ -155,8 +143,8 @@ export function NotificationTemplatesWorkspace(
         <Card variant="outlined">
           <CardHeader>
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-              <Typography level="title-lg" startIcon="FormatQuote">
-                Notification Templates
+              <Typography level="title-lg" startIcon="Article">
+                Message templates
               </Typography>
               <Button
                 startIcon="AddAlert"
@@ -213,11 +201,10 @@ export function NotificationTemplatesWorkspace(
                     s.tryServer({
                       body: (s) => {
                         s.startTransaction();
-                        s.modify(sql`
-                          update db.training_notification_templates
-                          set is_active = not is_active
-                          where id = template.id
-                        `);
+                        s.callStoredProcedure(
+                          "training_toggle_notification_template",
+                          { inputScalars: { p_template_id: sql`template.id` } },
+                        );
                         s.commitTransaction();
                         s.refetch();
                       },
@@ -232,7 +219,7 @@ export function NotificationTemplatesWorkspace(
         <Card variant="outlined">
           <CardHeader>
             <Typography level="title-lg" startIcon="Notifications">
-              Global Notification Rules
+              When to send
             </Typography>
           </CardHeader>
           <CardContent>
@@ -323,17 +310,16 @@ export function NotificationTemplatesWorkspace(
                           },
                         );
                         s.startTransaction();
-                        s.modify(sql`
-                          delete from db.training_notification_rules
-                          where event_code = ui.add_notification_event_code
-                        `);
-                        s.modify(sql`
-                          insert into db.training_notification_rules
-                            (event_code, training_notification_template_id)
-                          values
-                            (ui.add_notification_event_code,
-                             ui.add_notification_template_id::bigint)
-                        `);
+                        s.callStoredProcedure(
+                          "training_save_notification_rule",
+                          {
+                            inputScalars: {
+                              p_event_code: sql`ui.add_notification_event_code`,
+                              p_template_id:
+                                sql`ui.add_notification_template_id`,
+                            },
+                          },
+                        );
                         s.commitTransaction();
                         s.setScalar(
                           "ui.add_notification_event_code",
@@ -558,16 +544,18 @@ export function NotificationTemplatesWorkspace(
                       },
                     );
                     s.startTransaction();
-                    s.modify(sql`
-                      insert into db.training_notification_templates
-                        (code, name, email_subject, email_body, portal_body)
-                      values
-                        (new_template_code,
-                         trim(ui.add_template_name),
-                         nullif(trim(ui.add_template_subject), ''),
-                         ui.add_template_email_body,
-                         trim(ui.add_template_portal_body))
-                    `);
+                    s.callStoredProcedure(
+                      "training_create_notification_template",
+                      {
+                        inputScalars: {
+                          p_code: sql`new_template_code`,
+                          p_name: sql`ui.add_template_name`,
+                          p_subject: sql`ui.add_template_subject`,
+                          p_email_body: sql`ui.add_template_email_body`,
+                          p_portal_body: sql`ui.add_template_portal_body`,
+                        },
+                      },
+                    );
                     s.commitTransaction();
                     s.setScalar("ui.add_template_name", sql.lit``);
                     s.setScalar("ui.add_template_subject", sql.lit``);
@@ -686,8 +674,14 @@ function NudgePanel(props: { block: TrainingBlock }) {
                   s.modify(sql`
                     insert into ${resultTable}
                       select title as label, rank() over () - 1 as index, id
-                      from db.training_content_documents
+                      from db.training_content_documents document
                       where is_active
+                        and ${
+                    props.block.opts.content.canReadDocument(
+                      sql`document.id`,
+                      sql`current_user`,
+                    )
+                  }
                         and (
                           trim(${query}) = ''
                           or fuzzy_match(${query}, title)
@@ -867,75 +861,17 @@ function NudgePanel(props: { block: TrainingBlock }) {
                       s.return();
                     },
                   );
-                  s.defTable(
-                    "nudge_assignments",
-                    sql`
-                      select a.id as assignment_id, a.person_id
-                      from db.training_assignments a
-                      join db.${sql.ref(personTable(props.block.opts))} person
-                        on person.id = a.person_id
-                      where (
-                          (
-                            ui.nudge_target_type = 'course'
-                            and a.training_course_id =
-                              nullif(ui.nudge_course_id, '')::bigint
-                          )
-                          or (
-                            ui.nudge_target_type = 'document'
-                            and a.document_id =
-                              nullif(ui.nudge_document_id, '')::bigint
-                          )
-                        )
-                        and exists (
-                          select 1
-                          from db.training_employee_tasks task
-                          where task.training_assignment_id = a.id
-                            and task.status not in ('completed', 'waived')
-                            and (
-                              (
-                                ui.nudge_target_type = 'course'
-                                and a.training_course_id =
-                                  nullif(ui.nudge_course_id, '')::bigint
-                              )
-                              or (
-                                ui.nudge_target_type = 'document'
-                                and a.document_id =
-                                  nullif(ui.nudge_document_id, '')::bigint
-                              )
-                            )
-                        )
-                        and (
-                          ui.nudge_recipient_type = 'all'
-                          or (
-                            ui.nudge_recipient_type = 'people'
-                            and exists (
-                              select 1
-                              from string.split(ui.nudge_person_ids, ',') selected
-                              where selected.value != ''
-                                and person.id = selected.value::bigint
-                            )
-                          )
-                          or (
-                            ui.nudge_recipient_type = 'audience'
-                            and exists (
-                            select 1
-                            from string.split(ui.nudge_audience_ids, ',') selected
-                            join db.training_audiences audience
-                              on audience.id = selected.value::bigint
-                             and audience.is_active
-                            where selected.value != ''
-                              and ${
-                      audienceMatchesEmployeeSql(
-                        props.block.opts,
-                        sql`audience`,
-                        sql`person`,
-                      )
-                    }
-                            )
-                          )
-                        )
-                    `,
-                  );
+                  s.callStoredProcedure("training_nudge_assignments", {
+                    inputScalars: {
+                      p_target_type: sql`ui.nudge_target_type`,
+                      p_course_id: sql`ui.nudge_course_id`,
+                      p_document_id: sql`ui.nudge_document_id`,
+                      p_recipient_type: sql`ui.nudge_recipient_type`,
+                      p_person_ids: sql`ui.nudge_person_ids`,
+                      p_audience_ids: sql`ui.nudge_audience_ids`,
+                    },
+                    outputTables: { nudge_assignments: "nudge_assignments" },
+                  });
                   s.defScalar(
                     "nudge_assignment_count",
                     sql`(select count(*) from nudge_assignments)`,
@@ -984,4 +920,146 @@ function NudgePanel(props: { block: TrainingBlock }) {
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * Notification page db work (the nudge recipient query matches audiences per
+ * person). Every route that renders the page compiles its click handlers, so
+ * these stored procedures keep the SQL out of every route.
+ */
+export function registerNotificationStoredProcedures(opts: TrainingBlockOpts) {
+  system.storedProcedure({
+    name: "training_toggle_notification_template",
+    transaction: "caller",
+    inputScalars: [{ name: "p_template_id", type: "BigInt" }],
+    procedure: (s) => {
+      s.modify(sql`
+        update db.training_notification_templates
+        set is_active = not is_active
+        where id = p_template_id
+      `);
+    },
+  });
+  system.storedProcedure({
+    name: "training_save_notification_rule",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_event_code", type: "String" },
+      { name: "p_template_id", type: "String" },
+    ],
+    procedure: (s) => {
+      s.modify(sql`
+        delete from db.training_notification_rules
+        where event_code = p_event_code
+      `);
+      s.modify(sql`
+        insert into db.training_notification_rules
+          (event_code, training_notification_template_id)
+        values
+          (p_event_code,
+           p_template_id::bigint)
+      `);
+    },
+  });
+  system.storedProcedure({
+    name: "training_create_notification_template",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_code", type: "String" },
+      { name: "p_name", type: "String" },
+      { name: "p_subject", type: "String" },
+      { name: "p_email_body", type: "Json" },
+      { name: "p_portal_body", type: "String" },
+    ],
+    procedure: (s) => {
+      s.modify(sql`
+        insert into db.training_notification_templates
+          (code, name, email_subject, email_body, portal_body)
+        values
+          (p_code,
+           trim(p_name),
+           nullif(trim(p_subject), ''),
+           p_email_body,
+           trim(p_portal_body))
+      `);
+    },
+  });
+  system.storedProcedure({
+    name: "training_nudge_assignments",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_target_type", type: "String" },
+      { name: "p_course_id", type: "String" },
+      { name: "p_document_id", type: "String" },
+      { name: "p_recipient_type", type: "String" },
+      { name: "p_person_ids", type: "String" },
+      { name: "p_audience_ids", type: "String" },
+    ],
+    outputTables: [
+      {
+        name: "nudge_assignments",
+        fields: [
+          { name: "assignment_id", type: "BigInt", notNull: true },
+          { name: "person_id", type: "BigInt", notNull: true },
+        ],
+      },
+    ],
+    procedure: (s) => {
+      s.modify(sql`
+        insert into nudge_assignments (assignment_id, person_id)
+                      select a.id as assignment_id, a.person_id
+                      from db.training_assignments a
+                      join db.${sql.ref(personTable(opts))} person
+                        on person.id = a.person_id
+                      where (
+                          (
+                            p_target_type = 'course'
+                            and a.training_course_id =
+                              nullif(p_course_id, '')::bigint
+                          )
+                          or (
+                            p_target_type = 'document'
+                            and a.document_id =
+                              nullif(p_document_id, '')::bigint
+                          )
+                        )
+                        and a.status in ('pending', 'in_progress')
+                        and (a.training_course_id is not null or exists (
+                          select 1 from db.training_employee_tasks task
+                          where task.training_assignment_id = a.id
+                            and task.status in ('assigned', 'in_progress')
+                        ))
+                        and (
+                          p_recipient_type = 'all'
+                          or (
+                            p_recipient_type = 'people'
+                            and exists (
+                              select 1
+                              from string.split(p_person_ids, ',') selected
+                              where selected.value != ''
+                                and person.id = selected.value::bigint
+                            )
+                          )
+                          or (
+                            p_recipient_type = 'audience'
+                            and exists (
+                            select 1
+                            from string.split(p_audience_ids, ',') selected
+                            join db.training_audiences audience
+                              on audience.id = selected.value::bigint
+                             and audience.is_active
+                            where selected.value != ''
+                              and ${
+        audienceMatchesEmployeeSql(
+          opts,
+          sql`audience`,
+          sql`person`,
+        )
+      }
+                            )
+                          )
+                        )
+      `);
+    },
+  });
 }

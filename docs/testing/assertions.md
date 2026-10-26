@@ -26,56 +26,12 @@ s.assert(condition, message?);
 
 ## Creating Custom Assertions
 
-### Pattern: Assertion Utilities Module
-
-Create a dedicated assertions file:
-
-```typescript
-// tests/utils/assertions.ts
-import type { TestStatements } from "std/statements";
-import { sql } from "std/sql_utils";
-import type { Sql } from "std/sql_utils";
-
-// Record existence assertions
-export function assertRecordExists(
-  s: TestStatements,
-  table: string,
-  condition: Sql,
-  message?: string
-) {
-  s.assert(
-    sql`EXISTS (SELECT 1 FROM db.${sql.ref(table)} WHERE ${condition})`,
-    sql.lit(message ?? `Expected record in ${table}`)
-  );
-}
-
-export function assertRecordNotExists(
-  s: TestStatements,
-  table: string,
-  condition: Sql,
-  message?: string
-) {
-  s.assert(
-    sql`NOT EXISTS (SELECT 1 FROM db.${sql.ref(table)} WHERE ${condition})`,
-    sql.lit(message ?? `Expected no record in ${table}`)
-  );
-}
-
-// Count assertions
-export function assertCount(
-  s: TestStatements,
-  table: string,
-  condition: Sql,
-  expected: number,
-  message?: string
-) {
-  s.assertEqual(
-    sql`(SELECT COUNT(*) FROM db.${sql.ref(table)} WHERE ${condition})`,
-    sql`${expected}`,
-    sql.lit(message ?? `Expected ${expected} records`)
-  );
-}
-```
+Keep helpers small and domain-specific, next to the procedure or API they
+check. Do not build a generic layer of record-exists or row-count wrappers; a
+plain `s.assert`/`s.assertEqual` is clearer (see
+[Test Utilities](./test_utilities.md)). Assert outcomes of a real procedure or
+API call, not that rows you just inserted or updated exist; see the
+[test policy](../ai/review.md#tests).
 
 ### Pattern: Domain-Specific Assertions
 
@@ -85,6 +41,7 @@ Create assertions for your specific domain:
 // tests/utils/order_assertions.ts
 import type { TestStatements } from "std/statements";
 import { sql } from "std/sql_utils";
+import type { Sql } from "std/sql_utils";
 
 // Order status assertions
 export function assertOrderStatus(
@@ -93,7 +50,7 @@ export function assertOrderStatus(
   expectedStatus: "pending" | "processing" | "completed" | "cancelled"
 ) {
   s.assertEqual(
-    sql`(SELECT status FROM db.orders WHERE reference = ${sql.lit(orderRef)})`,
+    sql`(select status from db.orders where reference = ${sql.lit(orderRef)})`,
     sql.lit(expectedStatus),
     sql.lit`Order ${orderRef} should have status '${expectedStatus}'`
   );
@@ -107,7 +64,7 @@ export function assertOrderField(
   expected: Sql
 ) {
   s.assertEqual(
-    sql`(SELECT ${sql.ref(field)} FROM db.orders WHERE reference = ${sql.lit(orderRef)})`,
+    sql`(select ${sql.ref(field)} from db.orders where reference = ${sql.lit(orderRef)})`,
     expected
   );
 }
@@ -118,186 +75,67 @@ export function assertOrderFieldNull(
   field: string
 ) {
   s.assert(
-    sql`(SELECT ${sql.ref(field)} FROM db.orders WHERE reference = ${sql.lit(orderRef)}) IS NULL`,
+    sql`(select ${sql.ref(field)} from db.orders where reference = ${sql.lit(orderRef)}) is null`,
     sql.lit`Order ${orderRef} field '${field}' should be null`
-  );
-}
-
-// Order existence
-export function assertOrderCreated(s: TestStatements, reference: string) {
-  s.assert(
-    sql`EXISTS (SELECT 1 FROM db.orders WHERE reference = ${sql.lit(reference)})`,
-    sql.lit`Order ${reference} should exist`
-  );
-}
-
-export function assertOrderNotCreated(s: TestStatements, reference: string) {
-  s.assert(
-    sql`NOT EXISTS (SELECT 1 FROM db.orders WHERE reference = ${sql.lit(reference)})`,
-    sql.lit`Order ${reference} should not exist`
-  );
-}
-
-// Related records
-export function assertOrderHasItems(
-  s: TestStatements,
-  orderRef: string,
-  expectedCount: number
-) {
-  s.assertEqual(
-    sql`(SELECT COUNT(*) FROM db.order_items oi
-         JOIN db.orders o ON oi.order_id = o.id
-         WHERE o.reference = ${sql.lit(orderRef)})`,
-    sql`${expectedCount}`,
-    sql.lit`Order ${orderRef} should have ${expectedCount} items`
-  );
-}
-```
-
-### Pattern: Status Transition Assertions
-
-```typescript
-// tests/utils/status_assertions.ts
-
-export function assertStatusTransition(
-  s: TestStatements,
-  table: string,
-  recordId: Sql,
-  fromStatus: string,
-  toStatus: string
-) {
-  // Verify initial status
-  s.assertEqual(
-    sql`(SELECT status FROM db.${sql.ref(table)} WHERE id = ${recordId})`,
-    sql.lit(fromStatus),
-    sql.lit`Should start in '${fromStatus}' status`
-  );
-
-  // ... trigger transition ...
-
-  // Verify final status
-  s.assertEqual(
-    sql`(SELECT status FROM db.${sql.ref(table)} WHERE id = ${recordId})`,
-    sql.lit(toStatus),
-    sql.lit`Should end in '${toStatus}' status`
-  );
-}
-```
-
-### Pattern: Audit Log Assertions
-
-```typescript
-// tests/utils/audit_assertions.ts
-
-export function assertActivityLogExists(
-  s: TestStatements,
-  entityType: string,
-  entityId: Sql,
-  action: string,
-  contentPattern?: string
-) {
-  if (contentPattern) {
-    s.assert(
-      sql`EXISTS (
-        SELECT 1 FROM db.activity_log
-        WHERE entity_type = ${sql.lit(entityType)}
-          AND entity_id = ${entityId}
-          AND action = ${sql.lit(action)}
-          AND content LIKE ${sql.lit(`%${contentPattern}%`)}
-      )`,
-      sql.lit`Activity log should contain '${action}' with '${contentPattern}'`
-    );
-  } else {
-    s.assert(
-      sql`EXISTS (
-        SELECT 1 FROM db.activity_log
-        WHERE entity_type = ${sql.lit(entityType)}
-          AND entity_id = ${entityId}
-          AND action = ${sql.lit(action)}
-      )`,
-      sql.lit`Activity log should contain '${action}'`
-    );
-  }
-}
-
-export function assertActivityLogCount(
-  s: TestStatements,
-  entityType: string,
-  entityId: Sql,
-  expectedCount: number
-) {
-  s.assertEqual(
-    sql`(SELECT COUNT(*) FROM db.activity_log
-         WHERE entity_type = ${sql.lit(entityType)}
-           AND entity_id = ${entityId})`,
-    sql`${expectedCount}`
   );
 }
 ```
 
 ## Using Custom Assertions
 
-Import and use in your tests:
+Import and use in your tests around the production call:
 
 ```typescript
-import * as assert from "./utils/assertions";
-import * as orderAssert from "./utils/order_assertions";
+import {
+  assertOrderField,
+  assertOrderStatus,
+} from "./utils/order_assertions";
 
-system.test.test({
-  name: "order workflow: complete order creates audit trail",
-  data: "orders",
+system.test({
+  name: "orders: shipping a paid order records its tracking number",
+  data: "paid_orders",
   time: new Date("2025-01-15T10:00:00-05:00"),
   procedure: (s) => {
-    s.startTransaction();
-    s.modify(sql`INSERT INTO db.orders (reference, status) VALUES ('TEST-001', 'pending')`);
-    s.commitTransaction();
+    // TEST-001 is a paid, unshipped order in the "paid_orders" data set
+    s.request({
+      uri: sql.lit`/api/orders/ship`,
+      method: "POST",
+      headers: [{ name: sql.lit`Host`, value: sql.lit`myapp.example.com` }],
+      json: { reference: sql.lit`TEST-001`, tracking_number: sql.lit`TRK-001` },
+      defReceiveJson: "response_body",
+      defResponseRecord: "response",
+    });
 
-    // Use domain assertions
-    orderAssert.assertOrderCreated(s, "TEST-001");
-    orderAssert.assertOrderStatus(s, "TEST-001", "pending");
-
-    // Process order
-    s.modify(sql`UPDATE db.orders SET status = 'completed' WHERE reference = 'TEST-001'`);
-
-    // Verify result
-    orderAssert.assertOrderStatus(s, "TEST-001", "completed");
-
-    // Check audit
-    s.defScalar("order_id", sql`(SELECT id FROM db.orders WHERE reference = 'TEST-001')`);
-    assert.assertActivityLogExists(s, "order", sql`order_id`, "status_changed");
+    s.assertEqual(sql`response.status`, sql`200`);
+    assertOrderStatus(s, "TEST-001", "completed");
+    assertOrderField(s, "TEST-001", "tracking_number", sql.lit`TRK-001`);
   },
 });
 ```
 
 ## Validation Assertions
 
-For testing input validation:
+Assert that invalid input is rejected and leaves no durable change. Check the
+real tables rather than a separate validation-error table:
 
 ```typescript
 // tests/utils/validation_assertions.ts
+import type { TestStatements } from "std/statements";
+import { sql } from "std/sql_utils";
 
-export function assertValidationError(
+export function assertOrderRejected(
   s: TestStatements,
-  recordId: Sql,
-  field: string,
-  expectedError: string
+  reference: string,
+  expectedStatus = 400
 ) {
-  s.assert(
-    sql`EXISTS (
-      SELECT 1 FROM db.validation_errors
-      WHERE record_id = ${recordId}
-        AND field = ${sql.lit(field)}
-        AND message LIKE ${sql.lit(`%${expectedError}%`)}
-    )`,
-    sql.lit`Should have validation error on '${field}': ${expectedError}`
-  );
-}
-
-export function assertNoValidationErrors(s: TestStatements, recordId: Sql) {
   s.assertEqual(
-    sql`(SELECT COUNT(*) FROM db.validation_errors WHERE record_id = ${recordId})`,
-    sql`0`,
-    sql.lit`Should have no validation errors`
+    sql`response.status`,
+    sql`${expectedStatus}`,
+    sql.lit`Invalid order ${reference} should be rejected`
+  );
+  s.assert(
+    sql`not exists (select 1 from db.orders where reference = ${sql.lit(reference)})`,
+    sql.lit`Rejected order ${reference} should not be stored`
   );
 }
 ```
@@ -309,7 +147,7 @@ export function assertNoValidationErrors(s: TestStatements, recordId: Sql) {
 
 export function assertApiSuccess(s: TestStatements) {
   s.assert(
-    sql`response.status >= 200 AND response.status < 300`,
+    sql`response.status >= 200 and response.status < 300`,
     sql`'API should return success status (got ' || response.status || ')'`
   );
 }
@@ -359,7 +197,7 @@ export function assertBetween(
   message?: string
 ) {
   s.assert(
-    sql`${actual} BETWEEN ${min} AND ${max}`,
+    sql`${actual} between ${min} and ${max}`,
     sql.lit(message ?? "Value should be within range")
   );
 }
@@ -371,7 +209,7 @@ export function assertDateWithin(
   toleranceMinutes: number
 ) {
   s.assert(
-    sql`ABS(EXTRACT(EPOCH FROM (${actual} - ${expected}))) < ${toleranceMinutes * 60}`,
+    sql`abs(extract(epoch from (${actual} - ${expected}))) < ${toleranceMinutes * 60}`,
     sql.lit`Date should be within ${toleranceMinutes} minutes`
   );
 }
@@ -396,24 +234,37 @@ s.assert(sql`order.total > 0`);
 
 ```typescript
 // Good - separate assertions
-orderAssert.assertOrderStatus(s, ref, "completed");
-orderAssert.assertOrderField(s, ref, "completed_at", sql`NOW()`);
+assertOrderStatus(s, ref, "completed");
+assertOrderField(s, ref, "tracking_number", sql.lit`TRK-001`);
 
 // Bad - combined assertion that's hard to debug
-s.assert(sql`status = 'completed' AND completed_at IS NOT NULL`);
+s.assert(sql`status = 'completed' and tracking_number = 'TRK-001'`);
 ```
 
 ### 3. Use Helper Functions for Complex Queries
 
 ```typescript
-// Good
+// Good - derive the total from line items once
 function getOrderTotal(ref: string): Sql {
-  return sql`(SELECT total FROM db.orders WHERE reference = ${sql.lit(ref)})`;
+  return sql`(
+    select sum(oi.quantity * oi.unit_price)
+    from db.order_items oi
+    join db.orders o on oi.order_id = o.id
+    where o.reference = ${sql.lit(ref)}
+  )`;
 }
 s.assertEqual(getOrderTotal("ORD-001"), sql`100.00`);
 
-// Bad - repeated complex SQL
-s.assertEqual(sql`(SELECT total FROM db.orders WHERE reference = 'ORD-001')`, sql`100.00`);
+// Bad - the same derivation repeated inline in every test
+s.assertEqual(
+  sql`(
+    select sum(oi.quantity * oi.unit_price)
+    from db.order_items oi
+    join db.orders o on oi.order_id = o.id
+    where o.reference = 'ORD-001'
+  )`,
+  sql`100.00`,
+);
 ```
 
 ## See Also

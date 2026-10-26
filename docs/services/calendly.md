@@ -23,10 +23,13 @@ import { calendly } from "services/calendly";
 ```
 
 The singleton uses the default configuration. For a custom API key /
-webhook base name, construct your own:
+webhook base name, construct your own. `apiKey` takes the key **value** as a
+SQL expression (typically `getStaticSecret(...)`), not a secret name:
 
 ```ts
 import { Calendly } from "services/calendly";
+import { getStaticSecret } from "std/services";
+import { sql } from "std/sql_utils";
 
 const altCalendly = new Calendly({
   apiKey: getStaticSecret(sql.lit`OTHER_CALENDLY_KEY`),
@@ -61,8 +64,8 @@ s.statements(calendly.eventTypes.listAll({
 ```
 
 `organization` scopes the request, `count` controls page size for `list`,
-`pageToken` advances a single page, and `optIn` is required when the local
-runtime gates external services.
+and `pageToken` advances a single page. For `optIn`, see
+[External-Service Opt-In](./solution_services.md#external-service-opt-in).
 
 ## Webhooks
 
@@ -112,5 +115,5 @@ Never put provider credentials in source code, examples, or generated models.
 
 ## Related
 
-- [Static secrets block](../blocks/static_secrets.md)
+- Store API keys as server-side static secrets.
 - [Static webhooks](../concepts/static_webhooks.md)

@@ -22,6 +22,10 @@ export interface ControlledFileLibraryProps {
   title?: Node;
   description?: Node;
   spaceId?: AnyExpr;
+  /** Omit for all folders; SQL NULL lists files at the space root. */
+  parentItemId?: AnyExpr;
+  /** Folder navigation supplied by the application, below the library header. */
+  children?: Node;
 }
 
 /**
@@ -88,6 +92,12 @@ export function ControlledFileLibrary(
                 ? sql`and item.file_space_id = ${props.spaceId}`
                 : sql``
             }
+                ${
+              props.parentItemId !== undefined
+                ? sql`and (item.parent_file_item_id = ${props.parentItemId}
+                    or (item.parent_file_item_id is null and ${props.parentItemId} is null))`
+                : sql``
+            }
                 and ${
               props.files.accessForSpaceRecordSql(
                 sql`space`,
@@ -135,6 +145,7 @@ export function ControlledFileLibrary(
               className="w-full sm:w-80"
             />
           </div>
+          {props.children}
           <Show
             when={sql`exists (select 1 from published_controlled_documents)`}
             fallback={
@@ -144,7 +155,11 @@ export function ControlledFileLibrary(
                   className="text-5xl text-secondary"
                 />
                 <Typography level="title-lg" className="mt-3">
-                  {driveText("noPublishedPolicies")}
+                  {driveText(
+                    props.parentItemId !== undefined
+                      ? "noPublishedPoliciesInFolder"
+                      : "noPublishedPolicies",
+                  )}
                 </Typography>
                 <p className="mt-1 text-sm text-secondary">
                   {driveText("publishedPoliciesAppear")}
@@ -293,7 +308,12 @@ export function PublishedControlledFile(
       }}
     >
       <main className="mx-auto max-w-screen-xl p-4 sm:p-6">
-        <Button href={props.backHref} variant="plain" startIcon="ArrowBack">
+        <Button
+          href={props.backHref}
+          backLink
+          variant="plain"
+          startIcon="ArrowBack"
+        >
           {driveText("backToPolicyLibrary")}
         </Button>
         <Show
@@ -369,6 +389,7 @@ export function PublishedControlledFile(
             files={props.files}
             fileItemId={sql`published_controlled_document.file_item_id`}
             fileVersionId={sql`published_controlled_document.file_version_id`}
+            controlledRevisionId={sql`published_controlled_document.controlled_revision_id`}
             readOnly
             presentation="governed"
             spaceType={lifecycleSpaceType(props.files, props.control)}

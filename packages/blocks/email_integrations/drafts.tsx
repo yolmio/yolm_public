@@ -555,6 +555,7 @@ function DraftEditorPage(props: { draftId?: Sql }) {
           </Typography>
           <Button
             href={block.routes.emailDraftsPath}
+            backLink
             variant="plain"
             startIcon="ArrowBack"
           >

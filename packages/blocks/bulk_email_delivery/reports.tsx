@@ -3,6 +3,7 @@ import { Alert } from "components/alert";
 import { Button } from "components/button";
 import { ModalDialog } from "components/modal";
 import { StatRow } from "components/stat_row";
+import { StatusChip } from "components/status_chip";
 import { Typography } from "components/typography";
 import { sql } from "std/sql_utils";
 import { Data } from "std/data";
@@ -32,7 +33,7 @@ export function BulkEmailDeliveryReport() {
           )}
       >
         <Show when={sql`overdue_bulk_queue`}>
-          <Alert color="warning">
+          <Alert color="warning" startIcon="Schedule">
             A delivery has been queued for more than 15 minutes. Check the bulk
             delivery worker and any active submission before preparing a
             replacement.
@@ -66,7 +67,7 @@ export function BulkEmailDeliveryReport() {
       />
       <DataTable
         header={
-          <Typography level="title-md" sx={{ p: 1 }}>
+          <Typography level="title-md" sx={{ px: 2, pt: 2 }}>
             Bulk delivery history
           </Typography>
         }
@@ -120,38 +121,62 @@ export function BulkEmailDeliveryReport() {
             <Button
               size="sm"
               variant="plain"
+              startIcon="Visibility"
               onClick={(s) =>
                 s.setScalar("bulk_report_delivery_id", sql`${record}.id`)}
             >
               View recipients
             </Button>
-          ));
+          ), { width: 190 });
+          b.column(
+            "Status",
+            ({ record }) => (
+              <StatusChip
+                fallbackLabel={sql`fn.display_bulk_email_delivery_status(${record}.status)`}
+                cases={[
+                  {
+                    when: sql`${record}.status in ('prepared', 'submitting')`,
+                    color: "primary",
+                  },
+                  {
+                    when: sql`${record}.status = 'submitted'`,
+                    color: "success",
+                  },
+                  { when: sql`${record}.status = 'failed'`, color: "danger" },
+                ]}
+              />
+            ),
+            { width: 130 },
+          );
+          b.field("created_at", undefined, { width: 170 });
           b.field("source");
           b.field("source_record_key");
+          b.field("from_email");
+          b.simpleColumn("recipient_count", "Recipients", { align: "right" });
+          b.simpleColumn("submitted_count", "Submitted", { align: "right" });
+          b.simpleColumn("delivered_count", "Delivered", { align: "right" });
+          if (engagementTracking) {
+            b.simpleColumn("opened_count", "Opened", { align: "right" });
+            b.simpleColumn("clicked_count", "Clicked", { align: "right" });
+          }
+          b.simpleColumn("excluded_count", "Excluded", { align: "right" });
+          b.simpleColumn("failed_count", "Failed", { align: "right" });
+          b.simpleColumn("send_unknown_count", "Uncertain", {
+            align: "right",
+          });
+          b.simpleColumn("hard_bounced_count", "Hard bounced", {
+            align: "right",
+          });
+          b.simpleColumn("complained_count", "Complained", { align: "right" });
+          b.simpleColumn("error", "Error", { width: 280 });
           b.field("provider");
           b.simpleColumn("provider_bulk_id", "Provider ID");
-          b.field("from_email");
-          b.field("status");
-          b.simpleColumn("error", "Error");
-          b.simpleColumn("recipient_count", "Recipients");
-          b.simpleColumn("submitted_count", "Submitted");
-          b.simpleColumn("excluded_count", "Excluded");
-          b.simpleColumn("failed_count", "Failed");
-          b.simpleColumn("send_unknown_count", "Unknown");
-          b.simpleColumn("delivered_count", "Delivered");
-          if (engagementTracking) {
-            b.simpleColumn("opened_count", "Opened");
-            b.simpleColumn("clicked_count", "Clicked");
-          }
-          b.simpleColumn("hard_bounced_count", "Hard bounced");
-          b.simpleColumn("complained_count", "Complained");
-          b.field("created_at");
           b.field("completed_at");
         }}
         searchable={["source_record_key", "from_email"]}
         pageSize={25}
         variant="outlined"
-        emptyState="No bulk deliveries yet"
+        emptyState="No bulk deliveries yet. Deliveries appear here once a campaign is scheduled."
         minColumnWidth={120}
       />
       <ModalDialog
@@ -159,10 +184,10 @@ export function BulkEmailDeliveryReport() {
         onClose={(s) => s.setScalar("bulk_report_delivery_id", sql`null`)}
         maxWidth="xl"
       >
-        <Typography level="h3">
+        <Typography level="h4">
           {sql`'Recipients for bulk delivery ' || bulk_report_delivery_id::string`}
         </Typography>
-        <Alert color="neutral">
+        <Alert color="neutral" variant="soft" startIcon="Info">
           Filter Status to Failed to find recipients recorded as not sent.
           Review their errors and current contact eligibility before preparing a
           new campaign. Reconcile unknown outcomes first; do not resend to
@@ -198,6 +223,7 @@ export function BulkEmailDeliveryReport() {
           }}
           searchable={["email", "source_recipient_key", "error"]}
           filterable
+          filterVariant="panel"
           sortable
           pageSize={25}
           download={{
@@ -207,12 +233,15 @@ export function BulkEmailDeliveryReport() {
           emptyState="No recipients match this delivery and its filters"
           minColumnWidth={140}
         />
-        <Button
-          variant="plain"
-          onClick={(s) => s.setScalar("bulk_report_delivery_id", sql`null`)}
-        >
-          Close
-        </Button>
+        <div className="flex justify-end">
+          <Button
+            variant="outlined"
+            color="neutral"
+            onClick={(s) => s.setScalar("bulk_report_delivery_id", sql`null`)}
+          >
+            Close
+          </Button>
+        </div>
       </ModalDialog>
     </div>
   );

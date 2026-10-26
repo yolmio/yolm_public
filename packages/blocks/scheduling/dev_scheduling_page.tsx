@@ -149,7 +149,6 @@ function SchedulingPageInner(props: DevSchedulingPageProps) {
               <ScheduleInterface
                 type={props.devDefinedEventType}
                 form={props.form}
-                backgroundColorOverride={props.backgroundColorOverride}
                 afterTransactionStart={props.afterTransactionStart}
                 beforeTransactionCommit={(s, createdAppointmentId, ctx) => {
                   props.beforeTransactionCommit?.(
@@ -158,42 +157,7 @@ function SchedulingPageInner(props: DevSchedulingPageProps) {
                     ctx,
                   );
                 }}
-                afterTransactionCommit={(s, createdAppointmentId, ctx) => {
-                  if (props.afterTransactionCommit) {
-                    props.afterTransactionCommit(
-                      s,
-                      createdAppointmentId,
-                      ctx,
-                    );
-                  }
-                  if (eventType.notifications?.confirmationEmail) {
-                    schedulingBlock.enqueueBackgroundTask(s, {
-                      taskType: "email_dev",
-                      appointmentTable: eventType.tableName,
-                      appointmentId: createdAppointmentId,
-                      emailType: "invitee_confirmation_email",
-                      externalResourceId:
-                        sql`(select cast(public_id as string) from db.${
-                          sql.ref(eventType.tableName)
-                        } where id = ${createdAppointmentId})`,
-                    });
-                  }
-                  if (eventType.notifications?.hostConfirmationEmail) {
-                    schedulingBlock.enqueueBackgroundTask(s, {
-                      taskType: "email_dev",
-                      appointmentTable: eventType.tableName,
-                      appointmentId: createdAppointmentId,
-                      emailType: "host_confirmation_email",
-                      targetUserId: sql`(select sys_user_id from db.${
-                        sql.ref(eventType.tableName)
-                      } where id = ${createdAppointmentId})`,
-                      externalResourceId:
-                        sql`(select cast(public_id as string) from db.${
-                          sql.ref(eventType.tableName)
-                        } where id = ${createdAppointmentId})`,
-                    });
-                  }
-                }}
+                afterTransactionCommit={props.afterTransactionCommit}
                 insertValues={props.insertValues}
               />
             }
@@ -312,41 +276,15 @@ function ReschedulingPageInner(props: DevSchedulingPageProps) {
               <RescheduleForm
                 form={props.form}
                 appointmentId={sql`appointment_record.id`}
-                assigningNewUser={false}
                 appointmentsTable={eventType.tableName}
                 type="dev"
-                afterTransactionCommit={(s) => {
-                  schedulingBlock.enqueueBackgroundTask(s, {
-                    taskType: "calendar_update",
-                    appointmentTable: eventType.tableName,
+                beforeTransactionCommit={(s) => {
+                  schedulingBlock.enqueueDevDefinedAppointmentTasks(s, {
+                    eventType,
                     appointmentId: sql`appointment_record.id`,
+                    change: "rescheduled",
+                    insideTransaction: true,
                   });
-                  schedulingBlock.enqueueBackgroundTask(s, {
-                    taskType: "meeting_update",
-                    appointmentTable: eventType.tableName,
-                    appointmentId: sql`appointment_record.id`,
-                  });
-                  if (eventType.notifications?.inviteeRescheduleEmail) {
-                    schedulingBlock.enqueueBackgroundTask(s, {
-                      taskType: "email_dev",
-                      appointmentTable: eventType.tableName,
-                      appointmentId: sql`appointment_record.id`,
-                      emailType: "invitee_reschedule_email",
-                      externalResourceId:
-                        sql`cast(appointment_record.public_id as string)`,
-                    });
-                  }
-                  if (eventType.notifications?.hostRescheduleEmail) {
-                    schedulingBlock.enqueueBackgroundTask(s, {
-                      taskType: "email_dev",
-                      appointmentTable: eventType.tableName,
-                      appointmentId: sql`appointment_record.id`,
-                      emailType: "host_reschedule_email",
-                      targetUserId: sql`appointment_record.sys_user_id`,
-                      externalResourceId:
-                        sql`cast(appointment_record.public_id as string)`,
-                    });
-                  }
                 }}
               />
             }

@@ -1,6 +1,9 @@
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
-import type { GeneralServerStatements } from "std/statements";
+import type {
+  GeneralServerStatements,
+  ServerStatementsBase,
+} from "std/statements";
 import { system } from "std/system";
 import type {
   DriveBlockContract,
@@ -147,6 +150,27 @@ export class DriveDerivations implements DriveExtension {
     this.artifacts = [...artifactsByName.values()];
   }
 
+  /**
+   * Deletes the derivations of file versions that `transactions` (a query
+   * with a `tx_id` column) inserted. Derivation rows are seeded by reactors
+   * in later transactions, so an undo of the version's insert removes them
+   * first; derivations of versions those transactions did not insert stay.
+   */
+  deleteDerivationsOfInsertedVersions(
+    s: ServerStatementsBase<any>,
+    transactions: Sql,
+  ) {
+    s.modify(sql`
+      delete from db.file_derivations
+      where source_file_version_id in (
+        select inserted.record_id
+        from db.file_versions__versions inserted
+        where inserted.op_kind = 'insert'
+          and inserted.tx_id in (select tx_id from (${transactions}) undone)
+      )
+    `);
+  }
+
   initialize(files: DriveBlockContract) {
     this.#files = files;
     system.enum_({
@@ -183,7 +207,6 @@ export class DriveDerivations implements DriveExtension {
     api,
     authenticate,
   }) => {
-    const files = this.#requiredFiles();
     for (const definition of this.artifacts) {
       if (!definition.serve) continue;
       api.get(
@@ -191,31 +214,19 @@ export class DriveDerivations implements DriveExtension {
         {
           procedure: (s) => {
             authenticate(s);
-            s.defRecord(
-              "requested_derivation",
-              sql`
-                select derivation.blob_hash, derivation.content_type
-                from db.file_derivations derivation
-                join db.file_versions version
-                  on version.id = derivation.source_file_version_id
-                join db.file_items item on item.id = version.file_item_id
-                join db.file_spaces space on space.id = item.file_space_id
-                where derivation.source_file_version_id = version_id
-                  and derivation.derivation_type = ${sql.lit(definition.name)}
-                  and derivation.recipe_version = ${definition.recipeVersion}
-                  and derivation.status = 'ready'
-                  and regex.is_match(artifact_hash, '^[0-9a-f]{64}$')
-                  and bytes.to_hex(derivation.blob_hash) = artifact_hash
-                  and ${
-                files.canReadVersionSql({
-                  spaceRecord: sql`space`,
-                  itemRecord: sql`item`,
-                  versionRecord: sql`version`,
-                  sysUserId: sql`auth_user_id`,
-                })
-              }
-              `,
-            );
+            // The access-checked lookup lives in one stored procedure so each
+            // served artifact route on each domain does not recompile the
+            // Drive read policy.
+            s.callStoredProcedure("files_derivation_artifact", {
+              inputScalars: {
+                p_version_id: sql`version_id`,
+                p_derivation_type: sql.lit(definition.name),
+                p_recipe_version: sql`${definition.recipeVersion}`,
+                p_artifact_hash: sql`artifact_hash`,
+                p_user_id: sql`auth_user_id`,
+              },
+              outputRecords: { requested_derivation: "requested_derivation" },
+            });
             s.if(sql`requested_derivation.blob_hash is null`, (s) => {
               s.setHttpStatus(404);
               s.return(sql.lit`Derived file not found`);
@@ -245,6 +256,54 @@ export class DriveDerivations implements DriveExtension {
 
   registerStoredProcedures = () => {
     const files = this.#requiredFiles();
+    if (this.artifacts.some((artifact) => artifact.serve)) {
+      system.storedProcedure({
+        name: "files_derivation_artifact",
+        transaction: "caller",
+        inputScalars: [
+          { name: "p_version_id", type: "BigInt" },
+          {
+            name: "p_derivation_type",
+            type: { type: "String", maxLength: 80 },
+          },
+          { name: "p_recipe_version", type: "Uint" },
+          { name: "p_artifact_hash", type: "String" },
+          { name: "p_user_id", type: "BigInt" },
+        ],
+        outputRecords: [{
+          name: "requested_derivation",
+          fields: [
+            { name: "blob_hash", type: { type: "Bytes", maxLength: 32 } },
+            { name: "content_type", type: { type: "String", maxLength: 255 } },
+          ],
+        }],
+        procedure: (s) => {
+          s.modify(sql`
+            insert into requested_derivation
+            select derivation.blob_hash, derivation.content_type
+            from db.file_derivations derivation
+            join db.file_versions version
+              on version.id = derivation.source_file_version_id
+            join db.file_items item on item.id = version.file_item_id
+            join db.file_spaces space on space.id = item.file_space_id
+            where derivation.source_file_version_id = p_version_id
+              and derivation.derivation_type = p_derivation_type
+              and derivation.recipe_version = p_recipe_version
+              and derivation.status = 'ready'
+              and regex.is_match(p_artifact_hash, '^[0-9a-f]{64}$')
+              and bytes.to_hex(derivation.blob_hash) = p_artifact_hash
+              and ${
+            files.canReadVersionSql({
+              spaceRecord: sql`space`,
+              itemRecord: sql`item`,
+              versionRecord: sql`version`,
+              sysUserId: sql`p_user_id`,
+            })
+          }
+          `);
+        },
+      });
+    }
     system.storedProcedure({
       name: "files_retry_derivation",
       transaction: "standalone",

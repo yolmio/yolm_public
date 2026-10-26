@@ -57,12 +57,17 @@ function nodeText(node) {
   if (!node || typeof node !== "object") return "";
   if (node.type === "text") return String(node.text || "");
   if (node.type === "linebreak") return "\n";
+  if (node.type === "image") {
+    return `${node.altText || "Image"} ${node.src || ""}`;
+  }
+  if (node.type === "video") return String(node.url || "Video");
   return Array.isArray(node.children)
     ? node.children.map(nodeText).join("")
     : "";
 }
 
 function nodeTag(node) {
+  if (node.type === "image" || node.type === "video") return "figure";
   if (node.type === "heading") return String(node.tag || "h2");
   if (node.type === "quote") return "blockquote";
   if (node.type === "list") return node.listType === "number" ? "ol" : "ul";
@@ -430,7 +435,15 @@ function compactOperations(operations) {
   return result;
 }
 
+function containsMedia(node) {
+  return node && (node.type === "image" || node.type === "video" ||
+    node.children?.some(containsMedia));
+}
+
 function operationsFor(change) {
+  if (containsMedia(change.before?.node) || containsMedia(change.after?.node)) {
+    return null;
+  }
   if (change.kind === "added") {
     const operations = [];
     for (const token of semanticTokens(change.after.node)) {

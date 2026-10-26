@@ -1,4 +1,10 @@
-import { currentUserHasPermission } from "blocks/auth";
+import {
+  translationApprovedSql,
+  translationReviewIdSql,
+  translationReviewLockedSql,
+} from "./translation_reviews";
+import { courseDraftStepsUnchangedSql } from "./course_introduction";
+import { currentUserHasPermission, userHasPermission } from "blocks/auth";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
 import type { GeneralServerStatements } from "std/statements";
@@ -6,18 +12,25 @@ import { system } from "std/system";
 
 import type { TrainingBlockOpts } from "./types.ts";
 import {
+  assessmentVersionPublishIssuesSql,
   createOrResumeAssessmentAttempt,
+  deleteAssessmentChoiceSelectionSql,
+  insertAssessmentChoiceSelectionSql,
   reviewAssessmentAttempt,
   reviewAssessmentResponse,
   saveAssessmentMetadataResponseSql,
   saveAssessmentResponseSql,
+  selectAssessmentSingleChoiceSql,
   submitAssessmentAttempt,
 } from "./assessment_helpers";
 import {
+  activeAssessmentVersionSql,
   activeCourseVersionSql,
   activeVersionIdSql,
   assignableCourseItemCountSql,
+  assignableCourseItemWhereSql,
   assignmentLanguageSql,
+  cancelOpenAssessmentAttemptsForCourseAssignmentsSql,
   cloneCourseVersionItemDocumentsSql,
   cloneCourseVersionItemsSql,
   cloneCourseVersionSectionsSql,
@@ -25,16 +38,21 @@ import {
   currentEmployeeId,
   defaultLanguageSql,
   employeeName,
+  expandedCourseItemsCteSql,
   finalizeNewAssignmentsSql,
   insertCertificationsForCompletedAssignmentsSql,
   insertCourseTasksForAssignmentSql,
+  insertCurrentCourseAssignmentTasksSql,
   insertDocumentTasksForAssignmentBatchSql,
+  insertTaskItemDocumentSnapshotsSql,
   missingActiveVersionCountSql,
   openTrainingAssignmentWhereSql,
   personLanguageSql,
   personTable,
+  replaceOpenCourseAssignmentTasksSql,
   revokeTrainingAccessTokensForClosedAssignmentSql,
   secondaryValidatorSignoffByPermission,
+  setCurrentCourseVersionSql,
   trainingFeatureEnabled,
   trainingPermissions,
   trainingValidationLabels,
@@ -42,36 +60,45 @@ import {
   updateAssignmentStatusAfterValidationSql,
 } from "./helpers";
 
-function draftCourseVersionSql(courseId: Sql) {
+function draftCourseVersionSql(courseId: Sql, language: Sql) {
   return sql`(
     select v.id
     from db.training_course_versions v
     where v.training_course_id = ${courseId}
-      and v.status = 'draft'
+      and v.status = 'draft' and v.language = ${language}
     order by v.created_at desc, v.id desc
     limit 1
   )`;
 }
 
-function draftAssessmentVersionSql(assessmentId: Sql) {
+function draftAssessmentVersionSql(assessmentId: Sql, language: Sql) {
   return sql`(
     select v.id
     from db.training_assessment_versions v
     where v.training_assessment_id = ${assessmentId}
-      and v.status = 'draft'
+      and v.status = 'draft' and v.language = ${language}
     order by v.id desc
     limit 1
   )`;
 }
 
-function publishedAssessmentVersionSql(assessmentId: Sql) {
-  return sql`(
-    select v.id
-    from db.training_assessments assessment
-    join db.training_assessment_versions v
-      on v.id = assessment.current_training_assessment_version_id
-    where assessment.id = ${assessmentId}
-      and v.status = 'published'
+function validTranslationSourceSql(
+  opts: TrainingBlockOpts,
+  kind: "course" | "assessment",
+  recordId: Sql,
+  versionId: Sql,
+) {
+  const versions = sql.ref(`training_${kind}_versions`);
+  const parent = sql.ref(`training_${kind}_id`);
+  return sql`exists (
+    select 1 from db.${versions} version
+    join db.${versions} source on source.id = case
+      when version.language = ${defaultLanguageSql(opts)} then version.id
+      else version.source_version_id end
+    where version.id = ${versionId} and version.${parent} = ${recordId}
+      and source.${parent} = ${recordId}
+      and source.language = ${defaultLanguageSql(opts)}
+      and source.status in ('published', 'archived')
   )`;
 }
 
@@ -118,10 +145,216 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
     end`;
 
   system.storedProcedure({
+    name: "training_withdraw_course_assignment",
+    transaction: "standalone",
+    inputScalars: [
+      { name: "p_assignment_id", type: "BigInt" },
+      { name: "p_reason", type: { type: "String", maxLength: 1000 } },
+    ],
+    procedure: (s) => {
+      s.startTransaction();
+      s.throwErrorUnless(
+        currentUserHasPermission(sql.lit(permissions.assignTraining)),
+        sql.lit`You cannot withdraw training assignments.`,
+      );
+      s.defScalar("withdrawn_by_id", currentEmployeeId(opts));
+      s.throwErrorIf(
+        sql`withdrawn_by_id is null`,
+        sql.lit`A workforce profile is required.`,
+      );
+      s.throwErrorIf(
+        sql`nullif(trim(p_reason), '') is null`,
+        sql.lit`Enter a reason for withdrawing this assignment.`,
+      );
+      s.throwErrorUnless(
+        sql`exists (
+        select 1 from db.training_assignments assignment
+        where assignment.id = p_assignment_id
+          and assignment.training_course_id is not null
+          and assignment.status in ('pending', 'in_progress')
+          and exists (select 1 from db.training_employee_tasks task
+            where task.training_assignment_id = assignment.id
+              and task.status in ('assigned', 'in_progress'))
+      )`,
+        sql.lit`This course assignment has no outstanding tasks to withdraw.`,
+      );
+      s.modify(sql`update db.training_assessment_attempts
+        set status = 'cancelled', outcome = null, cancelled_at = now(),
+            cancelled_by_id = withdrawn_by_id
+        where status in ('in_progress', 'review_pending')
+          and training_employee_task_id in (
+            select id from db.training_employee_tasks
+            where training_assignment_id = p_assignment_id
+              and status in ('assigned', 'in_progress'))`);
+      s.modify(sql`update db.training_employee_tasks
+        set status = 'waived', waived_by_id = withdrawn_by_id,
+            waived_at = now(), waiver_reason = trim(p_reason)
+        where training_assignment_id = p_assignment_id
+          and status in ('assigned', 'in_progress')`);
+      s.modify(sql`update db.training_assignments set status = 'waived'
+        where id = p_assignment_id`);
+      if (inviteEnabled) {
+        s.modify(revokeTrainingAccessTokensForClosedAssignmentSql({
+          opts,
+          assignmentId: sql`p_assignment_id`,
+        }));
+      }
+      s.commitTransaction();
+    },
+  });
+
+  system.storedProcedure({
+    name: "training_discard_assessment_draft",
+    transaction: "caller",
+    inputScalars: [{ name: "p_assessment_id", type: "BigInt" }, {
+      name: "p_version_id",
+      type: "BigInt",
+    }, { name: "p_language", type: { type: "String", maxLength: 20 } }],
+    procedure: (s) => {
+      s.throwErrorUnless(
+        sql`${
+          currentUserHasPermission(sql.lit(permissions.manageAssessments))
+        } and exists (
+        select 1 from db.training_assessment_versions where id = p_version_id
+          and training_assessment_id = p_assessment_id and language = p_language and status = 'draft')`,
+        sql.lit`This draft is no longer editable. Refresh the page.`,
+      );
+      s.throwErrorIf(
+        translationReviewLockedSql("assessment", sql`p_version_id`),
+        sql
+          .lit`Withdraw the translation review before discarding these changes.`,
+      );
+      s.if(
+        sql`${
+          translationReviewIdSql("assessment", sql`p_version_id`)
+        } is not null`,
+        (s) => {
+          s.modify(
+            sql`update db.training_assessment_versions set status = 'archived', archived_at = now() where id = p_version_id`,
+          );
+          s.return();
+        },
+      );
+      s.modify(sql`
+                              delete from db.training_assessment_metadata_field_choices
+                              where training_assessment_metadata_field_id in (
+                                select field.id
+                                from db.training_assessment_metadata_fields field
+                                where field.training_assessment_version_id =
+                                  p_version_id
+                              )
+                            `);
+      s.modify(sql`
+                              delete from db.training_assessment_metadata_fields
+                              where training_assessment_version_id =
+                                p_version_id
+                            `);
+      s.modify(sql`
+                              delete from db.training_assessment_item_choices
+                              where training_assessment_item_id in (
+                                select item.id
+                                from db.training_assessment_items item
+                                join db.training_assessment_sections section
+                                  on section.id = item.training_assessment_section_id
+                                where section.training_assessment_version_id =
+                                  p_version_id
+                              )
+                            `);
+      s.modify(sql`
+                              delete from db.training_assessment_items
+                              where training_assessment_section_id in (
+                                select section.id
+                                from db.training_assessment_sections section
+                                where section.training_assessment_version_id =
+                                  p_version_id
+                              )
+                            `);
+      s.modify(sql`
+                              delete from db.training_assessment_sections
+                              where training_assessment_version_id =
+                                p_version_id
+                            `);
+      s.modify(sql`
+                              delete from db.training_assessment_versions
+                              where id = p_version_id
+                                and status = 'draft'
+                            `);
+    },
+  });
+
+  system.storedProcedure({
     name: "training_ensure_course_draft",
+    transaction: "caller",
+    inputScalars: [{ name: "p_course_id", type: "BigInt" }],
+    outputScalars: [{ name: "draft_course_version_id", type: "BigInt" }, {
+      name: "source_course_version_id",
+      type: "BigInt",
+    }],
+    procedure: (s) =>
+      s.callStoredProcedure("training_ensure_course_draft_language", {
+        inputScalars: {
+          p_course_id: sql`p_course_id`,
+          p_language: defaultLanguageSql(opts),
+          p_source_version: sql`null`,
+        },
+        outputScalars: {
+          draft_course_version_id: "draft_course_version_id",
+          source_course_version_id: "source_course_version_id",
+        },
+      }),
+  });
+  system.storedProcedure({
+    name: "training_publish_course_draft",
+    transaction: "caller",
+    inputScalars: [{ name: "p_course_id", type: "BigInt" }],
+    outputScalars: [],
+    procedure: (s) =>
+      s.callStoredProcedure("training_publish_course_draft_language", {
+        inputScalars: {
+          p_course_id: sql`p_course_id`,
+          p_language: defaultLanguageSql(opts),
+        },
+        outputScalars: {},
+      }),
+  });
+  system.storedProcedure({
+    name: "training_ensure_assessment_draft",
+    transaction: "caller",
+    inputScalars: [{ name: "p_assessment_id", type: "BigInt" }],
+    outputScalars: [{ name: "draft_assessment_version_id", type: "BigInt" }],
+    procedure: (s) =>
+      s.callStoredProcedure("training_ensure_assessment_draft_language", {
+        inputScalars: {
+          p_assessment_id: sql`p_assessment_id`,
+          p_language: defaultLanguageSql(opts),
+          p_source_version: sql`null`,
+        },
+        outputScalars: {
+          draft_assessment_version_id: "draft_assessment_version_id",
+        },
+      }),
+  });
+  system.storedProcedure({
+    name: "training_publish_assessment_draft",
+    transaction: "caller",
+    inputScalars: [{ name: "p_assessment_id", type: "BigInt" }],
+    outputScalars: [],
+    procedure: (s) =>
+      s.callStoredProcedure("training_publish_assessment_draft_language", {
+        inputScalars: {
+          p_assessment_id: sql`p_assessment_id`,
+          p_language: defaultLanguageSql(opts),
+        },
+        outputScalars: {},
+      }),
+  });
+  system.storedProcedure({
+    name: "training_ensure_course_draft_language",
     transaction: "caller",
     inputScalars: [
       { name: "p_course_id", type: "BigInt" },
+      { name: "p_language", type: { type: "String", maxLength: 20 } },
+      { name: "p_source_version", type: "BigInt" },
     ],
     outputScalars: [
       { name: "draft_course_version_id", type: "BigInt" },
@@ -131,30 +364,100 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
       { name: "source_course_version_id", type: "BigInt" },
     ],
     procedure: (s) => {
+      s.throwErrorUnless(
+        sql.inList(
+          sql`p_language`,
+          opts.content.opts.languages.map((l) => sql.lit(l.code)),
+        ),
+        sql.lit`Choose a supported language.`,
+      );
+      s.throwErrorUnless(
+        currentUserHasPermission(sql.lit(permissions.manageLibrary)),
+        sql.lit`You do not have permission to edit this training content.`,
+      );
+      s.throwErrorIf(
+        sql`p_source_version is not null and not exists (select 1 from db.training_course_versions where id = p_source_version and training_course_id = p_course_id and status = 'published' and language = ${
+          defaultLanguageSql(opts)
+        })`,
+        sql.lit`Choose a published source version.`,
+      );
+
       s.defScalar(
         "existing_draft_course_version_id",
-        draftCourseVersionSql(sql`p_course_id`),
+        draftCourseVersionSql(sql`p_course_id`, sql`p_language`),
       );
       s.defScalar(
         "published_course_version_id",
-        activeCourseVersionSql(sql`p_course_id`),
+        sql`coalesce(p_source_version, ${
+          activeCourseVersionSql(sql`p_course_id`, sql`p_language`)
+        })`,
+      );
+      s.throwErrorIf(
+        translationReviewLockedSql(
+          "course",
+          sql`existing_draft_course_version_id`,
+        ),
+        sql
+          .lit`This translation is locked for review. Withdraw the review before editing.`,
+      );
+      s.if(
+        sql`${
+          translationReviewIdSql(
+            "course",
+            sql`existing_draft_course_version_id`,
+          )
+        } is not null`,
+        (s) => {
+          // Keep the reviewed text and its decisions together; edit a fresh copy.
+          s.setScalar(
+            "published_course_version_id",
+            sql`existing_draft_course_version_id`,
+          );
+          s.modify(
+            sql`update db.training_course_versions set status = 'archived', archived_at = now() where id = existing_draft_course_version_id`,
+          );
+          s.setScalar("existing_draft_course_version_id", sql`null`);
+        },
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          validTranslationSourceSql(
+            opts,
+            "course",
+            sql`p_course_id`,
+            sql`coalesce(existing_draft_course_version_id, published_course_version_id)`,
+          )
+        }`,
+        sql
+          .lit`A translated draft must be linked to a published default-language version of this course. Publish that version first.`,
       );
       s.modify(sql`
         insert into db.training_course_versions
           (training_course_id, version_label, status, effective_at,
-           created_by_id)
+           created_by_id, language, source_version_id, localized_name, localized_description)
         select p_course_id, 'Draft', 'draft', current_date(),
-               ${currentEmployeeId(opts)}
+               ${currentEmployeeId(opts)}, p_language,
+               (select case when language != p_language then id else source_version_id end from db.training_course_versions where id = published_course_version_id),
+               (select coalesce(v.localized_name,c.name) from db.training_courses c left join db.training_course_versions v on v.id = published_course_version_id where c.id = p_course_id),
+               (select case when v.localized_name is null then c.description else v.localized_description end from db.training_courses c left join db.training_course_versions v on v.id = published_course_version_id where c.id = p_course_id)
         where existing_draft_course_version_id is null
       `);
       s.setScalar(
         "draft_course_version_id",
-        draftCourseVersionSql(sql`p_course_id`),
+        draftCourseVersionSql(sql`p_course_id`, sql`p_language`),
       );
       s.if(
         sql`existing_draft_course_version_id is null
           and published_course_version_id is not null`,
         (s) => {
+          s.modify(sql`update db.training_course_versions set introduction =
+            (select introduction from db.training_course_versions where id = published_course_version_id)
+            where id = draft_course_version_id`);
+          s.modify(
+            sql`insert into db.training_course_introduction_images (training_course_version_id, file_version_id)
+            select draft_course_version_id, file_version_id from db.training_course_introduction_images
+            where training_course_version_id = published_course_version_id`,
+          );
           s.modify(cloneCourseVersionSectionsSql({
             oldCourseVersionId: sql`published_course_version_id`,
             newCourseVersionId: sql`draft_course_version_id`,
@@ -176,38 +479,104 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
           published_course_version_id
         )`,
       );
+      // Pre-feature drafts have no localized metadata; initialize it before editing.
+      s.modify(sql`update db.training_course_versions set
+        localized_name = (select name from db.training_courses where id = p_course_id),
+        localized_description = coalesce(localized_description, (select description from db.training_courses where id = p_course_id))
+        where id = draft_course_version_id and localized_name is null`);
     },
   });
 
   system.storedProcedure({
-    name: "training_ensure_assessment_draft",
+    name: "training_ensure_assessment_draft_language",
     transaction: "caller",
     inputScalars: [
       { name: "p_assessment_id", type: "BigInt" },
+      { name: "p_language", type: { type: "String", maxLength: 20 } },
+      { name: "p_source_version", type: "BigInt" },
     ],
     outputScalars: [
       { name: "draft_assessment_version_id", type: "BigInt" },
     ],
     procedure: (s) => {
+      s.throwErrorUnless(
+        sql.inList(
+          sql`p_language`,
+          opts.content.opts.languages.map((l) => sql.lit(l.code)),
+        ),
+        sql.lit`Choose a supported language.`,
+      );
+      s.throwErrorUnless(
+        currentUserHasPermission(sql.lit(permissions.manageAssessments)),
+        sql.lit`You do not have permission to edit this training content.`,
+      );
+      s.throwErrorIf(
+        sql`p_source_version is not null and not exists (select 1 from db.training_assessment_versions where id = p_source_version and training_assessment_id = p_assessment_id and status = 'published' and language = ${
+          defaultLanguageSql(opts)
+        })`,
+        sql.lit`Choose a published source version.`,
+      );
+
       s.defScalar(
         "published_assessment_version_id",
-        publishedAssessmentVersionSql(sql`p_assessment_id`),
+        sql`coalesce(p_source_version, ${
+          activeAssessmentVersionSql(sql`p_assessment_id`, sql`p_language`)
+        })`,
       );
       s.setScalar(
         "draft_assessment_version_id",
-        draftAssessmentVersionSql(sql`p_assessment_id`),
+        draftAssessmentVersionSql(sql`p_assessment_id`, sql`p_language`),
+      );
+      s.throwErrorIf(
+        translationReviewLockedSql(
+          "assessment",
+          sql`draft_assessment_version_id`,
+        ),
+        sql
+          .lit`This translation is locked for review. Withdraw the review before editing.`,
+      );
+      s.if(
+        sql`${
+          translationReviewIdSql("assessment", sql`draft_assessment_version_id`)
+        } is not null`,
+        (s) => {
+          // Keep the reviewed text and its decisions together; edit a fresh copy.
+          s.setScalar(
+            "published_assessment_version_id",
+            sql`draft_assessment_version_id`,
+          );
+          s.modify(
+            sql`update db.training_assessment_versions set status = 'archived', archived_at = now() where id = draft_assessment_version_id`,
+          );
+          s.setScalar("draft_assessment_version_id", sql`null`);
+        },
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          validTranslationSourceSql(
+            opts,
+            "assessment",
+            sql`p_assessment_id`,
+            sql`coalesce(draft_assessment_version_id, published_assessment_version_id)`,
+          )
+        }`,
+        sql
+          .lit`A translated draft must be linked to a published default-language version of this assessment. Publish that version first.`,
       );
       s.if(sql`draft_assessment_version_id is null`, (s) => {
         s.modify(sql`
           insert into db.training_assessment_versions
-            (training_assessment_id, version_label, status, created_by_id)
+            (training_assessment_id, version_label, status, created_by_id, language, source_version_id, localized_name, localized_description)
           values
             (p_assessment_id, 'Draft', 'draft',
-             ${currentEmployeeId(opts)})
+             ${currentEmployeeId(opts)}, p_language,
+              (select case when language != p_language then id else source_version_id end from db.training_assessment_versions where id = published_assessment_version_id),
+              (select coalesce(v.localized_name,a.name) from db.training_assessments a left join db.training_assessment_versions v on v.id = published_assessment_version_id where a.id = p_assessment_id),
+              (select case when v.localized_name is null then a.description else v.localized_description end from db.training_assessments a left join db.training_assessment_versions v on v.id = published_assessment_version_id where a.id = p_assessment_id))
         `);
         s.setScalar(
           "draft_assessment_version_id",
-          draftAssessmentVersionSql(sql`p_assessment_id`),
+          draftAssessmentVersionSql(sql`p_assessment_id`, sql`p_language`),
         );
         s.if(sql`published_assessment_version_id is not null`, (s) => {
           s.defRecord(
@@ -334,6 +703,280 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
           `);
         });
       });
+      // Pre-feature drafts have no localized metadata; initialize it before editing.
+      s.modify(sql`update db.training_assessment_versions set
+        localized_name = (select name from db.training_assessments where id = p_assessment_id),
+        localized_description = coalesce(localized_description, (select description from db.training_assessments where id = p_assessment_id))
+        where id = draft_assessment_version_id and localized_name is null`);
+    },
+  });
+
+  // Publishing a course draft moves open course assignments onto it; the
+  // admin editor and Spark share this one compiled path.
+  system.storedProcedure({
+    name: "training_publish_course_draft_language",
+    transaction: "caller",
+    inputScalars: [{ name: "p_course_id", type: "BigInt" }, {
+      name: "p_language",
+      type: { type: "String", maxLength: 20 },
+    }],
+    procedure: (s) => {
+      s.throwErrorUnless(
+        sql.inList(
+          sql`p_language`,
+          opts.content.opts.languages.map((l) => sql.lit(l.code)),
+        ),
+        sql.lit`Choose a supported language.`,
+      );
+
+      s.throwErrorUnless(
+        currentUserHasPermission(sql.lit(permissions.publishTraining)),
+        sql.lit`You do not have permission to publish training.`,
+      );
+      s.defScalar(
+        "published_course_version_id",
+        draftCourseVersionSql(sql`p_course_id`, sql`p_language`),
+      );
+      s.throwErrorIf(
+        sql`published_course_version_id is null`,
+        sql.lit`This course has no draft changes to publish.`,
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          translationApprovedSql("course", sql`published_course_version_id`)
+        }`,
+        sql
+          .lit`All assigned translation reviewers must approve before publication.`,
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          validTranslationSourceSql(
+            opts,
+            "course",
+            sql`p_course_id`,
+            sql`published_course_version_id`,
+          )
+        }`,
+        sql
+          .lit`This translation has no valid default-language source. Recreate it from the published default-language course before publishing.`,
+      );
+      s.throwErrorUnless(
+        sql`(select is_active from db.training_courses where id = p_course_id)`,
+        sql.lit`Restore this course before publishing.`,
+      );
+      // Validate the draft's full program before replacing any existing tasks.
+      s.throwErrorUnless(
+        sql`exists (
+          with recursive ${
+          expandedCourseItemsCteSql(
+            sql`version.id = published_course_version_id`,
+            sql`p_language`,
+          )
+        }
+          select 1 from expanded_items expanded
+          join db.training_course_section_items i on i.id = expanded.item_id
+          where ${assignableCourseItemWhereSql()}
+        )`,
+        sql.lit`Add at least one assignable training item before publishing.`,
+      );
+      s.throwErrorIf(
+        sql`exists (
+          with recursive ${
+          expandedCourseItemsCteSql(
+            sql`section.training_course_version_id = published_course_version_id`,
+          )
+        }
+          select 1
+          from expanded_items expanded
+          join db.training_course_section_items item on item.id = expanded.item_id
+          join db.training_courses linked_course on linked_course.id = item.other_course_id
+          where item.type = 'other_checklist' and not linked_course.is_active
+        )`,
+        sql
+          .lit`This program contains archived courses. Restore or remove them before publishing.`,
+      );
+      s.defScalar(
+        "previous_course_version_id",
+        activeCourseVersionSql(sql`p_course_id`, sql`p_language`, true),
+      );
+      s.defScalar(
+        "steps_unchanged",
+        sql`(${
+          courseDraftStepsUnchangedSql(
+            sql`published_course_version_id`,
+            sql`previous_course_version_id`,
+          )
+        })`,
+      );
+      s.modify(sql`
+        update db.training_course_versions
+        set status = 'archived',
+            archived_at = coalesce(archived_at, now())
+        where id = ${
+        activeCourseVersionSql(sql`p_course_id`, sql`p_language`, true)
+      }
+      `);
+      s.modify(sql`
+        update db.training_course_versions
+        set status = 'published',
+            version_label = 'Rev ' || (
+              select coalesce(count(*), 0) + 1
+              from db.training_course_versions
+              where training_course_id = p_course_id
+                and status != 'draft'
+            ),
+            published_by_id = ${currentEmployeeId(opts)},
+            published_at = now()
+        where id = published_course_version_id
+          and status = 'draft'
+      `);
+      s.if(
+        sql`p_language = ${defaultLanguageSql(opts)}`,
+        (s) =>
+          s.modify(setCurrentCourseVersionSql({
+            courseId: sql`p_course_id`,
+            courseVersionId: sql`published_course_version_id`,
+          })),
+      );
+      s.modify(sql`update db.training_courses set
+        name = coalesce((select localized_name from db.training_course_versions where id = published_course_version_id), name),
+        description = case when (select localized_name from db.training_course_versions where id = published_course_version_id) is null
+              then description else (select localized_description from db.training_course_versions where id = published_course_version_id) end
+        where id = p_course_id and p_language = ${defaultLanguageSql(opts)}`);
+      s.modify(
+        sql`update db.training_assignments set training_course_version_id = published_course_version_id
+        where training_course_id = p_course_id and status in ('pending', 'in_progress')
+          and ${
+          activeCourseVersionSql(sql`p_course_id`, sql`training_language`)
+        } = published_course_version_id`,
+      );
+      s.if(sql`not steps_unchanged`, (s) => {
+        s.modify(cancelOpenAssessmentAttemptsForCourseAssignmentsSql({
+          courseId: sql`p_course_id`,
+          cancelledById: currentEmployeeId(opts),
+          versionId: sql`published_course_version_id`,
+        }));
+        s.modify(replaceOpenCourseAssignmentTasksSql({
+          courseId: sql`p_course_id`,
+          versionId: sql`published_course_version_id`,
+        }));
+        s.defTable(
+          "publication_languages",
+          sql`select distinct training_language as language from db.training_assignments where training_course_id = p_course_id and training_course_version_id = published_course_version_id and status in ('pending', 'in_progress')`,
+        );
+        s.forEachTable(
+          "publication_languages",
+          "publication_language",
+          (s) =>
+            s.modify(insertCurrentCourseAssignmentTasksSql({
+              courseId: sql`p_course_id`,
+              newCourseVersionId: sql`published_course_version_id`,
+              language: sql`publication_language.language`,
+            })),
+        );
+        s.modify(insertTaskItemDocumentSnapshotsSql(
+          opts,
+          sql`t.status in ('assigned', 'in_progress')
+            and task_assignment.training_course_id = p_course_id
+            and task_assignment.training_course_version_id = published_course_version_id
+            and task_assignment.status in ('pending', 'in_progress')`,
+        ));
+      });
+    },
+  });
+
+  system.storedProcedure({
+    name: "training_publish_assessment_draft_language",
+    transaction: "caller",
+    inputScalars: [{ name: "p_assessment_id", type: "BigInt" }, {
+      name: "p_language",
+      type: { type: "String", maxLength: 20 },
+    }],
+    procedure: (s) => {
+      s.throwErrorUnless(
+        sql.inList(
+          sql`p_language`,
+          opts.content.opts.languages.map((l) => sql.lit(l.code)),
+        ),
+        sql.lit`Choose a supported language.`,
+      );
+
+      s.throwErrorUnless(
+        currentUserHasPermission(sql.lit(permissions.publishAssessments)),
+        sql.lit`You do not have permission to publish assessments.`,
+      );
+      s.defScalar(
+        "published_assessment_version_id",
+        draftAssessmentVersionSql(sql`p_assessment_id`, sql`p_language`),
+      );
+      s.throwErrorIf(
+        sql`published_assessment_version_id is null`,
+        sql.lit`The draft assessment version no longer exists.`,
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          translationApprovedSql(
+            "assessment",
+            sql`published_assessment_version_id`,
+          )
+        }`,
+        sql
+          .lit`All assigned translation reviewers must approve before publication.`,
+      );
+      s.throwErrorIf(
+        sql`p_language != ${defaultLanguageSql(opts)} and not ${
+          validTranslationSourceSql(
+            opts,
+            "assessment",
+            sql`p_assessment_id`,
+            sql`published_assessment_version_id`,
+          )
+        }`,
+        sql
+          .lit`This translation has no valid default-language source. Recreate it from the published default-language assessment before publishing.`,
+      );
+      s.defScalar(
+        "assessment_publish_issue_text",
+        sql`(select string_agg(issue, ' ') from (${
+          assessmentVersionPublishIssuesSql(
+            sql`published_assessment_version_id`,
+          )
+        }) issues)`,
+      );
+      s.throwErrorIf(
+        sql`assessment_publish_issue_text is not null`,
+        sql`'Resolve these blockers before publishing: ' ||
+          assessment_publish_issue_text`,
+      );
+      s.modify(sql`
+        update db.training_assessment_versions
+        set status = 'archived',
+            archived_at = coalesce(archived_at, now())
+        where training_assessment_id = p_assessment_id
+          and status = 'published' and language = p_language
+      `);
+      s.modify(sql`
+        update db.training_assessment_versions
+        set status = 'published',
+            version_label = 'Rev ' || ((
+              select count(*)
+              from db.training_assessment_versions v
+              where v.training_assessment_id = p_assessment_id
+                and v.status != 'draft'
+            ) + 1)::string,
+            published_by_id = ${currentEmployeeId(opts)},
+            published_at = now()
+        where id = published_assessment_version_id
+          and status = 'draft'
+      `);
+      s.modify(sql`
+        update db.training_assessments
+        set current_training_assessment_version_id = published_assessment_version_id,
+            name = coalesce((select localized_name from db.training_assessment_versions where id = published_assessment_version_id), name),
+            description = case when (select localized_name from db.training_assessment_versions where id = published_assessment_version_id) is null
+              then description else (select localized_description from db.training_assessment_versions where id = published_assessment_version_id) end
+        where id = p_assessment_id and p_language = ${defaultLanguageSql(opts)}
+      `);
     },
   });
 
@@ -751,6 +1394,200 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
     },
   });
 
+  // Keeps the multiple-choice toggle SQL out of every assessment route.
+  system.storedProcedure({
+    name: "training_toggle_assessment_choice",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_attempt_id", type: "BigInt" },
+      { name: "p_item_id", type: "BigInt" },
+      { name: "p_choice_id", type: "BigInt" },
+      { name: "p_single_selection", type: "Bool" },
+      { name: "p_checked", type: "Bool" },
+    ],
+    procedure: (s) => {
+      const choice = {
+        attemptId: sql`p_attempt_id`,
+        itemId: sql`p_item_id`,
+        choiceId: sql`p_choice_id`,
+      };
+      s.if(
+        sql`p_single_selection`,
+        (s) => {
+          for (const statement of selectAssessmentSingleChoiceSql(choice)) {
+            s.modify(statement);
+          }
+        },
+        (s) => {
+          s.if(
+            sql`p_checked`,
+            (s) => {
+              s.modify(insertAssessmentChoiceSelectionSql(choice));
+            },
+            (s) => {
+              s.modify(deleteAssessmentChoiceSelectionSql(choice));
+            },
+          );
+        },
+      );
+    },
+  });
+
+  // Shared by blur saves and the completion/submission transaction. Only dirty
+  // responses are sent, so saving one step cannot overwrite another step's work.
+  system.storedProcedure({
+    name: "training_save_course_responses",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_assignment_id", type: "BigInt" },
+      { name: "p_access_token", type: { type: "String", maxLength: 120 } },
+    ],
+    inputTables: [{
+      name: "p_responses",
+      fields: [
+        { name: "task_id", type: "BigInt", notNull: true },
+        { name: "essay_response", type: { type: "String", maxLength: 4000 } },
+      ],
+    }],
+    procedure: (s) => {
+      s.returnIf(sql`not exists (select 1 from p_responses)`);
+      s.throwErrorUnless(
+        sql`exists (select 1 from db.training_assignments a
+          where a.id = p_assignment_id and a.training_course_id is not null
+            and a.status in ('pending', 'in_progress')
+            and a.employee_final_signed_at is null
+            and coalesce((p_access_token is null and a.person_id = ${
+          currentEmployeeId(opts)
+        })
+              or ${tokenGrantsAssignmentSql(sql`a.id`)}, false))`,
+        sql.lit`This course cannot be edited.`,
+      );
+      s.throwErrorIf(
+        sql`exists (select 1 from p_responses response where not exists (
+          select 1 from db.training_employee_tasks task
+          join db.training_course_section_items item on item.id = task.training_course_section_item_id
+          where task.id = response.task_id and task.training_assignment_id = p_assignment_id
+            and task.status in ('assigned', 'in_progress', 'completed')
+            and (item.requires_essay or item.type = 'essay')
+        )) or exists (select task_id from p_responses group by task_id having count(*) > 1)`,
+        sql.lit`One of these responses can no longer be edited.`,
+      );
+      s.modify(sql`update db.training_employee_tasks task
+        set essay_response = nullif(trim(response.essay_response), ''),
+            completed_at = case when nullif(trim(response.essay_response), '') is null then null else task.completed_at end,
+            training_language = case when nullif(trim(response.essay_response), '') is null then null else task.training_language end,
+            signature_name = case when nullif(trim(response.essay_response), '') is null then null else task.signature_name end,
+            signature_data = case when nullif(trim(response.essay_response), '') is null then null else task.signature_data end,
+            completion_attestation = case when nullif(trim(response.essay_response), '') is null then null else task.completion_attestation end,
+            status = case when task.status = 'assigned' or nullif(trim(response.essay_response), '') is null then 'in_progress' else task.status end
+        from p_responses response
+        where task.id = response.task_id and task.training_assignment_id = p_assignment_id`);
+    },
+  });
+
+  // Explicit submission is the only path from finished course steps to
+  // verification/completion. Task completion alone keeps courses editable.
+  system.storedProcedure({
+    name: "training_submit_course",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_signature_data", type: "String" },
+      { name: "p_assignment_id", type: "BigInt" },
+      { name: "p_access_token", type: { type: "String", maxLength: 120 } },
+      { name: "p_primary_validator_id", type: "BigInt" },
+      { name: "p_secondary_validator_id", type: "BigInt" },
+    ],
+    procedure: (s) => {
+      const labels = trainingValidationLabels(opts);
+      s.defRecord(
+        "submission",
+        sql`select a.id, a.person_id, a.status,
+          c.requires_final_signature, c.generates_certification
+        from db.training_assignments a
+        join db.training_courses c on c.id = a.training_course_id
+        where a.id = p_assignment_id`,
+      );
+      s.throwErrorUnless(
+        sql`coalesce((submission.person_id = ${
+          currentEmployeeId(opts)
+        } and p_access_token is null)
+          or ${tokenGrantsAssignmentSql(sql`p_assignment_id`)}, false)`,
+        sql.lit`You are not allowed to submit this course.`,
+      );
+      s.throwErrorIf(
+        sql`submission.id is null or submission.status not in ('pending', 'in_progress')
+          or not exists (select 1 from db.training_employee_tasks t
+            where t.training_assignment_id = p_assignment_id and t.status = 'completed')
+          or exists (select 1 from db.training_employee_tasks t
+            where t.training_assignment_id = p_assignment_id and t.status in ('assigned', 'in_progress'))`,
+        sql.lit`Complete every step before submitting this course.`,
+      );
+      s.throwErrorIf(
+        sql`exists (select 1 from db.training_employee_tasks t
+          join db.training_course_section_items item on item.id = t.training_course_section_item_id
+          where t.training_assignment_id = p_assignment_id
+            and t.status = 'completed' and (item.requires_essay or item.type = 'essay') and item.type not in ('signature', 'assessment')
+            and nullif(trim(t.essay_response), '') is null)`,
+        sql.lit`Write every required response before submitting this course.`,
+      );
+      s.if(sql`submission.requires_final_signature`, (s) => {
+        s.throwErrorIf(
+          sql`nullif(trim(coalesce(p_signature_data, '')), '') is null`,
+          sql.lit`A final signature is required.`,
+        );
+        s.throwErrorUnless(
+          sql`exists (select 1 from db.${sql.ref(personTable(opts))} p
+            where p.id = p_primary_validator_id and ${
+            userHasPermission(
+              sql.lit(labels.primaryStagePermission),
+              opts.workforce.personSysUserId(sql`p`),
+            )
+          })`,
+          sql.lit`Choose an eligible validator before submitting this course.`,
+        );
+        if (!secondaryValidatorSignoffByPermission(opts)) {
+          s.throwErrorIf(
+            sql`submission.generates_certification and not exists (
+              select 1 from db.${sql.ref(personTable(opts))} p
+              where p.id = p_secondary_validator_id and ${
+              userHasPermission(
+                sql.lit(labels.secondaryStagePermission),
+                opts.workforce.personSysUserId(sql`p`),
+              )
+            })`,
+            sql
+              .lit`Choose an eligible certification validator before submitting this course.`,
+          );
+        }
+        s.modify(sql`update db.training_assignments
+          set final_primary_validator_id = p_primary_validator_id,
+              final_secondary_validator_id = case when submission.generates_certification
+                then p_secondary_validator_id else null end,
+              employee_final_signature_data = p_signature_data,
+              employee_final_signed_at = now()
+          where id = p_assignment_id`);
+      });
+      s.modify(updateAssignmentStatusAfterTaskCompletionSql({
+        opts,
+        assignmentId: sql`p_assignment_id`,
+        submitCourse: true,
+      }));
+      if (inviteEnabled) {
+        s.modify(revokeTrainingAccessTokensForClosedAssignmentSql({
+          opts,
+          assignmentId: sql`p_assignment_id`,
+        }));
+      }
+      if (complianceEnabled) {
+        s.modify(closeRetrainingCasesForAssignmentSql(sql`p_assignment_id`));
+        s.modify(insertCertificationsForCompletedAssignmentsSql({
+          opts,
+          assignmentWhere: sql`a.id = p_assignment_id`,
+        }));
+      }
+    },
+  });
+
   const assertCanAssignTraining = (s: GeneralServerStatements) => {
     s.throwErrorIf(
       sql`not ${currentUserHasPermission(sql.lit(permissions.assignTraining))}`,
@@ -831,6 +1668,9 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
           from db.training_content_documents document
           where document.id = p_document_id
             and document.is_active
+            and ${
+          opts.content.canReadDocument(sql`document.id`, sql`current_user`)
+        }
         )`,
         sql.lit`Training can only be assigned for an active document.`,
       );
@@ -964,21 +1804,37 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
           .lit`This person already has an active assignment for this course.`,
       );
       s.throwErrorIf(
-        sql`${missingActiveVersionCountSql(sql`p_course_id`)} > 0`,
+        sql`${
+          missingActiveVersionCountSql(
+            sql`p_course_id`,
+            sql`assign_course_person.assignment_language`,
+          )
+        } > 0`,
         sql
           .lit`Every course item needs an active published version in the employee language or the default language before assignment.`,
       );
       s.throwErrorIf(
-        sql`${assignableCourseItemCountSql(sql`p_course_id`)} = 0`,
+        sql`${
+          assignableCourseItemCountSql(
+            sql`p_course_id`,
+            sql`assign_course_person.assignment_language`,
+          )
+        } = 0`,
         sql
           .lit`Add at least one assignable training item before assignment.`,
       );
       s.modify(sql`
         insert into db.training_assignments
-          (person_id, training_course_id, training_language, due_date, reason,
+          (person_id, training_course_id, training_course_version_id, training_language, due_date, reason,
            assignment_source, assigned_by_id)
         select assign_course_person.id,
                p_course_id,
+               ${
+        activeCourseVersionSql(
+          sql`p_course_id`,
+          sql`assign_course_person.assignment_language`,
+        )
+      },
                assign_course_person.assignment_language,
                coalesce(
                  p_due_date,
@@ -1093,7 +1949,7 @@ export function registerTrainingStoredProcedures(opts: TrainingBlockOpts) {
         (s) => s.return(),
       );
       s.throwErrorIf(
-        sql`complete_task_target.assignment_status = 'completed'
+        sql`complete_task_target.assignment_status not in ('pending', 'in_progress')
           or complete_task_target.employee_final_signed_at is not null`,
         sql.lit`Signed or completed training assignments cannot be changed.`,
       );

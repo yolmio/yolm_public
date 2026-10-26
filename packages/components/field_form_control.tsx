@@ -1,3 +1,4 @@
+import type { DomStatements } from "std/statements";
 import { countries } from "enums/country";
 import { FormControlICtxKey, FormICtxKey } from "std/ictx";
 import { sql } from "../std/sql_utils";
@@ -14,8 +15,10 @@ import { useICtx, useOptionalICtx, usePhase, useUniqueId } from "std/ui";
 import type { Node } from "std/ui";
 import { Data } from "std/data";
 import {
+  registerFieldInvalidInputCheck,
   setFieldTypeIfNotFromModel,
   useFieldHelper,
+  useFieldInvalidInputCheck,
   useFieldModel,
 } from "std/form";
 import type { FormFieldHelper } from "std/form";
@@ -23,6 +26,8 @@ import { CountrySelect } from "./country_select";
 import { DurationInput } from "./duration_input";
 import { EnumLikeSelect, EnumSelect } from "./enum_select";
 import { Input } from "./input";
+import { KeyboardDateInput } from "./keyboard_date_input";
+import type { KeyboardDateInputProps } from "./keyboard_date_input";
 import { NumericInput } from "./numeric_input";
 import { MaterialIcon } from "./material_icon";
 import { formatPhoneNumberStringValue } from "./phone_number_string";
@@ -1067,6 +1072,87 @@ export function DateFieldFormControl(props: DateFieldFormControlProps) {
   );
 }
 
+const KEYBOARD_DATE_INVALID_MESSAGE = "Enter a valid date (MM/DD/YYYY)";
+
+export type KeyboardDateFieldFormControlProps =
+  & Omit<KeyboardDateInputProps, "value" | "onChange">
+  & {
+    /** Defaults to the surrounding `Form.Field`. */
+    fieldHelper?: FormFieldHelper;
+    /** Called on every keystroke with the parsed `Date`, or null. */
+    onChange?: KeyboardDateInputProps["onChange"];
+    /** Field value to `Date`, for fields not stored as a `Date`. */
+    toDate?: (fieldValue: Sql) => Sql;
+    /** Parsed `Date` (or null) to the stored field value; pair with `toDate`. */
+    fromDate?: (date: Sql) => Sql;
+  };
+
+/**
+ * Form control for a `Date` field using {@link KeyboardDateInput}: typed
+ * entry such as `082021` or `8/20/21` instead of the browser date segments.
+ * Invalid text sets a field error on blur and blocks submit. Other input
+ * props pass through; `error` adds to the field's own error state.
+ *
+ * @category UI Component
+ */
+export function KeyboardDateFieldFormControl(
+  props: KeyboardDateFieldFormControlProps,
+) {
+  if (usePhase() === "gather") {
+    if (!props.toDate) {
+      setFieldTypeIfNotFromModel("Date");
+    }
+    // Submit clears field errors (and callers' beforeSubmitClient may reset
+    // them), so the form re-checks unblurred invalid text at submit.
+    const controlId = props.id ?? useOptionalICtx(FormControlICtxKey)?.id;
+    registerFieldInvalidInputCheck(
+      KEYBOARD_DATE_INVALID_MESSAGE,
+      typeof controlId === "string" ? controlId : undefined,
+    );
+    return;
+  }
+  const {
+    onChange,
+    onCommit,
+    toDate,
+    fromDate,
+    fieldHelper: fieldHelperProp,
+    id: idProp,
+    error,
+    ...inputProps
+  } = props;
+  const id = useFieldInvalidInputCheck()?.elementId ?? idProp ??
+    useFormControlId();
+  const fieldHelper = fieldHelperProp ?? useFieldHelper();
+  const invalidMessage = sql.lit(KEYBOARD_DATE_INVALID_MESSAGE);
+  return (
+    <KeyboardDateInput
+      size="md"
+      {...inputProps}
+      id={id}
+      value={toDate ? toDate(fieldHelper.value) : fieldHelper.value}
+      error={sql.or(fieldHelper.hasError, error ?? false)}
+      onChange={(s, value) => {
+        fieldHelper.setValue(s, fromDate ? fromDate(value) : value);
+        onChange?.(s, value);
+      }}
+      onCommit={(s, value, invalid) => {
+        fieldHelper.setTouched(s, true);
+        s.if(
+          invalid,
+          (s) => fieldHelper.setError(s, invalidMessage),
+          (s) =>
+            s.if(
+              sql`${fieldHelper.error} = ${invalidMessage}`,
+              (s) => fieldHelper.setError(s, sql.null),
+            ),
+        );
+        onCommit?.(s, value, invalid);
+      }}
+    />
+  );
+}
+
 interface TimeFieldFormControlProps {
   onChange?: ChangeEventHandlerFn;
   size?: Size;
@@ -1534,6 +1620,10 @@ export function SplitDurationFieldFormControl(
 }
 
 interface LexicalJsonFieldFormControlProps {
+  editorHandle?: Sql;
+  imageUploadInputId?: Sql;
+  onImageUploadStateChange?: (s: DomStatements, state: Sql) => void;
+  onError?: (s: DomStatements, message: Sql) => void;
   onChange?: ChangeEventHandlerFn;
   onChangeDebounceMs?: number;
   size?: Size;
@@ -1546,6 +1636,10 @@ interface LexicalJsonFieldFormControlProps {
   preservePastedTextStyles?: boolean;
   documentFormatting?: boolean;
   allowImages?: boolean;
+  /** Caller controls appended after the built-in toolbar groups. */
+  toolbarItems?: Node;
+  /** Keep the toolbar pinned to the top of the scroll container. */
+  stickyToolbar?: boolean;
 }
 
 /**
@@ -1582,7 +1676,7 @@ export function LexicalJsonFieldFormControl(
   const fieldHelper = props.fieldHelper ?? useFieldHelper();
   const form = useICtx(FormICtxKey);
   const editorHandleName = getUniqueUiId();
-  const editorHandle = sql.lit(editorHandleName);
+  const editorHandle = props.editorHandle ?? sql.lit(editorHandleName);
   const submitContentScalar = `${editorHandleName}_submit_content`;
   form.registerBeforeValidationClient((s) => {
     s.jsCall({
@@ -1611,6 +1705,9 @@ export function LexicalJsonFieldFormControl(
       size={size}
       id={id}
       editorHandle={editorHandle}
+      imageUploadInputId={props.imageUploadInputId}
+      onImageUploadStateChange={props.onImageUploadStateChange}
+      onError={props.onError}
       sx={sx}
       className={className}
       value={fieldHelper.value}
@@ -1620,6 +1717,8 @@ export function LexicalJsonFieldFormControl(
       documentFormatting={documentFormatting}
       allowImages={allowImages}
       onChangeDebounceMs={onChangeDebounceMs}
+      toolbarItems={props.toolbarItems}
+      stickyToolbar={props.stickyToolbar}
     />
   );
 }

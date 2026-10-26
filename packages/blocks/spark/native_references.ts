@@ -248,6 +248,33 @@ proposals dedicated programs so each transition is clear.`,
       `\`crop\` used.\n`,
   },
   {
+    path: "System/Help",
+    description:
+      "Answer how-to questions from this system's help documents and show their videos.",
+    markdown: `# Help documents
+
+Search help before describing how to do something in the application; do not
+reconstruct UI steps from memory. \`tools.searchHelp({ query, limit? })\` greps
+help case-insensitively for \`query\` as written and returns matching lines in
+document order: \`{ documentId, title, sectionId, sectionTitle, kind, line }\`.
+\`kind\` is \`title\` ("Document › Section"), \`text\` (a Markdown line), or
+\`chapter\` (a video chapter, with \`mediaId\` and \`timeMs\`). Search for one or
+two distinctive words, not the whole question, and try a synonym when nothing
+matches. An empty query lists every section.
+
+\`tools.readHelpDocument({ documentId })\` returns ordered sections with
+markdown and media. Each media item has \`mediaId\`, \`kind\` (\`video\` or
+\`image\`), a \`description\`, and, for recorded demos, \`chapters\`
+(\`[{ timeMs, title, description }]\`).
+
+Answer with the steps from the section as a short numbered list, then name the
+guide and section they came from. When the section has a video, call
+\`tools.showHelpMedia({ documentId, mediaId, startMs? })\` to show it in the
+conversation; set \`startMs\` to the chapter that covers the user's step, and
+mention that chapter by name. Show at most one video per answer unless the user
+asks for more. If help has nothing relevant, say so instead of guessing.`,
+  },
+  {
     path: "System/Attachments",
     description:
       "Reading text, spreadsheets, documents, PDFs, and images attached to a run.",

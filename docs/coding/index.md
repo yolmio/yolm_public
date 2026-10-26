@@ -25,6 +25,8 @@ tags:
 - For runtime SQL:
     - Use `sql` for expressions, modifications (insert, update, delete), and queries
     - Use `sql.lit` for string literal expressions
+    - Use `sql.ref` for dynamic identifiers such as table or field names
+    - Never build SQL by concatenating strings
 - Use early returns in procs to reduce nesting
 - Reuse code at highest level of abstraction possible
 - Reuse themes for styling to minimize custom CSS

@@ -12,8 +12,8 @@ tags:
 
 `pages/site/*` provides a marketing surface for Yolm apps: a static,
 file-driven blog and a registry of plain content pages (terms,
-privacy, about). Pair with the marketing components `TransparentNavbar` and
-`Footer` for full landing pages.
+privacy, about). Pair with `TransparentNavbar` (`components/transparent_navbar`) and
+`Footer` (`components/site/footer`) for full landing pages.
 
 These pages are **generation-time static** — content is imported from
 TSX modules at build time, not stored in the database.
@@ -48,7 +48,16 @@ export const post: StaticBlogPost = {
 };
 ```
 
-`loadBlogPosts` sorts results newest-first by `date`.
+`loadBlogPosts(dir)` imports every `.ts`/`.tsx` module under `dir`
+(relative to the system root) and sorts the posts newest first by `date`.
+Only posts with `status: "published"` appear on the indexes. Posts may also
+set `coverImage`, `author`, `tags`, `groups`, and `showOnPaths`.
+
+`StaticBlogPages` mounts the index at `basePath` (default `/blog`) with detail
+pages at `basePath/<slug>`, plus index aliases (default `["/blogs"]`; pass
+`[]` to disable). `showForPath` and `showForGroup` filter the default indexes.
+`filterRoutes` (`StaticBlogFilterRoute[]`) adds further indexes filtered by
+`post.groups`.
 
 ## Static content
 
@@ -64,8 +73,9 @@ const pages = await loadPages("static_pages");
 ```
 
 Each module under the directory exports `page: StaticPage` with
-`{ path, title, content }`. Pages render with a sensible typography
-default — heading sizes, list indentation, link styling.
+`{ path, title, content }`. `loadPages` sorts the pages by title. Each page
+gets its own `Route` with the title `<title> | <titleBrand>` and the shared
+site prose styles, and scrolls to the top on mount.
 
 ## Composing with marketing components
 

@@ -16,9 +16,9 @@ Yolm uses the Rust regex crate for regular expressions. See https://docs.rs/rege
 Checks if a string matches a regular expression pattern.
 
 Aliases and operators: `regexp_match(value, pattern)`,
-`regexp_matches(value, pattern)`, `value ~ pattern`, and `value ~* pattern`.
-The `~*` form is case-insensitive. Negated forms `!~` and `!~*` are also
-accepted.
+`regexp_matches(value, pattern)` (in an expression), `value ~ pattern`, and
+`value ~* pattern`. The `~*` form is case-insensitive. Negated forms `!~` and
+`!~*` are also accepted.
 
 ```sql
 select regex.is_match('hello123', '\d+');       -- true
@@ -26,7 +26,11 @@ select regex.is_match('hello', '^[a-z]+$');     -- true
 select regex.is_match('Hello', '^[a-z]+$');     -- false
 ```
 
-> **Note:** `regexp_match` and `regexp_matches` are accepted as aliases but return a boolean (unlike PostgreSQL where they return matched substrings).
+> **Note:** `regexp_matches` depends on where it is written. In an expression
+> (`select`, `where`, and so on), `regexp_match` and `regexp_matches` are
+> aliases of `regex.is_match` and return a boolean, unlike PostgreSQL. In a
+> `from` clause, `regexp_matches(...)` is the table function
+> [`regex.matches`](#regexmatches-table-function) and returns one row per match.
 
 ## regex.replace
 
@@ -85,6 +89,15 @@ select uri.is_match('/api/v2/data', '/api/{version}/{resource}');
 
 Splits a string into rows based on a regular expression.
 
+Signatures:
+
+```sql
+regex.split(input string, pattern string)
+regexp_split_to_table(input string, pattern string)
+```
+
+Returns `value string, ordinal int`.
+
 ```sql
 select value, ordinal from regex.split('apple:banana;cherry', ':|;');
 -- apple, 0
@@ -98,6 +111,19 @@ select value from regex.split('data1  data2   data3', '\s+');
 ## regex.matches (Table Function)
 
 Returns all substrings matching a regular expression.
+
+Signatures:
+
+```sql
+regex.matches(input string, pattern string)
+regex.matches(input string, pattern string, 'g')
+regexp_matches(input string, pattern string)
+regexp_matches(input string, pattern string, 'g')
+```
+
+Returns `value string, ordinal int`. The optional third argument exists for
+PostgreSQL-style calls; only the literal flag `'g'` is accepted. The
+`regexp_matches` table form is recognized only in a `from` clause.
 
 ```sql
 select value, ordinal from regex.matches('a1 b2 c3', '[a-z]');

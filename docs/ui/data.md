@@ -9,121 +9,113 @@ tags:
 related:
   - ui/form.md
   - ui/action_button.md
+  - ui/data_vs_form.md
+  - ui/control_flow.md
 ---
 
 # Data Component
 
-The `Data` component is the primary way to fetch and display data in Yolm.
-Use `Form.Update` for edits inside a query-backed flow, then call
-`s.refetch()` so the visible `Data` result refreshes. Import `Data` from
-`std/data`.
+`Data` declares UI state and loads query results for its children. Its
+procedure runs on the server in the page's single roundtrip (or on the client
+with `local`). Edits go through `Form` (for example `Form.Update`), commands
+through `ActionButton`, and both refresh visible `Data` through `s.refetch()`.
 
 ```tsx
 import { Data } from "std/data";
 ```
 
-## Query-Backed UI With Form Refresh
-
-For a query-backed UI, put filters and URL state in `Data` `queryParams`, render
-the result table/records from the `Data` procedure, and refresh the visible
-query through the mutation primitive:
-
-- Use [`Form`](./form.md) for inserts, updates, upserts, bulk edits, validation,
-  and any flow where the user edits row fields. Choose `Form.Insert`,
-  `Form.Update`, or `Form.Merge` for the corresponding row mutation.
-- Use [`ActionButton`](./action_button.md) / `ActionMenuItem` for command-style
-  server mutations such as delete, approve, sync, send, archive, or recalculate.
-  They refetch enclosing `Data` by default.
-- Use raw event handlers for local UI state. If an event handler performs a
-  server mutation directly, call `s.refetch()` when the visible query must
-  refresh.
-
-Do not hand-roll `Button` + `s.tryServer` + loading/error scalars for ordinary
-forms or command buttons when `Form` or `ActionButton` fits.
-
 ## Basic Usage
 
 ```tsx
 <Data procedure={(s) => {
-  s.defTable("users", sql`select * from db.users`);
+  s.defRecord("user_record", sql`select * from db.users where id = ${userId}`);
+  s.defTable("orders", sql`
+    select o.id, o.description, o.amount, c.name as carrier_name
+    from db.orders o left join db.carriers c on c.id = o.carrier
+    where o.user_id = ${userId}
+    order by o.created_at desc
+  `);
+  s.defScalar("total", sql`(select sum(amount) from orders)`);
 }}>
-  <Each table="users" recordName="user">
-    <p>{sql`user.name`}</p>
-  </Each>
-</Data>
-```
-
-Data automatically:
-- Executes the procedure on the server (single roundtrip)
-- Shows a loading spinner while fetching
-- Shows an error alert if the fetch fails
-- Re-fetches when `s.refetch()` is called from any event handler
-
-## Common Props
-
-Use the exported TypeScript props for the full `Data` contract. The props
-agents usually need are:
-
-- `procedure` to define fetched scalars, records, and tables.
-- `local` for client-only UI state with no server call.
-- `queryParams` for URL-synced filters and route state.
-- `watch` / `autoWatch` / `debounce` for refetch behavior.
-- `noRefetch` when parent UI state must survive global `s.refetch()`.
-- `pendingFallback`, `errorFallback`, `statusScalar`, `hasDataScalar`, and
-  `errorRecord` when custom loading/error UI is needed.
-
-## Server Data Fetching
-
-By default, Data forces all database access to run on the server via a single roundtrip. You don't need to do anything special — just write your queries:
-
-```tsx
-<Data procedure={(s) => {
-  s.defRecord("user", sql`select * from db.users where id = ${userId}`);
-  s.defTable("orders", sql`select * from db.orders where user_id = ${userId}`);
-  s.defScalar("total", sql`(select sum(amount) from db.orders where user_id = ${userId})`);
-}}>
-  <h2>{sql`user.name`}</h2>
+  <h2>{sql`user_record.name`}</h2>
   <p>Total: {sql`total`}</p>
   <Each table="orders" recordName="order">
-    <p>{sql`order.description`} — {sql`order.amount`}</p>
+    <p>{sql`order.description`} ({sql`order.carrier_name`})</p>
   </Each>
 </Data>
 ```
 
-## Automatic Refetch
+Everything a `Data` procedure declares is `ui.*` state visible to that `Data`
+and its descendants only; see [UI state scope](./overview.md#ui-state-scope).
+Select display columns (joins, labels, totals) in the procedure rather than
+nesting a `Data` per row; see
+[Derived and display values](./overview.md#derived-and-display-values).
 
-When any event handler calls `s.refetch()`, all non-local Data components re-fetch their data:
+By default `Data`:
+
+- runs its procedure on the server, batched into one roundtrip with the rest of
+  the page;
+- shows a `CircularProgress` while pending and an `Alert` ("Unable to load
+  data") on failure;
+- re-runs when any event handler calls `s.refetch()`.
+
+## Props That Matter
+
+Use `DataProps` in `std/data` for the full contract. The props you usually
+need:
+
+- `procedure`: declares scalars, records, and tables (`s.defScalar`,
+  `s.defRecord`, `s.defTable`).
+- `local`: client-only state; no server call, no refetch, no fallbacks.
+- `queryParams`: URL-synced scalars.
+- `watch`, `autoWatch`, `debounce`: re-run triggers.
+- `noRefetch`: ignore global `s.refetch()`, for example to keep parent UI state.
+- `pendingFallback`, `errorFallback`: custom or `null` fallbacks.
+- `statusScalar`, `hasDataScalar`, `errorRecord`: expose fetch status to
+  children.
+
+## Refresh After Mutations
+
+`s.refetch()` increments the global `global_refetch_key` scalar, which every
+non-local `Data` without `noRefetch` watches. There is no other refresh key to
+manage.
+
+- Field edits: [`Form`](./form.md) with `Form.Insert`, `Form.Update`, or
+  `Form.Merge`, which refetch on success by default (`refetchOnSuccess`).
+- Commands: [`ActionButton`](./action_button.md) / `ActionMenuItem`, which
+  refetch on success by default.
+- A raw event handler that performs server work must call `s.refetch()` itself.
 
 ```tsx
 <Data procedure={(s) => {
-  s.defTable("todos", sql`select * from db.todos`);
+  s.defRecord("user_record", sql`select * from db.users where id = ${userId}`);
 }}>
-  <Each table="todos" recordName="todo">
-    <p>{sql`todo.title`}</p>
-  </Each>
-  <Button onClick={(s) => {
-    s.tryServer({
-      body: (s) => {
-        s.startTransaction();
-        s.modify(sql`insert into db.todos (title) values ('New todo')`);
-        s.commitTransaction();
-        s.refetch();
-      },
-    });
-  }}>Add Todo</Button>
+  <h1>{sql`user_record.name`}</h1>
+  <Form>
+    <Form.Update table="users" where={sql`id = ${userId}`}>
+      <Form.Field field="name" />
+      <Form.SubmitButton>Save</Form.SubmitButton>
+    </Form.Update>
+  </Form>
 </Data>
 ```
 
-The `s.refetch()` call increments a global refetch key that all Data components watch. This means adding a todo in one part of the page will refresh data everywhere.
-
-Prefer `Form` for the add/edit flow above in production UI. Prefer
-`ActionButton` when the button is a command rather than a field-editing form.
-
-Set `noRefetch` to opt out of global refetch for a specific Data component.
+See [Data, Form, and ActionButton](./data_vs_form.md) for the decision table.
 
 ## Query Parameters
 
-Use `queryParams` to bind URL query parameters to scalars:
+`queryParams` declares scalars synced with the URL, so filtered views can be
+bookmarked and shared. Each entry is a default `Sql` expression (type
+inferred) or `{ default, type, history }`. Use `default`, not `expr`; `expr` is
+for procedure-scope scalar definitions.
+
+Every write to a query-param scalar (`s.setScalar`, `bindScalar`,
+`s.setQueryParam`) updates the URL. `history` is `"replace"` (default, updates
+the current entry; right for filters, search, sort, and paging) or `"push"`
+(adds an entry so Back steps through changes; for navigation-like state such
+as page-like tabs). Keep list filters here rather than in local state so a
+[`backLink`](./routing.md#returning-to-a-list) from a detail page can restore
+them.
 
 ```tsx
 <Data
@@ -135,9 +127,9 @@ Use `queryParams` to bind URL query parameters to scalars:
     s.defTable("results", sql`
       select * from db.items
       where name like '%' || search || '%'
+      order by name
       limit 20 offset (page - 1) * 20
     `);
-    s.defScalar("total", sql`(select count(*) from db.items where name like '%' || search || '%')`);
   }}
 >
   <Input
@@ -151,34 +143,22 @@ Use `queryParams` to bind URL query parameters to scalars:
 </Data>
 ```
 
-Each parameter uses `default` for its initial value. Do not use `expr` here;
-`expr` is for procedure-scope scalar definitions. To specify the type
-explicitly:
+`setScalar` on a query param updates the URL, so the example above needs no
+`setQueryParam`.
 
-```tsx
-import type { DataQueryParamConfig } from "std/data";
-
-const recordParam = {
-  default: sql`0`,
-  type: "BigInt",
-} satisfies DataQueryParamConfig;
-
-queryParams={{
-  id: recordParam,
-  search: { default: sql.lit``, type: "String" },
-}}
-```
-
-Query parameters are synced with the browser URL, so users can bookmark or share filtered views.
+Use `DataQueryParamConfig` from `std/data` to type a reusable entry. The
+low-level `QueryParams` node and `useQueryParams` hook take an array form and
+are for package primitives; see [ICtx](./ictx.md#low-level-stdui-hooks).
 
 ## Local State
 
-Use `local: true` for client-only state that doesn't need server data:
+`local` declares client-only UI state: no server roundtrip, no `s.refetch()`
+response, and no pending/error fallbacks. Use it for toggles, selected tabs,
+and editing flags; omit `local` when the procedure queries `db.*`.
 
 ```tsx
 <Data local procedure={(s) => {
   s.defScalar("editing", sql`false`);
-  s.defScalar("tab", sql.lit`details`);
 }}>
   <Button onClick={(s) => s.setScalar("editing", sql`not editing`)}>
     Toggle Edit
@@ -186,294 +166,104 @@ Use `local: true` for client-only state that doesn't need server data:
 </Data>
 ```
 
-Local Data:
-- Runs entirely on the client (no server roundtrip)
-- Does not respond to `s.refetch()`
-- Does not show pending/error fallbacks
-- Useful for UI toggles, editing state, tab selection, etc.
+`Data local` is the preferred way to declare local state in solution code. The
+lower-level `State` node from `std/ui` (which `Data` wraps) and
+`useGlobalState` (for cross-page state, see
+[Global nodes & states](./global_nodes_states.md)) follow the same scoping rules.
 
-## Fallback UIs
+## Watch and Debounce
 
-By default, Data shows:
-- A `CircularProgress` spinner while loading
-- An `Alert` with "Unable to load data" on error
-
-Customize or disable them:
+`watch` re-runs the procedure when any listed expression changes, in addition
+to the global refetch. Watched scalars must come from an ancestor. Add
+`debounce` for search-as-you-type:
 
 ```tsx
-// Custom fallbacks
-<Data
-  pendingFallback={<p>Loading...</p>}
-  errorFallback={<p>Something went wrong</p>}
-  procedure={(s) => { /* ... */ }}
->
-  {/* content */}
-</Data>
-
-// Disable fallbacks entirely
-<Data
-  pendingFallback={null}
-  errorFallback={null}
-  procedure={(s) => { /* ... */ }}
->
-  {/* content */}
-</Data>
-```
-
-## Status Tracking
-
-Use `statusScalar` to track the fetch lifecycle:
-
-```tsx
-<Data
-  statusScalar="fetch_status"
-  hasDataScalar="has_data"
-  procedure={(s) => { /* ... */ }}
->
-  <Show when={sql`fetch_status = 'requested'`}>
-    <p>Refreshing...</p>
-  </Show>
-  {/* content */}
-</Data>
-```
-
-Status values:
-- `'received'` — Data loaded successfully
-- `'requested'` — Fetch in progress
-- `'delayed'` — Fetch taking longer than expected
-- `'fallback_triggered'` — Fallback UI is showing
-- `'failed'` — Fetch failed
-- `'disallowed'` — The `allow` condition denied the fetch
-
-## Watch
-
-The `watch` prop triggers a re-fetch when the watched expression changes:
-
-```tsx
-<Data
-  watch={[sql`selected_category`]}
-  procedure={(s) => {
-    s.defTable("items", sql`select * from db.items where category = selected_category`);
-  }}
->
-  <Each table="items" recordName="item">
-    <p>{sql`item.name`}</p>
-  </Each>
-</Data>
-```
-
-This is combined with the global refetch watch — both will trigger a re-fetch.
-
-## Debounce
-
-Use `debounce` for search-as-you-type patterns to avoid fetching on every keystroke:
-
-```tsx
-<Data
-  watch={[sql`search_input`]}
-  debounce={{
-    wait: sql`300`,
-  }}
-  procedure={(s) => {
-    s.defScalar("search_input", sql.lit``);
-    s.defTable("results", sql`
-      select * from db.items
-      where name like '%' || search_input || '%'
-    `);
-  }}
->
+<Data local procedure={(s) => s.defScalar("search_input", sql.lit``)}>
   <Input
     value={sql`search_input`}
     onInput={(s) => s.setScalar("search_input", sql`target_value`)}
     placeholder="Search"
   />
-  {/* results content */}
+  <Data
+    watch={[sql`search_input`]}
+    debounce={{ wait: sql`300` }}
+    procedure={(s) => {
+      s.defTable("results", sql`
+        select * from db.items where name like '%' || search_input || '%'
+      `);
+    }}
+  >
+    <Each table="results" recordName="item">
+      <p>{sql`item.name`}</p>
+    </Each>
+  </Data>
 </Data>
 ```
 
-## Nesting
+## Nesting and State Modification
 
-Data components can be nested. Child Data procedures can read parent state:
+Nested `Data` procedures can read ancestor state but cannot modify it. Event
+handlers, including `onMount`, can modify state declared by any ancestor.
 
 ```tsx
 <Data procedure={(s) => {
   s.defScalar("selected_id", sql`null`);
-  s.defTable("items", sql`select * from db.items`);
+  s.defTable("items", sql`select id, name from db.items order by name`);
 }}>
+  <div onMount={(s) => {
+    s.if(sql`selected_id is null`, (s) => {
+      s.setScalar("selected_id", sql`(select id from items limit 1)`);
+    });
+  }} />
   <Each table="items" recordName="item">
     <Button onClick={(s) => s.setScalar("selected_id", sql`item.id`)}>
       {sql`item.name`}
     </Button>
   </Each>
-
   <Data
     watch={[sql`selected_id`]}
     procedure={(s) => {
+      // Reads the parent's selected_id; calling s.setScalar("selected_id", ...) here fails.
       s.defRecord("detail", sql`select * from db.items where id = selected_id`);
     }}
   >
     <Show when={sql`detail.id is not null`}>
       <h3>{sql`detail.name`}</h3>
-      <p>{sql`detail.description`}</p>
     </Show>
   </Data>
 </Data>
 ```
 
-## State Modification Rules
+## Loading and Errors
 
-Understanding when and where you can modify state is critical:
-
-- **Child Data procedures CANNOT modify parent Data state** — A nested Data procedure runs in isolation
-- **Event handlers CAN modify any ancestor Data state** — onClick, onInput, onMount, etc. can modify state defined in any parent Data component
+Customize or disable the fallbacks. For dense dashboards and cards, prefer a
+`Skeleton` (from `components/skeleton`) shaped like the content over the
+default spinner:
 
 ```tsx
-// Event handlers CAN modify parent state
-<Data procedure={(s) => {
-  s.defScalar("selected_id", sql`null`);
-}}>
-  <Button onClick={(s) => s.setScalar("selected_id", sql`item.id`)}>
-    Select
-  </Button>
-
-  {/* Child Data CAN READ parent state */}
-  <Data
-    watch={[sql`selected_id`]}
-    procedure={(s) => {
-      s.defTable("details", sql`select * from db.items where id = selected_id`);
-    }}
-  >
-    {/* ... */}
-  </Data>
-</Data>
-
-// Child Data procedure CANNOT modify parent state
-<Data procedure={(s) => { s.defScalar("x", sql`null`); }}>
-  <Data procedure={(s) => {
-    // This will NOT work
-    s.setScalar("x", sql`1`);
-  }}>
-    {/* ... */}
-  </Data>
+<Data
+  pendingFallback={<Skeleton variant="rectangular" className="h-24" />}
+  errorFallback={<Alert color="danger">Could not load orders</Alert>}
+  procedure={(s) => { /* ... */ }}
+>
+  {/* content */}
 </Data>
 ```
 
-### The Solution Pattern
-
-If you need to set parent state based on child data, use an event handler:
+Pass `null` to disable a fallback. To keep stale content visible while
+refreshing, use `statusScalar` / `hasDataScalar`:
 
 ```tsx
-<Data procedure={(s) => {
-  s.defScalar("selected_id", sql`null`);
-}}>
-  <div onMount={(s) => {
-    s.if(sql`selected_id is null`, (s) => {
-      s.setScalar("selected_id", sql`(select id from db.items limit 1)`);
-    });
-  }}>
-    {/* content */}
-  </div>
+<Data statusScalar="fetch_status" hasDataScalar="has_data" procedure={(s) => { /* ... */ }}>
+  <Show when={sql`fetch_status = 'requested'`}>
+    <p>Refreshing...</p>
+  </Show>
 </Data>
 ```
 
-## Common Patterns
+Status values (`enums.sys_state_status`): `received`, `requested`, `delayed`
+(waiting on debounce), `fallback_triggered`, `failed`, and `disallowed`. `errorRecord` names a record with `type`,
+`message`, and `description` for custom error UI.
 
-### Dashboard Pattern
-
-Use `Data` with grid layout for dashboards that combine stats, charts, and tables:
-
-```tsx
-import { Data } from "std/data";
-import { StatRow } from "components/stat_row";
-import { DataTable } from "components/data_table";
-import { BarChart } from "vis/bar_charts";
-
-function Dashboard() {
-  return (
-    <div className="grid grid-cols-12 gap-4 p-4">
-      <StatRow
-        className="col-span-12"
-        header="Key Metrics"
-        stats={[
-          { title: sql.lit`Orders`, value: sql`(select count(*) from db.orders)` },
-          { title: sql.lit`Revenue`, value: sql`(select sum(total) from db.orders)` },
-        ]}
-      />
-      <BarChart
-        className="col-span-12 md:col-span-6"
-        query={sql`select name, sum(total) as revenue from db.orders group by name`}
-        width={600} height={300}
-      >
-        <BarChart.XAxisLabels columnName="name" />
-        <BarChart.YAxisLabels />
-        <BarChart.Bar columnName="revenue" fill="#3b82f6" />
-      </BarChart>
-      <DataTable
-        className="col-span-12"
-        query={sql`select * from db.orders order by created_at desc limit 10`}
-        primaryTable="orders"
-        columns={(b) => { b.field("customer_id"); b.field("order_date"); }}
-      />
-    </div>
-  );
-}
-```
-
-See [Dashboards](./dashboards.md) and [Reporting](./reporting.md) for more dashboard and reporting patterns.
-
-## Complete Examples
-
-### Search Page
-
-```tsx
-function SearchPage() {
-  return (
-    <Data
-      queryParams={{ q: { default: sql.lit``, type: "String" } }}
-      debounce={{ wait: sql`300` }}
-      procedure={(s) => {
-        s.defTable("results", sql`
-          select * from db.products
-          where name like '%' || q || '%'
-          order by name
-          limit 50
-        `);
-        s.defScalar("result_count", sql`(select count(*) from results)`);
-      }}
-    >
-      <Input
-        value={sql`q`}
-        onInput={(s) => s.setScalar("q", sql`target_value`)}
-        placeholder="Search products..."
-      />
-      <p>{sql`result_count`} results</p>
-      <Each table="results" recordName="product">
-        <Card>
-          <h3>{sql`product.name`}</h3>
-          <p>{sql`product.description`}</p>
-        </Card>
-      </Each>
-    </Data>
-  );
-}
-```
-
-### Detail Page
-
-```tsx
-function UserDetailPage({ userId }: { userId: NumericExpr }) {
-  return (
-    <Data procedure={(s) => {
-      s.defRecord("user", sql`select * from db.users where id = ${userId}`);
-      s.defTable("orders", sql`select * from db.orders where user_id = ${userId} order by created_at desc`);
-    }}>
-      <h1>{sql`user.name`}</h1>
-      <p>{sql`user.email`}</p>
-      <h2>Orders</h2>
-      <Each table="orders" recordName="order">
-        <p>{sql`order.description`} — {sql`order.total`}</p>
-      </Each>
-    </Data>
-  );
-}
-```
+For dashboards composed from `Data`, see [Dashboards](./dashboards.md) and
+[Reporting](./reporting.md).

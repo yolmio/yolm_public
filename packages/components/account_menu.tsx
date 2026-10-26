@@ -104,7 +104,7 @@ export function AccountMenu(props: AccountMenuProps) {
             const item = (
               <Menu.Item
                 href={app.href}
-                target={props.openAppsInNewWindow ? "_blank" : undefined}
+                target={props.openAppsInNewWindow ? "_blank" : "_self"}
                 rel={props.openAppsInNewWindow
                   ? "noopener noreferrer"
                   : undefined}

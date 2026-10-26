@@ -48,6 +48,7 @@ Yolm SQL provides comprehensive string manipulation functions compatible with mu
 | `damerau_levenshtein(a, b)` | | |
 | `string.diff3_merge(original, left, right, left_label, right_label)` | | Text merge helper |
 | `string.diff3_analyze(original, left, right)` | | Returns JSON analysis |
+| `string.line_diff(old, new, context_lines)` | | Returns JSON line counts and unified-diff hunks |
 | `patch.apply(source, diff)` | | Applies an OpenAI native update patch and returns JSON |
 | `patch.create(diff)` | | Applies an OpenAI native create patch and returns JSON |
 
@@ -79,7 +80,7 @@ Template string concatenation for building larger text blocks:
 
 ```tsx
 const emailBody = sql.concatTemplate`
-Hello ${sql`user.first_name`}!
+Hello ${sql`user_record.first_name`}!
 
 Your order #${sql`order.id`} has been shipped.
 
@@ -347,17 +348,17 @@ select 'Value: ' || 42;             -- Value: 42
 
 ### concat
 
-Concatenates arguments. `NULL` arguments make the result `NULL`; use
+Concatenates arguments. `null` arguments make the result `null`; use
 `coalesce(...)` or `concat_ws(...)` when nullable values should be skipped.
 
 ```sql
 select concat('Hello', ', ', 'world!');  -- Hello, world!
-select concat('a', null, 'b');           -- NULL
+select concat('a', null, 'b');           -- null
 ```
 
 ### concat_ws
 
-Concatenates with separator, ignoring NULLs.
+Concatenates with separator, ignoring nulls.
 
 ```sql
 select concat_ws(', ', 'apple', 'banana', 'cherry');
@@ -377,7 +378,7 @@ Pattern matching with wildcards (`%` = any characters, `_` = single character).
 select 'apple' like 'a%';      -- true
 select 'apple' like '%pp%';    -- true
 select 'apple' like '_pple';   -- true
--- Case sensitivity follows the system's default collation, which is
+-- Case sensitivity follows the left operand's collation; the default is
 -- NoCase (case-insensitive) unless configured otherwise:
 select 'apple' like 'A%';                  -- true  (NoCase default)
 select 'apple' like 'A%' collate binary;   -- false (case-sensitive)
@@ -392,7 +393,10 @@ select 'a%b' like 'a\%b' escape '\';  -- true (matches literal %)
 
 ## Collation
 
-Specifies comparison rules.
+Specifies comparison and ordering rules. An explicit `collate` clause wins,
+then the field's collation (default `db.collation`), then the system default
+(`system.collation`). Both defaults are `NoCase` unless configured as
+`"Binary"`.
 
 ```sql
 select 'a' = 'A';                    -- depends on default collation (NoCase by default -> true)
@@ -523,6 +527,22 @@ Analyzes differences between a base text and two modified versions. Returns a JS
 select string.diff3_analyze(base, version1, version2);
 ```
 
+### string.line_diff
+
+Line diff of two texts. Returns JSON with `added` and `removed` line counts,
+`hunks` (`old_start`, `old_lines`, `new_start`, `new_lines`, and `lines`
+prefixed with ` `, `-`, or `+`), and `unified`, the hunks as unified-diff text
+without file headers. `context_lines` (clamped to 0–1000) sets the unchanged
+lines around each change; changes separated by at most twice that share a
+hunk.
+A missing final newline counts as a change and adds a
+`\ No newline at end of file` line after the affected line, which is not
+counted. Identical texts return no hunks. Any NULL argument returns NULL.
+
+```sql
+select string.line_diff('a' || chr(10) || 'b', 'a' || chr(10) || 'B', 3)->>'added';  -- 1
+```
+
 ### patch.apply
 
 Applies one OpenAI native `apply_patch` update diff to a source string.
@@ -561,7 +581,7 @@ select patch.create('+first line' || chr(10) || '+second line');
 
 ```sql
 select case
-  when length(title) > 50
+  when char_length(title) > 50
   then left(title, 47) || '...'
   else title
 end as truncated_title
@@ -577,11 +597,10 @@ from users;
 
 ### Search with Case Insensitivity
 
-```sql
-select * from products
-where lower(name) like lower('%search term%');
+With the default `NoCase` collation, `like` is already case-insensitive. For a
+field declared with `Binary` collation, use `ilike`:
 
--- Or using ILIKE
+```sql
 select * from products
 where name ilike '%search term%';
 ```

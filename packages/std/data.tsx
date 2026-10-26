@@ -48,6 +48,14 @@ export interface DataQueryParamConfig {
   default: Sql;
   /** Optional explicit type. If omitted, the type is inferred from {@link default}. */
   type?: HelperFieldType;
+  /**
+   * How writes to this param update browser history. Every write (`setScalar`,
+   * `bindScalar`, `setQueryParam`) updates the URL. `"replace"` (default)
+   * updates the current entry, right for filters, search, sort, and paging;
+   * `"push"` adds an entry so Back steps through changes, for navigation-like
+   * state such as tabs.
+   */
+  history?: yom.QueryParamHistory;
 }
 
 /**
@@ -114,8 +122,7 @@ function mapAnalyzeTypeToHelperFieldType(
       return { type: "Interval" };
     case "Bytes":
       throw new Error(
-        "Unable to infer a maximum length for a Bytes query parameter. " +
-          'Specify its type explicitly with { type: "Bytes", maxLength: ... }.',
+        "Query parameters cannot be Bytes: URL query params hold text.",
       );
     case "Decimal":
       return {
@@ -307,6 +314,7 @@ function normalizeQueryParams(
       name,
       type,
       default: defaultExpr,
+      history: isQueryParamConfig(value) ? value.history : undefined,
     });
   }
   return params;

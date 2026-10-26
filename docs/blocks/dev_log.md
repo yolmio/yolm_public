@@ -16,23 +16,14 @@ related:
 
 # Dev Log Block
 
-`DevLogBlock` adds a single standardized table, `dev_log_entries`, for writing
-runtime log rows from procedures, reactors, and scheduled jobs. Use it for
-development and operational diagnostics (reconciliation runs, integration
-errors) instead of hand-rolling a one-off log table. Rows are written with the
-block's `log` helper so the shape stays consistent across the system.
-
-> The table is kept in memory like any other Yolm table, so use it sparingly.
-> It is intended for low-volume diagnostic logging, not high-frequency tracing.
-
-```ts
-import { DevLogBlock } from "blocks/dev_log";
-```
+`DevLogBlock` adds one standardized table, `dev_log_entries`, for low-volume
+diagnostic rows written from procedures, reactors, and scheduled jobs
+(reconciliation runs, integration errors). The table is kept in memory like any
+other Yolm table, so do not use it for high-frequency or per-request tracing.
 
 ## Minimal Setup
 
-Register the block in `core.tsx` with the set of log categories your system
-uses. `categories` seeds the `dev_log_category` enum.
+`categories` (required, may be `[]`) seeds the `dev_log_category` enum:
 
 ```ts
 import { DevLogBlock } from "blocks/dev_log";
@@ -48,71 +39,31 @@ system.addBlock(
 );
 ```
 
-## Configuration
+## Tables and Enums
 
-| Option       | Type       | Required | Meaning                                                              |
-| ------------ | ---------- | -------- | ------------------------------------------------------------------- |
-| `categories` | `string[]` | Yes      | Initial values for the `dev_log_category` enum. May be empty (`[]`). |
+- `dev_log_entries`: one row per logged message (`message`, optional
+  `description`, `category`, `level`).
+- `dev_log_category`: the configured categories plus any added with
+  `addCategory`.
+- `dev_log_level`: `debug`, `info`, `warn`, `error`.
 
-There is no default; `categories` must be passed. Additional categories can be
-added later at generation time with [`addCategory`](#addcategory) — useful when
-other blocks contribute their own categories to a shared dev log.
-
-## Tables Created
-
-| Table             | Purpose                                                  |
-| ----------------- | ------------------------------------------------------- |
-| `dev_log_entries` | One row per logged message, written via `log`.          |
-
-`dev_log_entries` columns:
-
-| Column        | Type                              | Notes                                          |
-| ------------- | --------------------------------- | ---------------------------------------------- |
-| `message`     | `string(255)`, not null           | Short summary message.                         |
-| `description` | `string(24000)`, nullable         | Optional longer detail body.                   |
-| `category`    | enum `dev_log_category`, nullable | One of the configured categories; set by `log`. |
-| `level`       | enum `dev_log_level`, nullable    | `debug`, `info`, `warn`, or `error`; set by `log`. |
-
-## Enums Created
-
-| Enum               | Values                                          |
-| ------------------ | ----------------------------------------------- |
-| `dev_log_category` | The `categories` passed to the constructor (plus any added via `addCategory`). |
-| `dev_log_level`    | `debug`, `info`, `warn`, `error` (fixed).       |
+The block ships no pages or components; build any viewer with standard
+datagrid/record page components over `dev_log_entries`.
 
 ## Methods
 
-Retrieve the registered block instance with `system.block(DevLogBlock)`. When
-your code lives in a block or module that may run in a system where the dev log
-is not registered, guard the call with `system.blockOptional(DevLogBlock)`
-(`system.block` throws if the block is not registered).
+`system.block(DevLogBlock)` throws when the block is not registered. Shared code
+whose systems may omit the dev log should guard with
+`system.blockOptional(DevLogBlock)`, as the
+[calendar integrations](calendar_integrations.md) and
+[email integrations](email_integrations.md) blocks do.
 
-### `log`
+### `log(s, { category, level, message, description? })`
 
-```ts
-log<S extends IServerBaseStatements>(
-  s: S,
-  opts: {
-    category: string | Sql;
-    level: "debug" | "info" | "warn" | "error" | Sql;
-    message: string | Sql;
-    description?: string | Sql;
-  },
-): void
-```
-
-Inserts one row into `dev_log_entries`. Call it from within a procedure with the
-statement builder `s`. String values are treated as SQL **literals**; pass a
-`Sql` expression (e.g. `` sql`...` ``, `sql.concat(...)`) to log a computed
-value.
-
-| Param               | Type                                       | Required | Meaning                                                  |
-| ------------------- | ------------------------------------------ | -------- | ------------------------------------------------------- |
-| `s`                 | `IServerBaseStatements`                    | Yes      | The statement builder for the current procedure.        |
-| `opts.category`     | `string \| Sql`                            | Yes      | Log category; must be a configured `dev_log_category`.  |
-| `opts.level`        | `"debug" \| "info" \| "warn" \| "error" \| Sql` | Yes | Severity level.                                          |
-| `opts.message`      | `string \| Sql`                            | Yes      | Short summary message.                                  |
-| `opts.description`  | `string \| Sql`                            | No       | Optional longer detail body.                            |
+Inserts one row into `dev_log_entries` inside the caller's transaction. Plain
+strings become SQL **literals**; pass a `Sql` expression (`` sql`...` ``,
+`sql.concat(...)`) to log a computed value. `category` must already be a
+configured category.
 
 ```ts
 import { DevLogBlock } from "blocks/dev_log";
@@ -135,49 +86,14 @@ if (system.blockOptional(DevLogBlock)) {
 }
 ```
 
-### `addCategory`
+### `addCategory(category)`
+
+Extends `dev_log_category` at generation time; a no-op if the category exists,
+so several blocks can share it. Call it during another block's `initialize`,
+before any `log` uses the category:
 
 ```ts
-addCategory(category: string): void
-```
-
-Registers an additional log category at generation time, extending the
-`dev_log_category` enum. No-op if the category already exists, so it is safe to
-call from multiple blocks that share the dev log. Call it during another block's
-`initialize`, before any `log` call uses the new category.
-
-```ts
-import { DevLogBlock } from "blocks/dev_log";
-import { system } from "std/system";
-
 if (system.blockOptional(DevLogBlock)) {
   system.block(DevLogBlock).addCategory("outlook_calendar_reconciliation");
 }
 ```
-
-## Relationships to Other Blocks
-
-The [calendar integrations](calendar_integrations.md) and
-[email integrations](email_integrations.md) blocks consume `DevLogBlock`
-optionally: they call `addCategory` in their `initialize` and `log`
-reconciliation results, each guarded by `system.blockOptional(DevLogBlock)`.
-This is the recommended pattern for any block that wants to log without hard
-depending on the dev log being present.
-
-## Common Mistakes
-
-- **Logging high-frequency events.** The table lives in memory; reserve it for
-  low-volume diagnostics, not per-request tracing.
-- **Logging an unregistered category.** Categories must exist in
-  `dev_log_category`. Add them via the constructor `categories` or
-  `addCategory` before the first `log` call uses them.
-- **Forgetting that strings are literals.** A plain `string` for `message` /
-  `description` / `category` becomes a SQL literal. To log a computed column or
-  expression, pass a `Sql` value (`` sql`...` ``, `sql.concat(...)`), not a
-  template-interpolated string.
-- **Calling `system.block(DevLogBlock)` unconditionally in shared code.** In
-  systems where the block is not registered this throws; guard with
-  `system.blockOptional(DevLogBlock)` when the dependency is optional.
-- **Wrapping in `<Route>` or looking for UI components.** This block ships no
-  components or pages — it only adds the table and enums. Build any viewer UI
-  with the standard datagrid/record page components over `dev_log_entries`.

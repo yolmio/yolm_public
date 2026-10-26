@@ -5,6 +5,7 @@ import type { ButtonProps } from "components/button";
 import { Checkbox } from "components/checkbox";
 import { FieldFormControl } from "components/field_form_control";
 import { FormControl } from "components/form_control";
+import { FormLabel } from "components/form_label";
 import { IconButton } from "components/icon_button";
 import type { IconButtonProps } from "components/icon_button";
 import { InlineFieldDisplay } from "components/inline_field_display";
@@ -45,6 +46,7 @@ import {
   type UiServerStatements,
 } from "./statements";
 import type { Style } from "./style_types";
+import { visuallyHiddenStyles } from "./style_utils";
 import { system } from "./system";
 import type { Field, HelperFieldType, Table } from "./system";
 import {
@@ -87,6 +89,20 @@ export interface FormField {
   fieldType?: HelperFieldType;
   /** Whether this field is required even without a backing NOT NULL column. */
   required?: boolean;
+  /** Set by {@link registerFieldInvalidInputCheck}. */
+  invalidInputCheck?: FieldInvalidInputCheck;
+}
+
+/**
+ * A field control's DOM input that can hold text its field value cannot
+ * represent (e.g. an unparseable typed date). Submit fails while the
+ * element has `aria-invalid="true"`.
+ */
+export interface FieldInvalidInputCheck {
+  /** Id the control must render on its input. */
+  elementId: string;
+  /** Field error set when the input is invalid at submit. */
+  message: string;
 }
 
 /**
@@ -430,6 +446,8 @@ export class FormContext implements FormICtx, ContextInstance {
     this.validateFields(s);
     this.validatePartialRows(s);
     this.beforeSubmitClient?.(s, this);
+    // After beforeSubmitClient, which may recompute (and clear) field errors.
+    this.validateInvalidInputs(s);
     s.if(this.hasAnyError, (s) => {
       this.debugTables(s);
       this.onSubmitError?.(s, this);
@@ -644,6 +662,34 @@ export class FormContext implements FormICtx, ContextInstance {
       }
     }
   };
+
+  private validateInvalidInputs(s: DomStatements) {
+    for (const table of Object.values(this.tables)) {
+      if (isManyTable(table)) {
+        continue;
+      }
+      const recordIdent = sql.ref(`ui.${table.stateName}`);
+      for (const field of table.fields) {
+        const check = field.invalidInputCheck;
+        if (!check || field.shared) {
+          continue;
+        }
+        s.block((s) => {
+          // Declares the scalar; it stays null when the input is not rendered.
+          s.element(check.elementId).matches(
+            sql.lit`[aria-invalid="true"]`,
+            "invalid_input",
+          );
+          s.if(sql`coalesce(invalid_input, false)`, (s) =>
+            s.modify(
+              sql`update ${recordIdent} set ${
+                sql.ref(`${field.field}_write_error`)
+              } = ${sql.lit(check.message)}`,
+            ));
+        });
+      }
+    }
+  }
 
   private validateFields(s: DomStatements) {
     for (const table of Object.values(this.tables)) {
@@ -2410,6 +2456,30 @@ function insertSharedFields(s: StateStatements, table: DbBackedTable) {
   );
 }
 
+/**
+ * Re-running a watched form's state procedure writes into its existing state
+ * record, and fields omitted from that insert keep their previous values.
+ * Clear the previously loaded db id and record error so a blank record
+ * inserts instead of updating the row loaded before the watch changed.
+ */
+function pushBlankRecordStateResets(
+  table: FormTable,
+  insertFields: string[],
+  insertValues: AnyExpr[],
+) {
+  insertFields.push("write_record_error");
+  insertValues.push(sql`null`);
+  if (
+    table.type === "update" ||
+    table.type === "merge" ||
+    table.type === "updateMany" ||
+    table.type === "mergeMany"
+  ) {
+    insertFields.push("write_db_id");
+    insertValues.push(sql`null`);
+  }
+}
+
 function initializeInsertTable(
   s: StateStatements,
   table: FormTable,
@@ -2422,6 +2492,7 @@ function initializeInsertTable(
       (s) => {
         const insertFields: string[] = ["write_ui_id"];
         const insertValues: AnyExpr[] = [sql`next_write_id`];
+        pushBlankRecordStateResets(table, insertFields, insertValues);
         if (table.parent) {
           insertFields.push("parent_write_ui_id");
           insertValues.push(parentUiId!);
@@ -2476,6 +2547,7 @@ function initializeInsertTable(
   }
   const insertFields: string[] = ["write_ui_id"];
   const insertValues: AnyExpr[] = [sql`next_write_id`];
+  pushBlankRecordStateResets(table, insertFields, insertValues);
   if (table.optional) {
     insertFields.push("write_relation_exists");
     insertValues.push(table.optionalExistsByDefault ?? false);
@@ -5398,6 +5470,52 @@ const GATHER_CURSOR_STUB: CursorHelper = Object.freeze(
   new GatherCursorHelperStub(),
 ) as unknown as CursorHelper;
 
+let invalidInputCheckCount = 0;
+
+/**
+ * During the gather phase, registers a submit-time check for the current
+ * `Form.Field`: submit fails with `message` while the control's input has
+ * `aria-invalid="true"`. It runs after `beforeSubmitClient` and does not
+ * depend on where the submit button renders. Not supported for row fields
+ * (`Form.Each`/`Form.View`, many-record tables), shared fields, or
+ * controls outside a `Form.Field`; the control then relies on its own errors. Read the result while rendering
+ * with {@link useFieldInvalidInputCheck}.
+ *
+ * @param elementId - Use the control's static id; one is generated otherwise.
+ * @category Helper
+ */
+export function registerFieldInvalidInputCheck(
+  message: string,
+  elementId?: string,
+) {
+  if (usePhase() !== "gather") {
+    return;
+  }
+  const table = useGatherStackFrame("Table")?.table;
+  const field = useGatherStackFrame("Field")?.field;
+  if (
+    !table || !field || isManyTable(table) || useLastGatherEach() ||
+    field.shared
+  ) {
+    return;
+  }
+  field.invalidInputCheck ??= {
+    elementId: elementId ?? `field_input_check_${invalidInputCheckCount++}`,
+    message,
+  };
+}
+
+/**
+ * The current `Form.Field`'s {@link registerFieldInvalidInputCheck}, if any.
+ *
+ * @category Helper
+ */
+export function useFieldInvalidInputCheck():
+  | FieldInvalidInputCheck
+  | undefined {
+  return useStackFrame("Field")?.field.invalidInputCheck;
+}
+
 function useLastEach() {
   const stack = useICtx(FormStackICtxKey).stack;
   for (let i = stack.length - 1; i >= 0; i--) {
@@ -5645,6 +5763,10 @@ export interface FormInlineEditProps extends
   > {
   /** Name of the field to edit. Resolved against the current record's table. */
   field: string;
+  /** Accessible name when the page shows a different label than the field's. */
+  label?: string;
+  /** Custom read-mode label; the stored value and editor remain unchanged. */
+  display?: (value: Sql) => Node;
   sx?: Style;
   /** Style applied to the inline input. */
   inputSx?: Style;
@@ -5717,6 +5839,9 @@ Form.InlineEdit = function InlineEdit(props: FormInlineEditProps) {
     const helper = useFieldHelper();
     return (
       <FormControl>
+        <FormLabel sx={visuallyHiddenStyles}>
+          {props.label ?? field.displayName}
+        </FormLabel>
         <FieldFormControl
           field={field}
           endDecorator={<InlineSaveComponent />}
@@ -5761,6 +5886,11 @@ Form.InlineEdit = function InlineEdit(props: FormInlineEditProps) {
           >
             <Form.Field field={field.name} />
           </Form.Update>
+          {
+            /* Server errors (e.g. from the write hooks) would otherwise leave
+          the editor open with no explanation. */
+          }
+          <Form.ErrorAlert className="mt-1" />
         </Form>
       }
       else={
@@ -5776,6 +5906,10 @@ Form.InlineEdit = function InlineEdit(props: FormInlineEditProps) {
             s.setScalar("editing", true);
           }}
           tabIndex={props.editTrigger === "icon" ? undefined : 0}
+          role={props.editTrigger === "icon" ? undefined : "button"}
+          aria-label={props.editTrigger === "icon"
+            ? undefined
+            : `Edit ${props.label ?? field.displayName}`}
           onKeyDown={props.editTrigger === "icon" ? undefined : (s) => {
             s.if(sql`event.key = 'Enter'`, (s) => {
               s.setScalar("editing", true);
@@ -5784,7 +5918,9 @@ Form.InlineEdit = function InlineEdit(props: FormInlineEditProps) {
         >
           <Conditional
             when={sql`value is not null`}
-            then={<InlineFieldDisplay field={field} value={sql`value`} />}
+            then={props.display
+              ? props.display(sql`value`)
+              : <InlineFieldDisplay field={field} value={sql`value`} />}
             else={props.placeholder ??
               <span sx={{ color: "text-tertiary" }}>(no value)</span>}
           />
@@ -5837,7 +5973,11 @@ Form.InlineEdit = function InlineEdit(props: FormInlineEditProps) {
  * Props for {@link Form.InlineEditMulti}, click-to-edit for several fields at
  * once on a record page (e.g. `first_name` + `last_name`).
  */
-export interface FormInlineEditMultiProps {
+export interface FormInlineEditMultiProps extends
+  Pick<
+    WriteProcExtensions,
+    "afterTransactionStart" | "beforeTransactionCommit"
+  > {
   /** Names of the fields to edit together. */
   fields: string[];
   /** Builds the read-mode display expression from the field value expressions (in `fields` order). */
@@ -5920,6 +6060,8 @@ Form.InlineEditMulti = function InlineEditMulti(
       then={
         <Form
           submitOnDocumentEnter
+          afterTransactionStart={props.afterTransactionStart}
+          beforeTransactionCommit={props.beforeTransactionCommit}
           afterSubmitClientSuccess={(s) => {
             s.setScalar("editing", false);
             s.increment("refetch_key");

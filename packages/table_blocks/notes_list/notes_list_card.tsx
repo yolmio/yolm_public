@@ -142,7 +142,7 @@ function AddNoteForm({ notesTable, fkField }: AddNoteFormProps) {
         <Textarea
           bindScalar="content"
           yolmFocusKey
-          placeholder="Write a note. Use @name for teammate context."
+          placeholder="Write a note."
         />
         <Show when={sql`failed`}>
           <Alert sx={styles.addingError} color="danger">

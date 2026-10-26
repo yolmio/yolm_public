@@ -16,41 +16,19 @@ related:
 
 # Calendar Integrations
 
-`blocks/calendar_integrations` defines the `CalendarIntegration` interface (a
-`Block`) and ships two system-block implementations that connect a user's real
-calendar to the scheduling system:
-
-- `GoogleCalendarIntegration` — Google Calendar via the Google Calendar API.
-- `OutlookCalendarIntegration` — Outlook via the Microsoft Graph API.
-
-Each block manages per-user OAuth accounts, mirrors remote events into local
-tables (for conflict checking), keeps push-notification/watch subscriptions
-alive, and writes scheduling appointments back to the provider. Register the
-integrations alongside `SchedulingBlock`; the scheduling block discovers them
-through its `calendarIntegrations` option and drives the per-user connection
-UI and booking sync. Use these blocks instead of building custom OAuth +
-calendar-sync schema by hand.
-
-OAuth uses Yolm's managed OAuth service (`managed_oauth` service requests), so
-you do **not** need to wire up your own credential store.
-
-## Imports
-
-```ts
-import { GoogleCalendarIntegration } from "blocks/calendar_integrations/google";
-import { OutlookCalendarIntegration } from "blocks/calendar_integrations/outlook";
-// Types / interface (rarely needed directly — the scheduling block consumes these):
-import type {
-  CalendarIntegration,
-  CalendarIntegrationConstructor,
-} from "blocks/calendar_integrations";
-```
+`blocks/calendar_integrations` connects each user's calendar to
+`SchedulingBlock` over Yolm managed OAuth: per-user accounts, mirrored remote
+events for conflict checking, push subscriptions, and write-back of
+appointments. Implementations: `GoogleCalendarIntegration`
+(`blocks/calendar_integrations/google`) and `OutlookCalendarIntegration`
+(`blocks/calendar_integrations/outlook`, Microsoft Graph). The package root
+`blocks/calendar_integrations` exports only the `CalendarIntegration` interface,
+`CalendarIntegrationConstructor`, and option/param types.
 
 ## Setup
 
-Register the integration block(s) in `core.tsx` **before** `SchedulingBlock`,
-then reference the integration constructors from the scheduling block's
-`calendarIntegrations` list:
+Register the integration block(s) in `core.tsx` before `SchedulingBlock`, then
+pass the classes (constructors, not instances) in its `calendarIntegrations`:
 
 ```ts
 system.addBlock(
@@ -64,18 +42,8 @@ system.addBlock(
     )`,
   }),
 );
-
-system.addBlock(
-  new OutlookCalendarIntegration({
-    notificationDomain: "scheduling-agent.example.com",
-    provider: "outlook_calendar",
-    scopes: sql`json_build_array(
-      'offline_access',
-      'https://graph.microsoft.com/Calendars.ReadWrite',
-      'https://graph.microsoft.com/User.Read'
-    )`,
-  }),
-);
+// OutlookCalendarIntegration takes the same options, e.g. provider
+// "outlook_calendar" with offline_access, Calendars.ReadWrite, User.Read scopes.
 
 system.addBlock(
   new SchedulingBlock({
@@ -86,189 +54,168 @@ system.addBlock(
         checkForConflicts: true,
         eventIdField: "google_event_id",
       },
-      {
-        integration: OutlookCalendarIntegration,
-        addToCalendar: true,
-        checkForConflicts: true,
-        eventIdField: "outlook_event_id",
-      },
     ],
     // ...other scheduling options
   }),
 );
 ```
 
-The scheduling block's integrations page calls `addOauthRedirect(app)` for each
-registered integration and renders the per-user connection UI using the block's
+`GoogleCalendarIntegration.globalYolmOauth({ notificationDomain })` and
+`OutlookCalendarIntegration.globalYolmOauth({ notificationDomain })` return an
+instance preconfigured with the hosted managed-OAuth provider
+(`google_calendar` / `outlook_calendar`) and default calendar scopes.
+
+The blocks expose no page components. The scheduling integrations page calls
+`addOauthRedirect(app)` for each integration and renders the connection UI from
 `icon`, `accountDisplay`, `isActiveAccount`, `navigateToOauth`, and
-`deleteAccount`; its agent-management page additionally renders `adminStatus`.
-
-### Managed-OAuth convenience factories
-
-Both classes provide a static `globalYolmOauth` helper that returns a
-preconfigured instance using the hosted managed-OAuth provider (`google_calendar`
-/ `outlook_calendar`) with default calendar scopes. It takes only
-`{ notificationDomain }`:
-
-```ts
-system.addBlock(
-  GoogleCalendarIntegration.globalYolmOauth({
-    notificationDomain: "scheduling-agent.example.com",
-  }),
-);
-
-system.addBlock(
-  OutlookCalendarIntegration.globalYolmOauth({
-    notificationDomain: "scheduling-agent.example.com",
-  }),
-);
-```
+`deleteAccount`; its agent-management page also renders `adminStatus`.
 
 ## Configuration
 
-### `GoogleCalendarIntegration` constructor options
+The option interfaces are not exported; both classes take:
 
-| Option | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `notificationDomain` | `string \| string[]` | Yes | Domain(s) that host the `POST /api/google-calendar-notifications` push endpoint and (if `adminDebugToken` is set) the debug endpoint. The first entry is used as the watch callback address. |
-| `provider` | `string` | Yes | Managed-OAuth provider key (e.g. `"google_calendar"`). Passed to `managed_oauth` service requests. |
-| `scopes` | `Sql` | Yes | OAuth scopes as a SQL JSON array expression (`sql\`json_build_array(...)\``). |
-| `adminDebugToken` | `string` | No | If set, registers `POST /api/admin/agent-google-events` for raw-event debugging, gated on an `X-Admin-Token` header equal to this value. |
-| `extensions` | `GoogleCalendarIntegrationExtensions` | No | Lifecycle hooks (see [Extensions](#extensions)). |
-
-### `OutlookCalendarIntegration` constructor options
-
-| Option | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `provider` | `string` | Yes | Managed-OAuth provider key (e.g. `"outlook_calendar"`). |
-| `scopes` | `Sql` | Yes | OAuth scopes as a SQL JSON array expression. |
-| `notificationDomain` | `string \| string[]` | Yes | Domain(s) that host the `POST /api/azure-notifications` Graph subscription endpoint and (if `adminDebugToken` is set) the debug endpoint. The first entry is used as the subscription callback URL. |
-| `adminDebugToken` | `string` | No | If set, registers `POST /api/admin/agent-outlook-events`, gated on an `X-Admin-Token` header. |
-| `extensions` | `OutlookCalendarIntegrationExtensions` | No | Lifecycle hooks (see [Extensions](#extensions)). |
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `provider` | Yes | Managed-OAuth provider key passed to `managed_oauth` service requests. Do not wire your own credential store. |
+| `scopes` | Yes | SQL JSON array expression (`sql\`json_build_array(...)\``). |
+| `notificationDomain` | Yes | `string \| string[]` hosting the push endpoint (and debug endpoint). The first entry is the watch/subscription callback address; there is no separate dev-notification override. |
+| `adminDebugToken` | No | Registers a raw-event debug endpoint gated on an `X-Admin-Token` header equal to this value. |
+| `extensions` | No | `GoogleCalendarIntegrationExtensions` / `OutlookCalendarIntegrationExtensions` (see Extensions). |
+| `conflictSync` | No | Outlook only: `{ schedule, windowMinutes, forUsers }` enables periodic conflict mirroring. `schedule` is a cron expression, `windowMinutes` is a positive finite SQL horizon, and `forUsers` is a SQL query returning user IDs. |
 
 OAuth redirect addresses are derived internally from the request origin.
-Calendar notification callbacks use `notificationDomain`; there is no separate
-dev-notification override.
 
-## Provider authoring
+With `conflictSync`, the block registers `outlook_conflict_calendar_resync`.
+It processes active, conflict-checked calendars serially, fetching the complete
+window before committing changes. Event IDs are case-sensitive; unchanged
+mirrors cause no database writes. Failed calendars are logged independently and
+retried on the next run. Failed notification batches return HTTP 503 so the
+provider can retry them; other events in the batch still run. A failed event
+also queues deduplicated recovery for its active, conflict-checked calendar.
+The existing reconciliation worker runs a bounded mirror sync before any
+outbound repairs, including for calendars used only for conflict checking.
 
-Most solution developers only configure the bundled Google and Outlook
-integrations above; `SchedulingBlock` owns provider calls and the connection
-UI. If a system needs a custom provider, inspect the exported
-`CalendarIntegration` types in Forge and preserve the OAuth, notification, and
-capability contracts described above.
+Choose a horizon that covers the longest supported booking window, with a
+buffer. The system owns that policy; the block does not infer it from a specific
+scheduling schema. The block rejects null or nonpositive horizons. Enabling
+this option replaces six-month mirroring with the bounded window. Nightly
+jobs retain outbound repair and also run that bounded sync through the shared
+recovery queue; nightly enqueueing removes expired mirrors. Without the option,
+nightly reconciliation continues to mirror events too. Remove any
+system-owned job with the same name when enabling the block's job.
+
+`syncCalendarWindow(s, { calendarId, start, end, counts })` exposes the same
+bounded mirror operation for custom procedures. Call it outside a transaction;
+`counts` names three local scalars (`created`, `updated`, `deleted`). Nightly
+logs distinguish `outbound_*` repairs from `mirrored_*` changes.
+
+To author a custom provider, implement the exported `CalendarIntegration`
+interface and preserve the OAuth, notification, and capability contracts
+described here.
 
 ## Tables Created
 
-### Google (`GoogleCalendarIntegration`)
+Inspect the schema for columns. Error logs have a TTL of ~1 week and
+reconciliation queues ~2 days.
 
-| Table | Purpose / key columns |
-| --- | --- |
-| `user_google_accounts` | Per-user Google OAuth account. `sys_user_id` (fk), `credential_id` (unique), `email`, `provider_subject`, `granted_scopes`, `status` (`google_connection_status`), `created_at`. |
-| `user_google_calendars` | Per-account calendars. `google_calendar_id`, `summary`, `supports_notifications`, `sync_token`, `timezone`, `check_for_conflicts`, `add_to_calendar`, plus `notification_channel_id` / `notification_resource_id` / `notification_expiration`. |
-| `user_google_calendar_events` | Mirrored events for conflict checking. `summary`, `start_time`, `end_time`, `google_event_id`; unique on `(user_google_calendar_id, google_event_id)`. |
-| `deleted_yolm_google_events` | Tombstones for Yolm-created events removed remotely. `google_event_id`, `deleted_at`. |
-| `user_google_calendar_error_logs` | Operation error log (`operation`, `error_type`, `error_message`, `error_description`, `raw_error`); TTL ~1 week. |
-| `google_calendar_reconciliation_jobs` | Reconciliation work queue; TTL ~2 days. |
-
-### Outlook (`OutlookCalendarIntegration`)
-
-| Table | Purpose / key columns |
-| --- | --- |
-| `user_outlook_accounts` | Per-user Microsoft OAuth account. `sys_user_id` (fk), `credential_id` (unique), `email`, `provider_subject`, `granted_scopes`, `status` (`outlook_connection_status`), `created_at`. |
-| `user_outlook_calendars` | Per-account calendars. `azure_calendar_id`, `summary`, `check_for_conflicts`, `add_to_calendar`, `expiration_date_time`, `notification_resource_id`, `last_event_sync_at`. |
-| `user_outlook_calendar_events` | Mirrored events. `summary`, `start_time`, `end_time`, `outlook_event_id`, `series_master_id`. |
-| `deleted_yolm_outlook_events` | Tombstones for Yolm-created events removed remotely. `outlook_event_id`, `deleted_at`. |
-| `user_outlook_calendar_error_logs` | Operation error log (`operation`, `error_type`, `error_message`, `error_description`); TTL ~1 week. |
-| `outlook_calendar_reconciliation_jobs` | Reconciliation work queue; TTL ~2 days. |
-
-### Outlook subscription replacement
-
-Existing Graph subscriptions are renewed with `PATCH /subscriptions/{id}`,
-including the configured notification URL so domain changes reach existing watches.
-Only a missing subscription (HTTP 404) triggers creation of a replacement.
-Publication rechecks the calendar's subscription ID, account, remote calendar,
-and conflict-checking setting inside the commit transaction. A concurrent
-winner is preserved; a losing new subscription is deleted immediately.
-The newly created ID is retained across catchable validation, hook, and
-publication failures so those paths also attempt protected cleanup.
-Cleanup never deletes an ID currently referenced by a calendar. HTTP 204 and
-404 finish cleanup; other failures log the calendar and subscription IDs in
-`user_outlook_calendar_error_logs` and execution errors. Failed deletions are
-not retried; the remote subscription expires naturally. Execution errors are
-emitted before database logging; missing calendars use a null log reference with
-the original calendar and subscription IDs retained in diagnostic text. A failed
-database-log insert does not interrupt cleanup.
-
-Unsubscribe detaches its subscription ID transactionally before remote deletion,
-preventing a concurrent renewal from publishing that ID again. Re-enabling then
-creates a fresh subscription. Reactor-driven unsubscribe rechecks that conflict
-checking is disabled before detaching and again before deleting mirrored events.
-Failed remote deletion leaves the old ID detached and logged until remote expiry.
-The existing watch hooks also run for renewals. Block debug output distinguishes
-`subscription_renewed`, `subscription_published`, and `subscription_superseded`.
-
-No schema changes or historical event rewrites are required. Untracked
-subscriptions left by older releases expire at Graph. Provider creation and the
-database commit cannot be one atomic transaction, so a process failure between
-them can still leave a remote subscription until expiry.
-
-## Enums
-
-| Enum | Values | Created by |
+| Google | Outlook | Purpose |
 | --- | --- | --- |
-| `google_connection_status` | `active`, `reauth_required` | `GoogleCalendarIntegration` |
-| `outlook_connection_status` | `active`, `reauth_required` | `OutlookCalendarIntegration` |
+| `user_google_accounts` | `user_outlook_accounts` | Per-user OAuth account; `status` uses `google_connection_status` / `outlook_connection_status` (`active`, `reauth_required`). |
+| `user_google_calendars` | `user_outlook_calendars` | Per-account calendars with `check_for_conflicts` / `add_to_calendar` flags and subscription state. |
+| `user_google_calendar_events` | `user_outlook_calendar_events` | Mirrored events for conflict checking. |
+| `deleted_yolm_google_events` | `deleted_yolm_outlook_events` | Remote-deletion bookkeeping; the Outlook table is retained only for physical schema compatibility and receives no new rows. |
+| `user_google_calendar_error_logs` | `user_outlook_calendar_error_logs` | Operation error log. |
+| `google_calendar_reconciliation_jobs` | `outlook_calendar_reconciliation_jobs` | Reconciliation work queue. |
 
-## Reactors
+When `SchedulingBlock` is present, failures are also written to its
+`scheduling_google_integration_logs`, `scheduling_outlook_integration_logs`,
+and `scheduling_integration_errors`. If `DevLogBlock` is registered,
+reconciliation adds `google_calendar_reconciliation` /
+`outlook_calendar_reconciliation` log categories.
 
-Registered automatically. The `subscribe` / `renew` / `unsubscribe` reactors are
-only added when the block's `watch_changes` capability is not disabled; the
-reconciliation reactors always run. Outlook's `refresh_stale_outlook_calendars`
-is also always registered (it is not gated on `watch_changes`).
+### Outlook subscription lifecycle
 
-### Google
+- Renewal uses `PATCH /subscriptions/{id}`, including the configured
+  notification URL so domain changes reach existing watches. Only HTTP 404
+  creates a replacement for authenticated subscriptions. Legacy subscriptions
+  without a client secret are deleted and replaced by the renewal reactor,
+  which queues reconciliation when retiring the legacy watch to repair missed
+  changes even if replacement creation fails.
+- Each calendar stores a cryptographically random `notification_client_state`.
+  Notifications with missing or nonmatching secrets are ignored before calendar
+  mutations or event fetches. Existing subscriptions fail closed until replaced.
+  The nullable secret field is a compatible addition. Watch reserves it before
+  provider creation, so a lost response can be recovered using the same secret.
+  Publication rechecks that reservation; unsubscribe clears both ID and secret,
+  including pending creations without an ID. Error logs
+  omit raw notification bodies because they contain the secret.
+- Publication rechecks the calendar's subscription ID, account, remote
+  calendar, and conflict-checking setting inside the commit transaction. A
+  concurrent winner is preserved; a losing new subscription is deleted
+  immediately. The new ID is retained across catchable validation, hook, and
+  publication failures so those paths also attempt cleanup.
+- Cleanup checks database references and revokes any matching unpublished secret
+  transactionally before DELETE. A recovery already in flight cannot publish
+  using that revoked reservation. HTTP 204 and 404
+  finish cleanup; other failures are logged (calendar and subscription IDs) in
+  `user_outlook_calendar_error_logs` and execution errors, are not retried, and
+  the remote subscription expires naturally. Execution errors are emitted before
+  database logging; a missing calendar logs a null reference with the IDs in
+  the text; a failed log insert does not interrupt cleanup.
+- Unsubscribe detaches the ID transactionally before remote deletion, so a
+  concurrent renewal cannot republish it; re-enabling creates a fresh
+  subscription. Reactor-driven unsubscribe rechecks that conflict checking is
+  disabled before detaching and again before deleting mirrored events.
+- Watch hooks also run for renewals. Debug output distinguishes
+  `subscription_renewed`, `subscription_published`, and
+  `subscription_superseded`.
+- If creation commits at Graph but its response is lost, a retry can return
+  409. Watch then follows Graph's subscription-list pagination to find the same
+  calendar, notification URL, and change types, and retrieves that subscription
+  individually (the list omits `clientState`). It validates the ID, resource,
+  URL, expiration, and exact match to the reserved 64-character hex secret before
+  publication. Re-enable gets a fresh secret and cannot adopt the subscription
+  an earlier unsubscribe is deleting. A verified retired subscription is deleted
+  only after rechecking the current reservation and absence of any published
+  reference, allowing the next retry to create a fresh watch. This also handles
+  unsubscribe after a lost creation response, when no provider ID was stored.
+  Missing or invalid recovery data fails closed; unrelated subscriptions are
+  preserved. Normal renewals still use PATCH.
 
-- `subscribe_google_calendar` — opens a watch channel for conflict-checked calendars (backoff-aware). Gated on `watch_changes`.
-- `renew_expiring_google_subscription` — renews channels nearing expiration. Gated on `watch_changes`.
-- `unsubscribe_google_calendar` — stops watches and clears mirrored events when a calendar stops conflict-checking. Gated on `watch_changes`.
-- `google_calendar_reconcile_job` — drains `google_calendar_reconciliation_jobs`. Always registered.
+## Reactors and Capabilities
 
-### Outlook
+`externalServiceOptions` declares `read_events`, `modify_events`, and
+`watch_changes` (Outlook also `oauth`). The subscribe/renew/unsubscribe reactors
+are registered only when `watch_changes` is not disabled; the others always run.
 
-- `subscribe_outlook_calendar` — creates Graph subscriptions (backoff-aware). Gated on `watch_changes`.
-- `renew_expired_outlook_subscription` — extends subscriptions within six hours of expiry. Gated on `watch_changes`.
-- `unsubscribe_outlook_calendar` — stops subscriptions and clears mirrored events. Gated on `watch_changes`.
-- `refresh_stale_outlook_calendars` — re-watches calendars whose sync is stale. Always registered.
-- `outlook_calendar_reconcile_job` — drains `outlook_calendar_reconciliation_jobs`. Always registered.
+| Google | Outlook | Gated on `watch_changes` |
+| --- | --- | --- |
+| `subscribe_google_calendar` | `subscribe_outlook_calendar` | Yes; backoff-aware, conflict-checked calendars. |
+| `renew_expiring_google_subscription` | `renew_expired_outlook_subscription` (within six hours of expiry) | Yes |
+| `unsubscribe_google_calendar` | `unsubscribe_outlook_calendar` | Yes; also clears mirrored events. |
+| `google_calendar_reconcile_job` | `outlook_calendar_reconcile_job` | No |
+| | `refresh_stale_outlook_calendars` | No; re-watches stale calendars. |
 
-## APIs / Endpoints
+## Endpoints
 
-`addOauthRedirect(app)` (called by the scheduling integrations page) registers:
-
-- `GET /api/can-write/google-calendar-oauth-callback` / `GET /api/can-write/outlook-calendar-oauth-callback` on the app domain and each `domainAliases` entry.
-- A global `GET /can-write/google-calendar-oauth-redirect` / `GET /can-write/outlook-calendar-oauth-redirect` that resolves the original host and forwards to the per-app callback.
-
-The block's `populate()` additionally registers, per `notificationDomain`:
-
-- Google: `POST /api/google-calendar-notifications` (push webhook).
-- Outlook: `POST /api/azure-notifications` (Graph change webhook; echoes `validationToken` for subscription validation).
-- Debug (only when `adminDebugToken` is set):
-  `POST /api/admin/agent-google-events` /
-  `POST /api/admin/agent-outlook-events`, gated on the `X-Admin-Token` header.
-  The Google endpoint returns account/calendar status even when the account is
-  inactive; when Scheduling is configured with user-defined event types, it
-  also correlates appointments, pending background tasks, integration errors,
-  and Google operation logs for the requested window. Raw Google events are
-  included only when the account and write calendar are active.
+- `addOauthRedirect(app)`: `GET /api/can-write/{google,outlook}-calendar-oauth-callback`
+  on the app domain and each `domainAliases` entry, plus a global
+  `GET /can-write/{google,outlook}-calendar-oauth-redirect` that resolves the
+  original host and forwards to the per-app callback.
+- `populate()`, per `notificationDomain`: Google
+  `POST /api/google-calendar-notifications`; Outlook
+  `POST /api/azure-notifications` (echoes `validationToken`).
+- With `adminDebugToken`: `POST /api/admin/agent-google-events` /
+  `POST /api/admin/agent-outlook-events`. The Google endpoint returns
+  account/calendar status even for inactive accounts; with user-defined
+  Scheduling event types it also correlates appointments, pending background
+  tasks, integration errors, and Google operation logs for the window. Raw
+  Google events are included only when the account and write calendar are
+  active.
 
 ## Extensions
 
-Pass optional server-statement hooks via the `extensions` constructor option to
-run extra logic around the watch/notification lifecycle without forking the
-block. Each hook receives the statement builder `s` and a context object.
-
-`GoogleCalendarIntegrationExtensions`:
+Server-statement hooks `(s, ctx)` around the watch/notification lifecycle:
 
 | Hook | Context |
 | --- | --- |
@@ -276,53 +223,4 @@ block. Each hook receives the statement builder `s` and a context object.
 | `afterWatch` | `{ calendarId, responseRecord }` |
 | `onWatchError` | `{ calendarId, errorRecord }` |
 | `onNotificationError` | `{ errorRecord }` |
-| `onNotificationReceived` | `{ channelId, resourceState }` |
-
-`OutlookCalendarIntegrationExtensions` is the same except its
-`onNotificationReceived` context is `{ body }` (the raw Graph notification
-payload) instead of `{ channelId, resourceState }`.
-
-## Capabilities
-
-Each block exposes `externalServiceOptions` (capability opt-ins surfaced via
-Yolm's capability system): Google declares `read_events`, `modify_events`, and
-`watch_changes`; Outlook declares `oauth`, `read_events`, `modify_events`, and
-`watch_changes`. When `watch_changes` is turned off, the subscribe/renew/
-unsubscribe reactors are not registered (Outlook's
-`refresh_stale_outlook_calendars` and both reconcile reactors still run).
-
-## Relationships to other blocks
-
-- **`SchedulingBlock`** (`blocks/scheduling`): the primary consumer. List the
-  integration constructors in `SchedulingBlock`'s `calendarIntegrations`
-  option; the scheduling block calls the interface methods to check conflicts
-  and write appointments back to the calendar.
-- **`DevLogBlock`** (`blocks/dev_log`): optional. If registered, the
-  reconciliation reactors add `google_calendar_reconciliation` /
-  `outlook_calendar_reconciliation` log categories and record results.
-- **Scheduling log tables**: when `SchedulingBlock` is present, operation
-  failures are also written to `scheduling_google_integration_logs`,
-  `scheduling_outlook_integration_logs`, and `scheduling_integration_errors`
-  (tables owned by the scheduling block).
-
-## Common Mistakes
-
-- **Registering the integration after `SchedulingBlock`.** Add the calendar
-  integration block(s) first so the scheduling block can resolve them with
-  `system.block(...)`.
-- **Importing from the package root for the classes.** The classes live in
-  submodules: import `GoogleCalendarIntegration` from
-  `blocks/calendar_integrations/google` and `OutlookCalendarIntegration` from
-  `blocks/calendar_integrations/outlook`. The root
-  `blocks/calendar_integrations` only exports the `CalendarIntegration`
-  interface and option/param types.
-- **Expecting standalone page components.** This block exposes no page
-  components. UI (the connection card, OAuth redirect routes) is rendered by
-  the scheduling block via the integration's `icon`, `accountDisplay`,
-  `adminStatus`, and `addOauthRedirect`.
-- **Wiring your own OAuth credential store.** These blocks use Yolm managed
-  OAuth (`managed_oauth` service requests); set `provider` and `scopes` instead. Redirect addresses are derived internally.
-- **Passing an integration instance where a constructor is expected.**
-  `SchedulingBlock`'s `calendarIntegrations[].integration` field is a
-  `CalendarIntegrationConstructor` — pass the class (`GoogleCalendarIntegration`),
-  not `new GoogleCalendarIntegration(...)`.
+| `onNotificationReceived` | Google `{ channelId, resourceState }`; Outlook `{ body }` (raw Graph payload) |

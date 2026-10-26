@@ -26,11 +26,12 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   cad_2d_viewer: {
-    hash: "d6d09b3c046b8725d163c9b23c90ad793dacc055505be93158617676fda05c78",
+    hash: "11296ab8732532f74e07634b191edba5fdf142378cc0a78965d9f6f486cae5d5",
     events: [
       "error",
       "ready",
       "selectionChanged",
+      "shopChanged",
       "stateChanged",
     ],
     exports: [
@@ -41,6 +42,8 @@ export const MODULES = {
       "setLayerVisibility",
       "setLayerVisibilityBatch",
       "focusObject",
+      "setDisplay",
+      "selectObjects",
       "getState",
       "cleanup",
     ],
@@ -108,7 +111,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   document_comparison: {
-    hash: "be9c36a2a8496d94a30da77ae715ff12ccbb1d81a9b3df15e23132eade70f7c7",
+    hash: "723745b0a3016997595057985f0e4e0556c3a97bc1a3ac032bf5331dfc70ec16",
     events: [
       "error",
       "ready",
@@ -120,7 +123,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   docx_viewer: {
-    hash: "642c59aad33422dab4b4fa717fd8d2d0b73773bbe036e9c0ddb4e20b573ffdfb",
+    hash: "8f28c41501e1b316578a53ff5a36a0ddd84f68ce5821f9079ce4b8d54c6fbd28",
     events: [
       "error",
       "ready",
@@ -173,7 +176,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   glb_viewer: {
-    hash: "2d23469ff25774970dc7b7a56837c87707a6634011b369589b530fcce20cee04",
+    hash: "d812320a5d72f515a150e10ff95fe4185ff58cadcf32d2d41507afa5a9f1c1bd",
     events: [
       "contextLost",
       "contextRestored",
@@ -286,7 +289,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   lexical_editor: {
-    hash: "41f3aba3508a9385ffc1a40d344b60083fc10799073dde334a67cfefd9f92217",
+    hash: "3bba4e103ef1e74900155c934bd640b4246da6b5f2e1230b0f75c10e598f1a60",
     events: [
       "contentChanged",
       "error",
@@ -332,7 +335,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   maintenance_capture: {
-    hash: "5f6058b09acb04074cb90f6295daad5a36bb561dba244105740ea8858e24ce1e",
+    hash: "447f816be6dc22c41f056247a8239c41f39ab0b0f7067506c437a6ddceb11aa6",
     events: [
       "changed",
       "draftsListed",
@@ -340,6 +343,7 @@ export const MODULES = {
     exports: [
       "initialize",
       "update",
+      "setContext",
       "pick",
       "remove",
       "send",
@@ -350,7 +354,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   monaco_editor: {
-    hash: "5cde90a27f5059d1e5d7ce3e0db626dc9359b1ebe965821e9f938058138ceb76",
+    hash: "4f351984fc3ebf6c6946c4459e98c9b9bcb0ddafbde602ff4852b337fc309e5c",
     events: [
       "contentChanged",
       "contentDirty",
@@ -387,7 +391,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   outlook_message_viewer: {
-    hash: "df6f08fae8a631c83698e478c44493bc1d9bec85b4deb9f94a62e7f2b8791dcc",
+    hash: "cb257e4e98b222907dc99ae43bae116e099fb6c53b977a14463b9195ffac650a",
     events: [
       "error",
       "ready",
@@ -431,7 +435,7 @@ export const MODULES = {
     files: {} as Record<string, string>,
   },
   pdf_markup: {
-    hash: "c8d7f2e619f1e55deb936cc9e959ac5dd50df96a86f6be35f3256d364ccbc0aa",
+    hash: "019c1055f384ee0d01844c3ad81def91f1fd119bf0e82b0dbc57013a96443294",
     events: [
       "changed",
       "documentChanged",
@@ -479,9 +483,9 @@ export const MODULES = {
     ],
     files: {
       "pdf.min.mjs":
-        "500726f031aec68444f8bb23400ca98274e3d3aaa6d265547d9ba69861fc2933",
+        "e2fa97bbe8139fd8a79a3f734ff321d9550b82e97d96f6bc0ebc79859ba8e297",
       "pdf.worker.min.mjs":
-        "d9c86a24317a107f73352f5c075bca52948b7c2dff086ba6f733e5334a9482bf",
+        "b393791938749c803dbc90ff96759d2c655498eacb18b319971449120e89b62f",
       "wasm/jbig2_nowasm_fallback.js":
         "fcb7aa55ceec75a57bfb364e31b09d3ccf922033f9064eea6d373eba08f92dcc",
       "wasm/jbig2.wasm":
@@ -638,8 +642,23 @@ export const MODULES = {
     ],
     files: {} as Record<string, string>,
   },
+  video_player: {
+    hash: "3f5df78be10b9d9694837dff24421274a34579553d538385e66c003fe22b4a4c",
+    events: [
+      "chapterChange",
+      "error",
+      "ready",
+      "unplayable",
+    ],
+    exports: [
+      "initialize",
+      "seek",
+      "cleanup",
+    ],
+    files: {} as Record<string, string>,
+  },
   web_push: {
-    hash: "6b934f11744b22d5f4d0ace97cad8eff938535a47d65d2f11c624a973b044efc",
+    hash: "795931f3dae61f7752a0ee8f0a2c5fa1324a7453c5cc745032e6b76fe387f244",
     events: [],
     exports: [
       "inspect",

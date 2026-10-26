@@ -526,7 +526,8 @@ export function MarkdownDocumentEditor(props: MarkdownDocumentEditorProps) {
                       variant="plain"
                       color="neutral"
                       aria-label="Back to Spark workspace"
-                      onClick={(s) => s.navigate(sql`${props.backHref}`)}
+                      href={sql`${props.backHref}`}
+                      backLink
                     >
                       <MaterialIcon icon="ArrowBack" />
                     </IconButton>

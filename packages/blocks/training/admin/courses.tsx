@@ -1,7 +1,5 @@
 import { Button } from "components/button";
 import { currentUserHasPermission } from "blocks/auth";
-import { Card, CardContent, CardHeader } from "components/card";
-import { Checkbox } from "components/checkbox";
 import { Chip } from "components/chip";
 import { FieldFormControl } from "components/field_form_control";
 import { FormControl } from "components/form_control";
@@ -9,21 +7,23 @@ import { FormLabel } from "components/form_label";
 import { IconButton } from "components/icon_button";
 import { Input } from "components/input";
 import { ModalDialog } from "components/modal";
+import { Menu } from "components/menu";
 import { Select } from "components/select";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
+import { ActionMenuItem } from "std/action_button";
 import { Form } from "std/form";
 import { sql } from "std/sql_utils";
 import { Each, Show } from "std/ui";
 import type { TrainingBlock } from "../index.tsx";
 import { formatDateSql, trainingPermissions } from "../helpers";
-import { EmptyState, FormFieldWithLabel } from "../shared";
+import { courseDeletionBlockerSql } from "../course_lifecycle";
+import { EmptyState, FormFieldWithLabel, PageShell } from "../shared";
 import {
   adminCourseAssignHref,
   adminCourseHref,
   adminSectionTemplatesHref,
   adminSelectClass,
-  TrainingAdminFrame,
 } from "./shared";
 
 export function TrainingAdminCoursesPage(props: { block: TrainingBlock }) {
@@ -34,7 +34,7 @@ export function TrainingAdminCoursesPage(props: { block: TrainingBlock }) {
         s.defScalar("add_course_open", sql`false`);
         s.defScalar("course_search", sql.lit``);
         s.defScalar("course_type_filter", sql.lit`all`);
-        s.defScalar("course_show_archived", sql`false`);
+        s.defScalar("course_status_filter", sql.lit`active`);
         s.defScalar(
           "can_assign_training_courses",
           currentUserHasPermission(
@@ -43,52 +43,48 @@ export function TrainingAdminCoursesPage(props: { block: TrainingBlock }) {
         );
       }}
     >
-      <TrainingAdminFrame>
-        <TrainingCoursesWorkspace block={props.block} />
-      </TrainingAdminFrame>
+      <TrainingCoursesWorkspace block={props.block} />
     </Data>
   );
 }
 
 export function TrainingCoursesWorkspace(props: { block: TrainingBlock }) {
   return (
-    <div className="flex flex-col gap-5">
-      <Card variant="outlined">
-        <CardHeader>
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-            <Typography level="title-lg" startIcon="Inventory2">
-              Courses & Programs
-            </Typography>
-            <div className="flex items-center gap-2">
-              <Button
-                component="a"
-                href={adminSectionTemplatesHref(props.block)}
-                variant="outlined"
-                color="neutral"
-                startIcon="ViewAgenda"
-              >
-                Stored sections
-              </Button>
-              <Button
-                startIcon="Add"
-                onClick={(s) => s.setScalar("add_course_open", sql`true`)}
-              >
-                New course
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <Data
-            watch={[
-              sql`course_search`,
-              sql`course_type_filter`,
-              sql`course_show_archived`,
-            ]}
-            procedure={(s) => {
-              s.defTable(
-                "courses",
-                sql`select p.id, p.name, p.is_active,
+    <PageShell
+      title="Courses & programs"
+      subtitle="Build the steps people complete, then assign each course to the people who need it."
+      actions={
+        <>
+          <Button
+            component="a"
+            href={adminSectionTemplatesHref(props.block)}
+            variant="outlined"
+            color="neutral"
+            startIcon="ViewAgenda"
+          >
+            Stored sections
+          </Button>
+          <Button
+            startIcon="Add"
+            onClick={(s) => s.setScalar("add_course_open", sql`true`)}
+          >
+            New course
+          </Button>
+        </>
+      }
+    >
+      <div>
+        <Data
+          debounce={{ wait: 300 }}
+          watch={[
+            sql`course_search`,
+            sql`course_type_filter`,
+            sql`course_status_filter`,
+          ]}
+          procedure={(s) => {
+            s.defTable(
+              "courses",
+              sql`select p.id, p.name, p.is_active,
                       exists (
                         select 1
                         from db.training_course_section_items i
@@ -120,7 +116,8 @@ export function TrainingCoursesWorkspace(props: { block: TrainingBlock }) {
                             ('pending', 'in_progress', 'validation_pending')
                       ) as open_assignments
                      from db.training_courses p
-                     where (p.is_active or ui.course_show_archived)
+                     where (ui.course_status_filter = 'all'
+                       or p.is_active = (ui.course_status_filter = 'active'))
                        and (
                          nullif(trim(ui.course_search), '') is null
                          or lower(p.name) like
@@ -139,70 +136,82 @@ export function TrainingCoursesWorkspace(props: { block: TrainingBlock }) {
                          )
                        )
                      order by p.is_active desc, p.name`,
-              );
-            }}
-          >
-            <div>
-              <Typography level="body-sm" className="text-neutral-600 mb-2">
-                Select a course or program to add training items and assign the
-                course.
-              </Typography>
-              <div className="mb-3 flex flex-col md:flex-row md:items-end gap-3">
-                <FormControl className="flex-1">
-                  <FormLabel>Search</FormLabel>
-                  <Input
-                    value={sql`course_search`}
-                    placeholder="Search courses and programs"
-                    startIcon="Search"
-                    onInput={(s) =>
-                      s.setScalar("course_search", sql`target_value`)}
-                  />
-                </FormControl>
-                <FormControl>
-                  <FormLabel>Type</FormLabel>
-                  <Select
-                    className={adminSelectClass}
-                    value={sql`course_type_filter`}
-                    onInput={(s) =>
-                      s.setScalar("course_type_filter", sql`target_value`)}
-                  >
-                    <Select.Option value="all">All types</Select.Option>
-                    <Select.Option value="course">Courses</Select.Option>
-                    <Select.Option value="program">Programs</Select.Option>
-                  </Select>
-                </FormControl>
-                <Checkbox
-                  className="md:pb-2"
-                  checked={sql`course_show_archived`}
-                  label="Include archived"
-                  onCheckboxChange={(s) =>
-                    s.setScalar("course_show_archived", sql`target_checked`)}
+            );
+          }}
+        >
+          <div>
+            <div className="mb-3 flex flex-col md:flex-row md:items-end gap-3">
+              <FormControl className="flex-1">
+                <FormLabel>Search</FormLabel>
+                <Input
+                  value={sql`course_search`}
+                  placeholder="Search courses and programs"
+                  startIcon="Search"
+                  onInput={(s) =>
+                    s.setScalar("course_search", sql`target_value`)}
                 />
-              </div>
-              <Show
-                when={sql`not exists (select 1 from courses)
+              </FormControl>
+              <FormControl>
+                <FormLabel>Type</FormLabel>
+                <Select
+                  className={adminSelectClass}
+                  value={sql`course_type_filter`}
+                  onInput={(s) =>
+                    s.setScalar("course_type_filter", sql`target_value`)}
+                >
+                  <Select.Option value="all">All types</Select.Option>
+                  <Select.Option value="course">Courses</Select.Option>
+                  <Select.Option value="program">Programs</Select.Option>
+                </Select>
+              </FormControl>
+              <FormControl>
+                <FormLabel>Status</FormLabel>
+                <Select
+                  aria-label="Status"
+                  className={adminSelectClass}
+                  value={sql`course_status_filter`}
+                  onInput={(s) =>
+                    s.setScalar("course_status_filter", sql`target_value`)}
+                >
+                  <Select.Option value="active">Active</Select.Option>
+                  <Select.Option value="archived">Archived</Select.Option>
+                  <Select.Option value="all">All courses</Select.Option>
+                </Select>
+              </FormControl>
+            </div>
+            <Show
+              when={sql`not exists (select 1 from courses)
                   and nullif(trim(course_search), '') is null
-                  and course_type_filter = 'all'`}
-              >
-                <EmptyState
-                  icon="Inventory2"
-                  title="No courses yet"
-                  body="Create your first course, add training items to it, then assign it to an audience."
-                />
-              </Show>
-              <Show
-                when={sql`not exists (select 1 from courses)
+                  and course_type_filter = 'all'
+                  and course_status_filter = 'active'`}
+            >
+              <EmptyState
+                icon="Inventory2"
+                title="No active courses"
+                body="Create a course or choose Archived to restore an existing one."
+              />
+            </Show>
+            <Show
+              when={sql`not exists (select 1 from courses)
                   and (nullif(trim(course_search), '') is not null
-                    or course_type_filter != 'all')`}
-              >
-                <EmptyState
-                  icon="SearchOff"
-                  title="No matches"
-                  body="No course or program matches the current search and filters."
-                />
-              </Show>
+                    or course_type_filter != 'all'
+                    or course_status_filter != 'active')`}
+            >
+              <EmptyState
+                icon="ManageSearch"
+                title="No matches"
+                body="No course or program matches the current search and filters."
+              />
+            </Show>
+            <div
+              className="bg-white border border-divider rounded-md overflow-hidden"
+              dynamicClassNames={[{
+                condition: sql`not exists (select 1 from courses)`,
+                classNames: "hidden",
+              }]}
+            >
               <Each table="courses" recordName="course">
-                <div className="w-full p-4 border border-divider rounded-md mb-2 bg-white hover:border-neutral-300 transition-colors">
+                <div className="w-full p-4 border-b border-divider last:border-b-0 hover:bg-neutral-50 transition-colors">
                   <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                     <button
                       type="button"
@@ -254,7 +263,9 @@ export function TrainingCoursesWorkspace(props: { block: TrainingBlock }) {
                       >
                         Edit
                       </Button>
-                      <Show when={sql`can_assign_training_courses`}>
+                      <Show
+                        when={sql`can_assign_training_courses and course.is_active`}
+                      >
                         <Button
                           size="sm"
                           variant="soft"
@@ -270,79 +281,145 @@ export function TrainingCoursesWorkspace(props: { block: TrainingBlock }) {
                           Assign
                         </Button>
                       </Show>
+                      <Menu>
+                        <Menu.IconButton
+                          icon="MoreVert"
+                          aria-label={sql`'Actions for ' || course.name`}
+                          size="sm"
+                          variant="plain"
+                          color="neutral"
+                        />
+                        <Menu.Content>
+                          {[true, false].map((active) => (
+                            <Show
+                              when={sql`course.is_active = ${
+                                active ? sql`true` : sql`false`
+                              }`}
+                            >
+                              <ActionMenuItem
+                                icon={active ? "Archive" : "Unarchive"}
+                                successMessage={active
+                                  ? "Course archived"
+                                  : "Course restored"}
+                                action={(s) =>
+                                  s.callStoredProcedure(
+                                    "training_set_course_active",
+                                    {
+                                      inputScalars: {
+                                        p_course_id: sql`course.id`,
+                                        p_is_active: active
+                                          ? sql`false`
+                                          : sql`true`,
+                                      },
+                                    },
+                                  )}
+                              >
+                                {active ? "Archive course" : "Restore course"}
+                              </ActionMenuItem>
+                            </Show>
+                          ))}
+                          <ActionMenuItem
+                            icon="DeleteOutline"
+                            successMessage="Course deleted"
+                            confirm={{
+                              confirmText: "Delete course",
+                              prepare: (s) =>
+                                s.defScalar(
+                                  "course_delete_blocker",
+                                  courseDeletionBlockerSql(
+                                    props.block.opts,
+                                    sql`course.id`,
+                                  ),
+                                ),
+                              disabled: sql`course_delete_blocker is not null`,
+                              description: (
+                                <Typography>
+                                  {sql`coalesce(course_delete_blocker,
+                                    'Permanently delete "' || course.name || '" and all its versions, steps, and assignment rules? Supporting files and assessments will be kept. This cannot be undone.')`}
+                                </Typography>
+                              ),
+                            }}
+                            action={(s) =>
+                              s.callStoredProcedure("training_delete_course", {
+                                inputScalars: { p_course_id: sql`course.id` },
+                              })}
+                          >
+                            Delete course
+                          </ActionMenuItem>
+                        </Menu.Content>
+                      </Menu>
                     </div>
                   </div>
                 </div>
               </Each>
             </div>
-          </Data>
-          <ModalDialog bindScalar="add_course_open" maxWidth="lg">
-            <div className="flex items-start justify-between gap-3 mb-4">
-              <div>
-                <Typography level="title-lg" startIcon="Inventory2">
-                  Add Course
-                </Typography>
-                <Typography level="body-sm" className="text-neutral-600 mt-1">
-                  Name the course — you will add its steps right after. It will
-                  appear as a program when it contains nested courses.
-                </Typography>
-              </div>
-              <IconButton
-                icon="Close"
-                aria-label="Close"
-                variant="plain"
-                color="neutral"
-                onClick={(s) => s.setScalar("add_course_open", sql`false`)}
-              />
+          </div>
+        </Data>
+        <ModalDialog bindScalar="add_course_open" maxWidth="lg">
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div>
+              <Typography level="title-lg" startIcon="Inventory2">
+                Add Course
+              </Typography>
+              <Typography level="body-sm" className="text-neutral-600 mt-1">
+                Name the course — you will add its steps right after. It will
+                appear as a program when it contains nested courses.
+              </Typography>
             </div>
-            <Form
-              defaultFieldComponent={FieldFormControl}
-              beforeTransactionCommit={(s) => {
-                s.defScalar(
-                  "new_course_id",
-                  sql`last_record_id(db.training_courses)`,
-                );
-              }}
-              afterTransactionCommit={(s) => {
-                s.navigate(adminCourseHref(props.block, sql`new_course_id`));
-              }}
-              afterSubmitClientSuccess={(s, ctx) => {
-                ctx.reset(s);
-                s.setScalar("add_course_open", sql`false`);
-              }}
-            >
-              <Form.Insert table="training_courses">
-                <div className="grid gap-3">
-                  <FormFieldWithLabel
-                    field="name"
-                    label="Name"
-                    placeholder="Shop Onboarding"
-                  />
-                  <FormFieldWithLabel
-                    field="description"
-                    label="Purpose"
-                    minRows={2}
-                    placeholder="Who receives this course and when"
-                  />
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      variant="plain"
-                      color="neutral"
-                      onClick={(s) =>
-                        s.setScalar("add_course_open", sql`false`)}
-                    >
-                      Cancel
-                    </Button>
-                    <Form.SubmitButton startIcon="Add">
-                      Create and add steps
-                    </Form.SubmitButton>
-                  </div>
+            <IconButton
+              icon="Close"
+              aria-label="Close"
+              variant="plain"
+              color="neutral"
+              onClick={(s) => s.setScalar("add_course_open", sql`false`)}
+            />
+          </div>
+          <Form
+            defaultFieldComponent={FieldFormControl}
+            beforeTransactionCommit={(s) => {
+              s.defScalar(
+                "new_course_id",
+                sql`last_record_id(db.training_courses)`,
+              );
+            }}
+            afterTransactionCommit={(s) => {
+              s.navigate(adminCourseHref(props.block, sql`new_course_id`));
+            }}
+            afterSubmitClientSuccess={(s, ctx) => {
+              ctx.reset(s);
+              s.setScalar("add_course_open", sql`false`);
+            }}
+          >
+            <Form.Insert table="training_courses">
+              <div className="grid gap-3">
+                <FormFieldWithLabel
+                  field="name"
+                  label="Name"
+                  placeholder="Shop Onboarding"
+                />
+                <FormFieldWithLabel
+                  field="description"
+                  label="Purpose"
+                  minRows={2}
+                  placeholder="Who receives this course and when"
+                />
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="plain"
+                    color="neutral"
+                    onClick={(s) => s.setScalar("add_course_open", sql`false`)}
+                  >
+                    Cancel
+                  </Button>
+                  <Form.SubmitButton startIcon="Add">
+                    Create and add steps
+                  </Form.SubmitButton>
                 </div>
-              </Form.Insert>
-            </Form>
-          </ModalDialog>
-        </CardContent>
-      </Card>
-    </div>
+              </div>
+            </Form.Insert>
+          </Form>
+        </ModalDialog>
+      </div>
+    </PageShell>
   );
 }

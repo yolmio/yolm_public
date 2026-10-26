@@ -131,10 +131,12 @@ the System 5 import-history example.
 **Keep the original backup.** Removed history and deleted data cannot be
 recovered from the compacted output. In Forge, validate the transform against
 the selected source database, then use Studio's Run Transform action with the
-transform `name` and `sourceDatabaseId`. The action creates and returns a
-separate output database; it does not mutate the source. Query the returned
-database with `queryDatabase` and inspect the transform run record before using
-the output. Compare row counts and hashes for compaction or identity-preserving
+transform `name` and `sourceDatabaseId`. `validate()` and Run Transform generate
+transforms with every named dev database bound by name; see
+[Running Transforms in Forge](#running-transforms-in-forge). The action creates
+and returns a separate output database; it does not mutate the source. Query the
+returned database with `queryDatabase` and inspect the transform run record
+before using the output. Compare row counts and hashes for compaction or identity-preserving
 transforms. For replay transforms that intentionally map values, verify the
 expected mappings, invariants, and representative output rows instead.
 
@@ -170,6 +172,55 @@ deletes, restores, and SKIPs (which preserve IDs for omitted records). For custo
 changes within the existing schema, use `sameSchema` with the appropriate table
 handlers. For space cleanup alone, prefer `compact` instead of writing handlers.
 
+`transformTableProcess` and `transformTableWithIdMapping` read the source
+table's column types from the dev database. A field without a custom mapping
+has its source enum value converted to the target column's enum by name, as
+automatic replay does. A custom mapping function (in `mappings` or
+`defaultTransform`) receives the raw `op.<table>__<field>` value with its
+source type, so it can map a value the target enum no longer has, and must
+return a value of the target column's type:
+
+```typescript
+mappings: {
+  // Source enum: NEW, done. Target enum order_status: pending, done.
+  status: (value) =>
+    sql`case cast(${value} as string) when 'NEW' then 'pending'
+      else cast(${value} as string) end::enums.order_status`,
+},
+```
+
+Use `opFieldValue(table, field, ty, targetEnum)` from `std/transform_helpers`
+for the automatic conversion in a hand-written handler.
+
+## Automatic Replay
+
+A `sameSchema` or `newSchema` transform covers every target table, not only the
+tables listed in `tables`:
+
+- A listed table, by source table name, runs only its `process` handler.
+- An unlisted table is copied without replay when its source and target
+  layouts are passthrough-compatible: the same primary key field and the same
+  fields, by name or `renameFrom`.
+- Other unlisted tables are replayed automatically. Inserts, updates, deletes,
+  restores, and skips are applied in order, and record IDs are preserved. Each
+  target field is copied from its source field, matched by name or
+  `renameFrom`, when both have the same type. Enum values are converted to the
+  target enum by name. Target fields without a same-typed source field get
+  their defaults.
+- A table is not replayed automatically when a required target field without a
+  default has no same-typed source field, or when the target table has a
+  `Decimal` field. Give such a table an explicit handler.
+
+Set `disableAutomaticReplay: true` to replay only the listed tables. Unlisted
+schema-incompatible tables are then not replayed. Do not set it on `compact`.
+
+A replay transform must end up processing at least one table. A `sameSchema`
+transform with `tables: []` would be a no-op, because source and target share
+one schema and every table passes through unchanged, so it fails to compile.
+Use [`compact`](#compact) to reclaim space, or list the tables whose values
+should change. A `newSchema` transform with `tables: []` compiles only when at
+least one table is replayed automatically.
+
 ## The Operation Record
 
 Within a table's `process` procedure, the `op` record contains:
@@ -179,7 +230,7 @@ Within a table's `process` procedure, the `op` record contains:
 | `op.kind` | Operation type: `'insert'`, `'update'`, `'delete'`, `'skip'`, or `'restore'` |
 | `op.record_id` | ID of the record being modified |
 | `op.skip_count` | Number of skipped operations represented by a `skip` op |
-| `op.<table>__<field>` | Field value from the old schema |
+| `op.<table>__<field>` | Field value from the old schema, with the source column's type. In `newSchema`, enum fields use the source database's copy of the enum; cast through `string` to the target enum (see `opFieldValue`) |
 | `op.<table>__<field>__set` | Boolean: was this field updated? (for updates) |
 | `op.tx_id` | Transaction ID |
 | `op.tx_timestamp` | Transaction timestamp |
@@ -250,6 +301,8 @@ const targetTables = getSourceTables(currentSystem());
 
 Use these to avoid stale field lists and handle optional source tables.
 Transform procedures still read source values through `op` and explicit SQL.
+A `devDb(name)` that is not bound during generation has no tables; see
+[Running Transforms in Forge](#running-transforms-in-forge).
 
 ## Adding a New Field
 
@@ -404,8 +457,9 @@ transform when values are removed, merged, or require a custom semantic mapping:
   table: "orders",
   process: (s) => {
     // Create a mapping expression
+    // In newSchema, op.orders__status uses the source enum; compare as string
     s.defScalar("new_status", sql`
-      case op.orders__status
+      case cast(op.orders__status as string)
         when 'pending' then 'created'
         when 'processing' then 'in_progress'
         when 'completed' then 'done'
@@ -680,6 +734,23 @@ Key points:
   diffs, foreign-key orphans, decryptability of migrated secrets, and rendering
   of migrated rich text.
 
+## Running Transforms in Forge
+
+Generation resolves `devDb(name)` and `sourceDatabase` through a name-to-UUID
+binding of dev databases. Studio's Run Transform action and `validate()` bind
+every named dev database by name. The Forge MCP `runTransform` tool binds only
+the selected source under its registered name; optional MCP `sources` entries
+add or override bindings; see
+[Forge development databases](../ai/forge_databases.md#database-bindings).
+
+An unbound name has no schema. `getSourceTables(devDb(name))` returns `[]` and
+logs a generation warning, so a transform that adds tables only when source
+metadata exists generates nothing for them. Check version logs for the warning.
+
+`validate()` checks transforms and pipelines together with the serving system,
+but it does not run a transform. Run it against a dev database and inspect the
+output before deploying.
+
 ## How Transforms Work
 
 1. **Setup Phase**: Executes setup statements once
@@ -693,7 +764,8 @@ Key points:
 ## Best Practices
 
 1. **Test thoroughly**: Run transforms on a copy of production data first
-2. **Handle all operation types**: Always handle insert, update, and delete
+2. **Handle all operation types**: Always handle insert, update, and delete,
+   plus `skip` and `restore` when replaying table history
 3. **Preserve record identity**: Let transform replay assign `op.record_id`;
    do not list primary key fields in normal inserts
 4. **Handle NULLs**: Use `coalesce` for fields that might be null
@@ -710,22 +782,16 @@ Key points:
 system.addTransform({
   name: "v1_to_v2",
   kind: { type: "newSchema", sourceDatabase: "v1_db" },
-  setup: (s) => {
-    s.startTransaction();
-    s.modify(sql`insert into db.migrations (name, started_at) values ('v1_to_v2', current_timestamp)`);
-    s.commitTransaction();
-  },
   tables: [
     {
       table: "users",
       process: (s) => {
         s.if(sql`op.kind = 'insert'`, (s) => {
           s.modify(sql`
-            insert into db.users (username, email, created_at)
+            insert into db.users (username, email)
             values (
               lower(trim(op.users__name)),
-              lower(trim(op.users__email)),
-              coalesce(op.tx_timestamp, current_timestamp)
+              lower(trim(op.users__email))
             )
           `);
         });
@@ -735,8 +801,7 @@ system.addTransform({
             update db.users
             set
               username = case when op.users__name__set then lower(trim(op.users__name)) else username end,
-              email = case when op.users__email__set then lower(trim(op.users__email)) else email end,
-              updated_at = op.tx_timestamp
+              email = case when op.users__email__set then lower(trim(op.users__email)) else email end
             where id = op.record_id
           `);
         });
@@ -744,17 +809,21 @@ system.addTransform({
         s.if(sql`op.kind = 'delete'`, (s) => {
           s.modify(sql`delete from db.users where id = op.record_id`);
         });
+
+        s.if(sql`op.kind = 'skip'`, (s) => {
+          s.encodeSkipOp({ table: "users", count: sql`op.skip_count` });
+        });
+
+        s.if(sql`op.kind = 'restore'`, (s) => {
+          s.restore("users", sql`select op.record_id`);
+        });
       },
     },
   ],
-  finalize: (s) => {
-    s.startTransaction();
-    s.modify(sql`
-      update db.migrations
-      set completed_at = current_timestamp
-      where name = 'v1_to_v2'
-    `);
-    s.commitTransaction();
-  },
 });
 ```
+
+Do not add `created_at`, `updated_at`, or a migrations log table to record
+when rows changed or when a transform ran. Read creation and modification
+times with [transaction queries](../sql/transaction_queries.md), and use the
+transform run record for when the transform ran.

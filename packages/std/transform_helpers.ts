@@ -11,7 +11,13 @@
  */
 
 import { type Sql, sql } from "./sql_utils";
-import { devDb, getSourceColumnNames, type SchemaSource } from "./schema_utils";
+import { system } from "./system";
+import {
+  devDb,
+  getSourceTable,
+  type SchemaSource,
+  type SourceColumn,
+} from "./schema_utils";
 import {
   buildFieldMappings,
   type FieldMapConfig,
@@ -38,6 +44,62 @@ export function opField(table: string, field: string): Sql {
 }
 
 /**
+ * Generate an op field value ready to write into a target column.
+ *
+ * Op fields carry their source column types. A `newSchema` source has its own
+ * copy of each enum, so an enum value is converted to the target enum by name,
+ * as automatic replay does: `cast(cast(value as string) as enums.<target>)`.
+ * The conversion also holds for a `sameSchema` source. Other types, including
+ * `Json` and `Ordering`, are returned unchanged.
+ *
+ * @param table - Source table name
+ * @param field - Source field name
+ * @param ty - Source column type name from {@link getSourceTable}
+ * @param targetEnum - Enum of the target column, when it is an enum
+ */
+export function opFieldValue(
+  table: string,
+  field: string,
+  ty?: string,
+  targetEnum?: string,
+): Sql {
+  const value = opField(table, field);
+  return ty === "Enum" && targetEnum
+    ? sql`cast(cast(${value} as string) as ${sql.ref("enums", targetEnum)})`
+    : value;
+}
+
+function sourceColumnTypes(
+  columns: readonly SourceColumn[] | undefined,
+): Map<string, string> {
+  return new Map(columns?.map((column) => [column.name, column.ty]));
+}
+
+function targetEnumName(table: string, field: string): string | undefined {
+  const target = system.db.tables[table]?.fields[field];
+  return target?.type === "Enum" ? target.enum : undefined;
+}
+
+// A custom mapping receives the raw, source-typed op value and must produce the
+// target type, so it can map an enum value the target enum no longer has. Only
+// a field without a custom mapping gets the automatic enum conversion.
+function mappedOpFieldValue(
+  table: string,
+  mapping: FieldMapping,
+  columnTypes: Map<string, string>,
+): Sql {
+  if (mapping.transform) {
+    return mapping.transform(opField(table, mapping.source!));
+  }
+  return opFieldValue(
+    table,
+    mapping.source!,
+    columnTypes.get(mapping.source!),
+    targetEnumName(table, mapping.target!),
+  );
+}
+
+/**
  * Generate a reference to an op field's "set" flag (for updates).
  *
  * @param table - Source table name
@@ -57,19 +119,22 @@ export function opFieldSet(table: string, field: string): Sql {
  *
  * @param tableName - Target table name
  * @param mappings - Field mappings (from buildFieldMappings)
+ * @param sourceColumns - Source columns; enum columns without a custom mapping
+ *   are cast to target enums
  * @returns SQL INSERT statement
  */
 export function transformInsertSql(
   tableName: string,
   mappings: FieldMapping[],
+  sourceColumns?: readonly SourceColumn[],
 ): Sql {
   const activeMappings = mappings.filter((m) => m.target !== null);
+  const columnTypes = sourceColumnTypes(sourceColumns);
 
   const targetFields = activeMappings.map((m) => m.target!);
   const sourceValues = activeMappings.map((m) => {
     if (m.insertExpr) return m.insertExpr;
-    const value = opField(tableName, m.source!);
-    return m.transform ? m.transform(value) : value;
+    return mappedOpFieldValue(tableName, m, columnTypes);
   });
 
   const fieldsStr = targetFields.join(", ");
@@ -88,15 +153,19 @@ export function transformInsertSql(
  *
  * @param tableName - Target table name
  * @param mappings - Field mappings (from buildFieldMappings)
+ * @param sourceColumns - Source columns; enum columns without a custom mapping
+ *   are cast to target enums
  * @returns SQL UPDATE statement
  */
 export function transformUpdateSql(
   tableName: string,
   mappings: FieldMapping[],
+  sourceColumns?: readonly SourceColumn[],
 ): Sql {
   const activeMappings = mappings.filter(
     (m) => m.target !== null && m.target !== "id",
   );
+  const columnTypes = sourceColumnTypes(sourceColumns);
 
   const setClauses: string[] = [];
   for (const m of activeMappings) {
@@ -111,8 +180,7 @@ export function transformUpdateSql(
       continue;
     }
 
-    const value = opField(tableName, m.source);
-    const transformed = m.transform ? m.transform(value) : value;
+    const transformed = mappedOpFieldValue(tableName, m, columnTypes);
     const setCheck = opFieldSet(tableName, m.source);
     setClauses.push(
       `${m.target} = case when ${setCheck.toSQL()} then ${transformed.toSQL()} else ${m.target} end`,
@@ -332,6 +400,15 @@ export interface TransformTableConfig extends FieldMapConfig {
   table: string;
 }
 
+function transformSourceColumns(
+  config: TransformTableConfig,
+): SourceColumn[] {
+  const source: SchemaSource = devDb(config.sourceDb);
+  return getSourceTable(source, config.table)?.columns.filter((column) =>
+    !column.name.startsWith("__orphan_")
+  ) ?? [];
+}
+
 /**
  * Generate a complete transform process function for a table.
  *
@@ -364,23 +441,25 @@ export interface TransformTableConfig extends FieldMapConfig {
 export function transformTableProcess(
   config: TransformTableConfig,
 ): TransformStatementsOrFn {
-  const source: SchemaSource = devDb(config.sourceDb);
-  const columnNames = getSourceColumnNames(source, config.table);
-  if (columnNames.length === 0) {
+  const columns = transformSourceColumns(config);
+  if (columns.length === 0) {
     throw new Error(
       `Table ${config.table} not found in dev database ${config.sourceDb}, or has no columns`,
     );
   }
 
-  const mappings = buildFieldMappings(columnNames, config);
+  const mappings = buildFieldMappings(
+    columns.map((column) => column.name),
+    config,
+  );
 
   return (s) => {
     s.if(sql`op.kind = 'insert'`, (s) => {
-      s.modify(transformInsertSql(config.table, mappings));
+      s.modify(transformInsertSql(config.table, mappings, columns));
     });
 
     s.if(sql`op.kind = 'update'`, (s) => {
-      s.modify(transformUpdateSql(config.table, mappings));
+      s.modify(transformUpdateSql(config.table, mappings, columns));
     });
 
     s.if(sql`op.kind = 'delete'`, (s) => {
@@ -433,22 +512,24 @@ export interface TransformTableWithIdMappingConfig
 export function transformTableWithIdMapping(
   config: TransformTableWithIdMappingConfig,
 ): TransformStatementsOrFn {
-  const source: SchemaSource = devDb(config.sourceDb);
-  const columnNames = getSourceColumnNames(source, config.table);
+  const columns = transformSourceColumns(config);
 
-  if (columnNames.length === 0) {
+  if (columns.length === 0) {
     throw new Error(
       `Table ${config.table} not found in dev database ${config.sourceDb}`,
     );
   }
 
-  const mappings = buildFieldMappings(columnNames, config);
+  const mappings = buildFieldMappings(
+    columns.map((column) => column.name),
+    config,
+  );
   const newIdScalar = config.newIdScalar ?? "new_id";
 
   return (s) => {
     s.if(sql`op.kind = 'insert'`, (s) => {
       // Insert the record
-      s.modify(transformInsertSql(config.table, mappings));
+      s.modify(transformInsertSql(config.table, mappings, columns));
 
       // Store the new ID (use lastval() or currval() depending on your setup)
       s.defScalar(newIdScalar, sql`op.record_id`);
@@ -461,7 +542,7 @@ export function transformTableWithIdMapping(
     });
 
     s.if(sql`op.kind = 'update'`, (s) => {
-      s.modify(transformUpdateSql(config.table, mappings));
+      s.modify(transformUpdateSql(config.table, mappings, columns));
     });
 
     s.if(sql`op.kind = 'delete'`, (s) => {

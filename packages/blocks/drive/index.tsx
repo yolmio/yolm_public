@@ -35,6 +35,8 @@ import type {
   UpdateFileItemMetadataOpts,
 } from "./types";
 import { fileItemSubtreeIds } from "./hierarchy";
+import { fileViewerStateSql } from "./viewer_state_sql";
+import { registerDriveWorkspaceProcedures } from "./workspace";
 
 export type {
   CreateFileItemOpts,
@@ -91,6 +93,7 @@ export {
   P7mViewerExtension,
   SpreadsheetViewerExtension,
   TiffViewerExtension,
+  VideoViewerExtension,
 } from "./preview";
 export type { DrivePreviewExtensionOpts } from "./preview.tsx";
 export { CadViewerExtension } from "./cad_viewer";
@@ -668,20 +671,65 @@ export class DriveBlock implements Block, DriveBlockContract {
         });
         const space = sql`files_runtime_access_space`;
         const user = sql`files_access_sys_user_id`;
-        s.return(sql`
-          exists (
-            select 1
-            from db.file_spaces files_runtime_access_space
-            where files_runtime_access_space.id = files_access_space_id
-              and case files_access_verb
-                when 'read'
-                  then ${this.accessForSpaceRecordSql(space, user, "read")}
-                when 'write'
-                  then ${this.accessForSpaceRecordSql(space, user, "write")}
-                else ${this.accessForSpaceRecordSql(space, user, "manage")}
-              end
-          )
-        `);
+        // Resolve the unique space/binding before evaluating its policy. Keeping
+        // policies in a broad scan predicate evaluates them for unrelated rows.
+        s.defRecord(
+          "files_runtime_access_space",
+          sql`
+          select * from db.file_spaces where id = files_access_space_id
+        `,
+        );
+        s.if(sql`${space}.id is null`, (s) => s.return(sql`false`));
+        for (const type of this.spaceTypes) {
+          s.if(
+            sql`cast(${space}.space_type as string) = ${sql.lit(type.name)}`,
+            (s) => {
+              const bindingName = `files_runtime_access_${type.name}_binding`;
+              const binding = type.tableName ? sql.ref(bindingName) : space;
+              if (type.tableName) {
+                s.defRecord(
+                  bindingName,
+                  sql`
+                select * from db.${sql.ref(type.tableName)}
+                where file_space_id = files_access_space_id
+              `,
+                );
+                s.if(
+                  sql`${binding}.file_space_id is null`,
+                  (s) => s.return(sql`false`),
+                );
+              }
+              for (const verb of ["read", "write"] as const) {
+                s.if(sql`files_access_verb = ${sql.lit(verb)}`, (s) => {
+                  s.return(
+                    sql`coalesce(${
+                      this.accessForTypeRecordSql(
+                        type,
+                        space,
+                        binding,
+                        user,
+                        verb,
+                      )
+                    }, false)`,
+                  );
+                });
+              }
+              // Preserve the existing fallback for null and unrecognized verbs.
+              s.return(
+                sql`coalesce(${
+                  this.accessForTypeRecordSql(
+                    type,
+                    space,
+                    binding,
+                    user,
+                    "manage",
+                  )
+                }, false)`,
+              );
+            },
+          );
+        }
+        s.return(sql`false`);
       },
     });
     system.db.scalarFunction({
@@ -707,26 +755,38 @@ export class DriveBlock implements Block, DriveBlockContract {
           expr: sql`input.sys_user_id`,
           allowNoRead: true,
         });
-        s.return(sql`
-          exists (
-            select 1
-            from db.file_items files_read_item
-            join db.file_spaces files_read_space
-              on files_read_space.id = files_read_item.file_space_id
-            join db.file_versions files_read_version
-              on files_read_version.id = files_read_version_id
-              and files_read_version.file_item_id = files_read_item.id
-            where files_read_item.id = files_read_item_id
-              and ${
+        // Materialize the selected records before authorization, so policy
+        // subqueries cannot be evaluated against unrelated items or spaces.
+        s.defRecord(
+          "files_read_item",
+          sql`
+          select * from db.file_items where id = files_read_item_id
+        `,
+        );
+        s.if(sql`files_read_item.id is null`, (s) => s.return(sql`false`));
+        s.defRecord(
+          "files_read_version",
+          sql`
+          select * from db.file_versions
+          where id = files_read_version_id and file_item_id = files_read_item.id
+        `,
+        );
+        s.if(sql`files_read_version.id is null`, (s) => s.return(sql`false`));
+        s.defRecord(
+          "files_read_space",
+          sql`
+          select * from db.file_spaces where id = files_read_item.file_space_id
+        `,
+        );
+        s.if(sql`files_read_space.id is null`, (s) => s.return(sql`false`));
+        s.return(sql`coalesce(${
           this.canReadVersionPredicate({
             spaceRecord: sql`files_read_space`,
             itemRecord: sql`files_read_item`,
             versionRecord: sql`files_read_version`,
             sysUserId: sql`files_read_sys_user_id`,
           }, { inlineSpaceAccess: true })
-        }
-          )
-        `);
+        }, false)`);
       },
     });
     system.db.scalarFunction({
@@ -879,14 +939,15 @@ export class DriveBlock implements Block, DriveBlockContract {
     this.registerMutationProcedures();
     this.registerWorkspaceStateProcedure();
     this.registerViewerStateProcedure();
+    registerDriveWorkspaceProcedures();
     for (const extension of this.extensions) {
       extension.registerStoredProcedures?.(this);
     }
   }
 
   private registerViewerStateProcedure() {
-    // Every viewer resolves the same authorized version metadata. Keep its
-    // permission query out of each route's SSR and state-update functions.
+    // Keep the stored-procedure API for callers that need it. The page uses
+    // the same SQL directly so a read-only render need not enter a procedure.
     system.storedProcedure({
       name: "files_viewer_state",
       transaction: "caller",
@@ -914,39 +975,15 @@ export class DriveBlock implements Block, DriveBlockContract {
         ],
       }],
       procedure: (s) => {
-        s.modify(sql`insert into file_viewer
-            select
-              item.id as file_item_id,
-              item.file_space_id,
-              case when p_use_current_version then item.name
-                else version.file_name end as name,
-              version.id as file_version_id,
-              version.version_number,
-              space.space_type,
-              version.content_type,
-              version.byte_length,
-              blob.blob_hash
-            from db.file_items item
-            join db.file_spaces space on space.id = item.file_space_id
-            join db.file_versions version
-              on version.file_item_id = item.id
-              and version.id = case when p_use_current_version then item.current_file_version_id
-                else p_file_version_id end
-            left join db.file_version_blobs blob
-              on blob.file_version_id = version.id
-            where item.id = p_file_item_id
-              and item.item_kind = 'file'
-              and (item.trashed_at is null
-                or (p_retained_version and not p_use_current_version))
-              and ${
-          this.canReadVersionSql({
-            spaceRecord: sql`space`,
-            itemRecord: sql`item`,
-            versionRecord: sql`version`,
-            sysUserId: sql`current_user`,
-          })
-        }
-          `);
+        s.modify(sql`insert into file_viewer ${
+          fileViewerStateSql(
+            this,
+            sql`p_file_item_id`,
+            sql`p_file_version_id`,
+            sql`p_use_current_version`,
+            sql`p_retained_version`,
+          )
+        }`);
       },
     });
   }
@@ -1062,7 +1099,15 @@ export class DriveBlock implements Block, DriveBlockContract {
         { name: "p_show_trash", type: "Bool" },
         { name: "p_selected_item_id", type: "BigInt" },
         { name: "p_custom_ordering", type: "Bool" },
+        { name: "p_published_only", type: "Bool" },
       ],
+      inputTables: [{
+        name: "p_published_versions",
+        fields: [
+          { name: "file_item_id", type: "BigInt" },
+          { name: "file_version_id", type: "BigInt" },
+        ],
+      }],
       outputRecords: [
         {
           name: "files_selected_item",
@@ -1108,6 +1153,7 @@ export class DriveBlock implements Block, DriveBlockContract {
             { name: "current_file_version_id", type: "BigInt" },
             { name: "version_number", type: "Uint" },
             { name: "content_type", type: { type: "String", maxLength: 255 } },
+            { name: "has_blob", type: "Bool" },
             { name: "byte_length", type: "BigUint" },
             { name: "modified_at", type: "TimestampUtc" },
             { name: "modified_by", type: { type: "String", maxLength: 500 } },
@@ -1166,9 +1212,14 @@ export class DriveBlock implements Block, DriveBlockContract {
               and descendant.item_kind <> 'folder'
             join db.file_spaces descendant_space
               on descendant_space.id = descendant.file_space_id
+            left join p_published_versions publication
+              on publication.file_item_id = descendant.id
             left join db.file_versions descendant_version
-              on descendant_version.id = descendant.current_file_version_id
-            where descendant.current_file_version_id is null
+              on descendant_version.id = case when p_published_only
+                then publication.file_version_id else descendant.current_file_version_id end
+              and descendant_version.file_item_id = descendant.id
+            where (not p_published_only or descendant_version.id is not null)
+              and (descendant_version.id is null
               or ${
             this.canReadVersionPredicate({
               spaceRecord: sql`descendant_space`,
@@ -1176,7 +1227,7 @@ export class DriveBlock implements Block, DriveBlockContract {
               versionRecord: sql`descendant_version`,
               sysUserId: sql`current_user`,
             }, { skipSpaceAccess: true })
-          }
+          })
             group by subtree.root_id
           `,
         );
@@ -1189,9 +1240,10 @@ export class DriveBlock implements Block, DriveBlockContract {
             item.description,
             item.sort_order,
             item.trashed_at,
-            item.current_file_version_id,
+            version.id as current_file_version_id,
             version.version_number,
             version.content_type,
+            version_blob.id is not null as has_blob,
             version.byte_length,
             case
               when item.item_kind = 'folder' then folder_totals.modified_at
@@ -1232,16 +1284,22 @@ export class DriveBlock implements Block, DriveBlockContract {
           from db.file_items item
           join db.file_spaces item_space
             on item_space.id = item.file_space_id
+          left join p_published_versions publication on publication.file_item_id = item.id
           left join db.file_versions version
-            on version.id = item.current_file_version_id
+            on version.id = case when p_published_only
+              then publication.file_version_id else item.current_file_version_id end
+            and version.file_item_id = item.id
+          left join db.file_version_blobs version_blob
+            on version_blob.file_version_id = version.id
           left join db.sys_users modifier
             on modifier.id = version.created_by_user_id
           left join files_folder_totals folder_totals
             on folder_totals.folder_id = item.id
           where item.file_space_id = p_space_id
+            and (not p_published_only or item.item_kind = 'folder' or version.id is not null)
             and (
               item.item_kind = 'folder'
-              or item.current_file_version_id is null
+              or version.id is null
               or ${
           this.canReadVersionPredicate({
             spaceRecord: sql`item_space`,
@@ -1256,6 +1314,15 @@ export class DriveBlock implements Block, DriveBlockContract {
                 when trim(p_search) <> ''
                   then item.name like
                     ('%' || trim(p_search) || '%') collate nocase
+                    or (p_published_only and (
+                      item.description like ('%' || trim(p_search) || '%') collate nocase
+                      or exists (
+                        select 1 from db.file_tag_assignments search_assignment
+                        join db.file_tags search_tag on search_tag.id = search_assignment.file_tag_id
+                        where search_assignment.file_item_id = item.id
+                          and search_tag.name like ('%' || trim(p_search) || '%') collate nocase
+                      )
+                    ))
                 else (
                   item.parent_file_item_id = p_folder_id
                   or (
@@ -1288,7 +1355,7 @@ export class DriveBlock implements Block, DriveBlockContract {
             item.name,
             item.description,
             item.sort_order,
-            item.current_file_version_id,
+            readable_item.current_file_version_id,
             item.trashed_at,
             item.trashed_by_user_id,
             version.version_number,
@@ -1300,7 +1367,7 @@ export class DriveBlock implements Block, DriveBlockContract {
           from db.file_items item
           join files_items readable_item on readable_item.id = item.id
           left join db.file_versions version
-            on version.id = item.current_file_version_id
+            on version.id = readable_item.current_file_version_id
           left join db.sys_users creator
             on creator.id = version.created_by_user_id
           where item.id = p_selected_item_id
@@ -1332,6 +1399,7 @@ export class DriveBlock implements Block, DriveBlockContract {
       inputScalars: [
         { name: "p_space_id", type: "BigInt" },
         { name: "p_selected_item_id", type: "BigInt" },
+        { name: "p_version_id", type: "BigInt" },
       ],
       outputScalars: [
         { name: "files_can_create_version", type: "Bool" },
@@ -1398,6 +1466,7 @@ export class DriveBlock implements Block, DriveBlockContract {
           left join db.file_version_blobs blob
             on blob.file_version_id = version.id
           where version.file_item_id = p_selected_item_id
+            and (p_version_id is null or version.id = p_version_id)
             and version_item.file_space_id = p_space_id
             and ${
           this.canReadVersionPredicate({
@@ -1951,6 +2020,8 @@ export class DriveBlock implements Block, DriveBlockContract {
           sql`bytes.from_hex(cast(null as string))`,
         p_note: opts.note ?? sql`cast(null as string)`,
         p_sys_user_id: opts.sysUserId,
+        p_language: opts.language ?? sql`cast(null as string)`,
+        p_external_url: opts.externalUrl ?? sql`cast(null as string)`,
       },
       outputScalars: {
         files_appended_version_id: opts.intoVersion ??
@@ -2117,6 +2188,73 @@ export class DriveBlock implements Block, DriveBlockContract {
     `;
   }
 
+  /** Shared by upload preflight and the authoritative version writer. */
+  versionUploadMetadataErrorSql(opts: {
+    itemId?: Sql;
+    spaceId?: Sql;
+    fileName: Sql;
+    contentType: Sql;
+    externalUrl?: Sql;
+  }): Sql {
+    const spaceId = opts.spaceId ??
+      (opts.itemId
+        ? sql`(select file_space_id from db.file_items where id = ${opts.itemId})`
+        : undefined);
+    if (!spaceId) {
+      throw new Error(
+        "Upload metadata validation requires a space or file item.",
+      );
+    }
+    const nextType =
+      sql`lower(trim(coalesce(nullif(trim(${opts.contentType}), ''), 'application/octet-stream')))`;
+    const compatible = opts.itemId
+      ? this.extensions.flatMap((extension) =>
+        extension.canChangeVersionContentType
+          ? [extension.canChangeVersionContentType(
+            sql`(select file_space_id from db.file_items where id = ${opts.itemId})`,
+            sql`lower(trim(first_version.content_type))`,
+            nextType,
+          )]
+          : []
+      )
+      : [];
+    const extensionErrors = this.extensions.flatMap((extension) =>
+      extension.versionUploadMetadataError
+        ? [
+          sql`case when ${
+            this.extensionEnabledSql(spaceId, extension.name)
+          } then ${
+            extension.versionUploadMetadataError({
+              spaceId,
+              contentType: nextType,
+              externalUrl: opts.externalUrl ?? sql.null,
+            })
+          } end`,
+        ]
+        : []
+    );
+    return sql`case
+      when not (${this.validItemNameSql(opts.fileName)})
+        then 'Enter a valid file or folder name.'
+      when ${nextType} in ('application/vnd.yolm.external-link', 'application/vnd.yolm.video-link')
+        and ${opts.externalUrl ?? sql.null} is null
+        then 'Use the link editor to add a video link.'
+      ${
+      opts.itemId
+        ? sql`when exists (
+        select 1 from db.file_versions first_version
+        where first_version.file_item_id = ${opts.itemId}
+          and first_version.version_number = 1
+          and lower(trim(first_version.content_type)) <>
+            ${nextType}
+          and not (${compatible.length ? sql.or(compatible) : sql.false})
+      ) then 'A file''s content type cannot change between versions.'`
+        : sql``
+    }
+    else ${extensionErrors.length ? sql.coalesce(...extensionErrors) : sql.null}
+    end`;
+  }
+
   private assertParent<T extends StatementsBase<any>>(
     s: T,
     spaceId: Sql,
@@ -2253,6 +2391,8 @@ export class DriveBlock implements Block, DriveBlockContract {
         { name: "p_blob_hash", type: { type: "Bytes", maxLength: 32 } },
         { name: "p_note", type: { type: "String", maxLength: 2000 } },
         { name: "p_sys_user_id", type: "BigInt" },
+        { name: "p_language", type: { type: "String", maxLength: 20 } },
+        { name: "p_external_url", type: { type: "String", maxLength: 2000 } },
       ],
       outputScalars: [
         { name: "files_appended_version_id", type: "BigInt" },
@@ -2268,16 +2408,29 @@ export class DriveBlock implements Block, DriveBlockContract {
             ), 0) + 1
           `,
         });
+        s.defScalar(
+          "files_version_metadata_error",
+          this.versionUploadMetadataErrorSql({
+            itemId: sql`p_item_id`,
+            fileName: sql`p_file_name`,
+            contentType: sql`p_content_type`,
+            externalUrl: sql`p_external_url`,
+          }),
+        );
         s.throwErrorIf(
-          sql`exists (
-            select 1
-            from db.file_versions first_version
-            where first_version.file_item_id = p_item_id
-              and first_version.version_number = 1
-              and lower(trim(first_version.content_type)) <>
-                lower(trim(p_content_type))
-          )`,
-          sql.lit`A file's content type cannot change between versions.`,
+          sql`files_version_metadata_error is not null`,
+          sql`files_version_metadata_error`,
+        );
+        s.throwErrorUnless(
+          sql`p_external_url is null or (p_blob_hash is null
+            and p_content_type in ('application/vnd.yolm.external-link', 'application/vnd.yolm.video-link')
+            and ${
+            this.extensionEnabledSql(
+              sql`(select file_space_id from db.file_items where id = p_item_id)`,
+              "external_link",
+            )
+          })`,
+          sql.lit`Choose either an uploaded file or a supported link.`,
         );
         s.modify(sql`
           insert into db.file_versions (
@@ -2291,8 +2444,8 @@ export class DriveBlock implements Block, DriveBlockContract {
           ) values (
             p_item_id,
             files_appended_version_number,
-            p_file_name,
-            lower(trim(p_content_type)),
+            trim(p_file_name),
+            lower(trim(coalesce(nullif(trim(p_content_type), ''), 'application/octet-stream'))),
             p_byte_length,
             p_note,
             p_sys_user_id
@@ -2321,7 +2474,17 @@ export class DriveBlock implements Block, DriveBlockContract {
           contentType: sql`p_content_type`,
           byteLength: sql`p_byte_length`,
           sysUserId: sql`p_sys_user_id`,
+          language: sql`p_language`,
+          externalUrl: sql`p_external_url`,
         };
+        for (const extension of this.extensions) {
+          const writeVersionContent = extension.writeVersionContent;
+          if (!writeVersionContent) continue;
+          s.if(
+            this.extensionEnabledSql(event.spaceId, extension.name),
+            (s) => writeVersionContent.call(extension, s, event),
+          );
+        }
         for (const extension of this.extensions) {
           const onVersionCreated = extension.onVersionCreated;
           if (!onVersionCreated) continue;
@@ -2862,7 +3025,7 @@ export class DriveBlock implements Block, DriveBlockContract {
         s.defScalar(
           "requested_file_version_can_inline",
           sql`
-            signed_transfer_claims is null and requested_file_version.content_type collate nocase in (
+            signed_transfer_claims is null and trim(split_part(requested_file_version.content_type, ';', 1)) collate nocase in (
               'application/pdf',
               'image/avif',
               'image/bmp',
@@ -2871,6 +3034,11 @@ export class DriveBlock implements Block, DriveBlockContract {
               'image/png',
               'image/tiff',
               'image/webp',
+              'image/x-icon',
+              'video/mp4',
+              'video/webm',
+              'video/ogg',
+              'video/quicktime',
               'text/plain'
             )
           `,
@@ -2948,9 +3116,18 @@ export class DriveBlock implements Block, DriveBlockContract {
               s.return(sql.lit`Not authorized`);
             },
           );
-          s.if(sql`not (${this.validItemNameSql(sql`file_name`)})`, (s) => {
+          s.defScalar("new_upload_content_type", sql`content_type`);
+          s.defScalar(
+            "new_upload_metadata_error",
+            this.versionUploadMetadataErrorSql({
+              spaceId: sql`space_id`,
+              fileName: sql`file_name`,
+              contentType: sql`new_upload_content_type`,
+            }),
+          );
+          s.if(sql`new_upload_metadata_error is not null`, (s) => {
             s.setHttpStatus(400);
-            s.return(sql.lit`Enter a valid file name`);
+            s.return(sql`new_upload_metadata_error`);
           });
           s.if(
             sql`try_cast(nullif(parent_id, '') as bigint) is not null
@@ -2980,35 +3157,50 @@ export class DriveBlock implements Block, DriveBlockContract {
           "upload_parent_id",
           sql`try_cast(nullif(parent_id, '') as bigint)`,
         );
-        // Authorization ran in the blob authorize stage; the stored
-        // procedures re-run the name/parent/sibling validations.
+        // Uploads may take time. Revalidate access in the write transaction,
+        // including space policies that changed while the body was received.
         s.startTransaction();
-        this.createFileItem(s, {
-          spaceId: sql`space_id`,
-          parentItemId: sql`upload_parent_id`,
-          name: sql`file_name`,
-          into: "uploaded_file_item_id",
-        });
-        this.createFileVersion(s, {
-          itemId: sql`uploaded_file_item_id`,
-          fileName: sql`trim(file_name)`,
-          contentType:
-            sql`coalesce(nullif(trim(content_type), ''), 'application/octet-stream')`,
-          byteLength: sql`upload_size`,
-          blobHash: sql`file_blob_hash`,
-          sysUserId: sql`auth_user_id`,
-          intoVersion: "uploaded_file_version_id",
-        });
-        s.commitTransaction();
-        s.setHttpStatus(201);
-        s.setHeader(sql.lit`Content-Type`, sql.lit`application/json`);
-        s.return(sql`
+        s.if(
+          sql`(${this.blobUploadsEnabledSql(sql`space_id`)}) and (${
+            this.canCreateFilePredicate({
+              spaceId: sql`space_id`,
+              parentItemId: sql`upload_parent_id`,
+              sysUserId: sql`auth_user_id`,
+            }, { inlineSpaceAccess: true })
+          })`,
+          (s) => {
+            this.createFileItem(s, {
+              spaceId: sql`space_id`,
+              parentItemId: sql`upload_parent_id`,
+              name: sql`file_name`,
+              into: "uploaded_file_item_id",
+            });
+            this.createFileVersion(s, {
+              itemId: sql`uploaded_file_item_id`,
+              fileName: sql`trim(file_name)`,
+              contentType:
+                sql`coalesce(nullif(trim(content_type), ''), 'application/octet-stream')`,
+              byteLength: sql`upload_size`,
+              blobHash: sql`file_blob_hash`,
+              sysUserId: sql`auth_user_id`,
+              intoVersion: "uploaded_file_version_id",
+            });
+            s.commitTransaction();
+            s.setHttpStatus(201);
+            s.setHeader(sql.lit`Content-Type`, sql.lit`application/json`);
+            s.return(sql`
           json_build_object(
             'success', true,
             'itemId', uploaded_file_item_id,
             'versionId', uploaded_file_version_id
           )
         `);
+          },
+        ).else((s) => {
+          s.rollbackIfInTransaction();
+          s.setHttpStatus(403);
+          s.return(sql.lit`Not authorized`);
+        });
       },
     });
 
@@ -3031,13 +3223,6 @@ export class DriveBlock implements Block, DriveBlockContract {
                 sql`(select file_space_id from db.file_items where id = item_id and item_kind = 'file')`,
               allowNoRead: true,
             },
-          );
-          s.defScalar(
-            "version_upload_content_type",
-            sql`lower(trim(coalesce(
-              nullif(content_type, ''),
-              'application/octet-stream'
-            )))`,
           );
           s.if(
             sql`
@@ -3062,26 +3247,19 @@ export class DriveBlock implements Block, DriveBlockContract {
               s.return(sql.lit`Not authorized`);
             },
           );
-          s.if(sql`not (${this.validItemNameSql(sql`file_name`)})`, (s) => {
-            s.setHttpStatus(400);
-            s.return(sql.lit`Enter a valid file name`);
-          });
-          s.if(
-            sql`exists (
-              select 1
-              from db.file_versions first_version
-              where first_version.file_item_id = item_id
-                and first_version.version_number = 1
-                and lower(trim(first_version.content_type)) <>
-                  version_upload_content_type
-            )`,
-            (s) => {
-              s.setHttpStatus(400);
-              s.return(
-                sql.lit`A file's content type cannot change between versions`,
-              );
-            },
+          s.defScalar("version_upload_content_type", sql`content_type`);
+          s.defScalar(
+            "version_upload_metadata_error",
+            this.versionUploadMetadataErrorSql({
+              itemId: sql`item_id`,
+              fileName: sql`file_name`,
+              contentType: sql`version_upload_content_type`,
+            }),
           );
+          s.if(sql`version_upload_metadata_error is not null`, (s) => {
+            s.setHttpStatus(400);
+            s.return(sql`version_upload_metadata_error`);
+          });
           s.if(sql`upload_size = 0`, (s) => {
             s.setHttpStatus(400);
             s.return(sql.lit`Empty file upload`);
@@ -3104,29 +3282,44 @@ export class DriveBlock implements Block, DriveBlockContract {
           s.setHttpStatus(404);
           s.return(sql.lit`File not found`);
         });
-        // Authorization ran in the blob authorize stage; the stored
-        // procedure re-runs the version validations.
         s.startTransaction();
-        this.createFileVersion(s, {
-          itemId: sql`version_upload_item.id`,
-          fileName: sql`trim(file_name)`,
-          contentType:
-            sql`coalesce(nullif(trim(content_type), ''), 'application/octet-stream')`,
-          byteLength: sql`upload_size`,
-          blobHash: sql`file_blob_hash`,
-          note: sql`nullif(trim(note), '')`,
-          sysUserId: sql`auth_user_id`,
-          intoVersion: "uploaded_file_version_id",
-        });
-        s.commitTransaction();
-        s.setHttpStatus(201);
-        s.return(sql`
+        s.if(
+          sql`(${
+            this.blobUploadsEnabledSql(sql`version_upload_item.file_space_id`)
+          }) and (${
+            this.canCreateVersionPredicate({
+              spaceId: sql`version_upload_item.file_space_id`,
+              itemId: sql`item_id`,
+              sysUserId: sql`auth_user_id`,
+            }, { inlineSpaceAccess: true })
+          })`,
+          (s) => {
+            this.createFileVersion(s, {
+              itemId: sql`version_upload_item.id`,
+              fileName: sql`trim(file_name)`,
+              contentType:
+                sql`coalesce(nullif(trim(content_type), ''), 'application/octet-stream')`,
+              byteLength: sql`upload_size`,
+              blobHash: sql`file_blob_hash`,
+              note: sql`nullif(trim(note), '')`,
+              sysUserId: sql`auth_user_id`,
+              intoVersion: "uploaded_file_version_id",
+            });
+            s.commitTransaction();
+            s.setHttpStatus(201);
+            s.return(sql`
           json_build_object(
             'success', true,
             'itemId', version_upload_item.id,
             'versionId', uploaded_file_version_id
           )
         `);
+          },
+        ).else((s) => {
+          s.rollbackIfInTransaction();
+          s.setHttpStatus(403);
+          s.return(sql.lit`Not authorized`);
+        });
       },
     });
     for (const extension of this.extensions) {

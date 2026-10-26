@@ -1,7 +1,7 @@
 ---
 title: Forge blocks skill
-description: Discovering and reusing Yolm blocks, block-owned schema, components, pages, configuration, and examples before custom implementation.
-tags: [ai, forge, blocks, reuse]
+description: "Use before adding any significant capability, schema, or UI: find and reuse existing blocks, components, and pages first."
+tags: [ai, forge, skill, blocks, reuse]
 related:
   - concepts/blocks.md
   - coding/solution_principles.md

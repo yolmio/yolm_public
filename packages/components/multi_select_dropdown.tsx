@@ -216,12 +216,19 @@ export function MultiSelectDropdown({
                         sx={itemSx}
                         role="option"
                         aria-selected={sql`item.is_selected`}
-                        onClick={toggleItem}
-                        onKeyDown={(s) => {
-                          s.if(sql`event.key in (' ', 'Enter')`, (s) => {
-                            s.event.preventDefault();
-                            toggleItem(s);
-                          });
+                        // Saves must finish even when Done removes this option.
+                        onClick={{
+                          detachedFromNode: true,
+                          procedure: toggleItem,
+                        }}
+                        onKeyDown={{
+                          detachedFromNode: true,
+                          procedure: (s) => {
+                            s.if(sql`event.key in (' ', 'Enter')`, (s) => {
+                              s.event.preventDefault();
+                              toggleItem(s);
+                            });
+                          },
                         }}
                       >
                         <div

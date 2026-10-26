@@ -115,11 +115,11 @@ export function DriveViewerNavigation(props: DriveViewerNavigationProps) {
   const navigateFile = (s: DomStatements, file: DriveViewerNavigationFile) => {
     s.setScalar("drive_viewer_navigation_error", sql.lit``);
     s.setScalar(selectedFileItemScalar, sql.null);
-    s.defScalar("drive_viewer_navigation_file_item_id", {
-      type: "BigInt",
-      expr: file.fileItemId,
-    });
     if (props.onFileNavigate) {
+      s.defScalar("drive_viewer_navigation_file_item_id", {
+        type: "BigInt",
+        expr: file.fileItemId,
+      });
       props.onFileNavigate(
         s,
         file,

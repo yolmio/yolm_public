@@ -10,94 +10,109 @@ tags:
 
 # Datagrid
 
-The `DatagridPage` is Yolm's main component for handling data for a table. It is a full-featured grid editor with inline editing, validation, sorting, filtering, bulk edits, export, and more.
+`DatagridPage` is Yolm's full-featured grid editor for one table: inline
+editing with validation, sorting, filtering, saved views, bulk edits, export,
+and integrated record pages. It registers its own route (default
+`/{table_base_url}`) and navigation item.
+
+```tsx
+import { DatagridPage, DatagridToolbar } from "pages/datagrid";
+```
+
+## Required Schema Opt-In
+
+`DatagridPage` stores saved views in system tables and throws at generation
+time unless its `datagridName` (default: `table`) is registered in `core.tsx`:
+
+```tsx
+system.addDataGridTablesAndEnums(["customers", "orders"]);
+```
+
+This is a persistent schema change; see
+[Schema opt-in](./record_grid.md#schema-opt-in-persistent-schema-change) for what it adds.
 
 ## Simple Usage
 
-The simplest way to use the Datagrid is to provide a table name. By default, it will include all fields from the table.
+With only `table`, the grid includes every table field. Users can sort, filter,
+reorder and hide columns, edit cells, and save views.
 
 @@{ "type": "code", "file": "examples/chinook/apps/chinook.yolmstaging.net.tsx", "name": "DATAGRID_SIMPLE", "language": "tsx"}@@
 
-This creates a datagrid where users can:
-- Sort and filter data
-- Reorder columns and control visibility
-- Edit individual cells
-- Create, edit, and save views
+## Toolbar
 
-## Datagrid Toolbar
+The default `DatagridToolbar` shows view and column controls, filter, sort, and
+row height on the left, and discard/save changes on the right. Children of
+`DatagridToolbar` go in the right-hand area; `toolbarRight` on `DatagridPage`
+is the shorthand. `toolbar` replaces the whole toolbar and cannot be combined
+with `toolbarRight`.
 
-The `<DatagridToolbar>` has the following layout:
+`DatagridToolbar` must be rendered inside `DatagridPage` (or the low-level
+`Datagrid` from `std/ui`). It accepts `disableFiltering`, `disableSorting`,
+`disableColumns`, `disableViews`, `disableRowHeight`, and `disableSearch`
+(hides quick search even when configured). Static parts include
+`DatagridToolbar.AutoInsertButton`, `DeleteButton`, `RowHeightSelect`,
+`ViewsButton`, and `Count`.
 
-| Left | Center | Right |
-|------|--------|-------|
-| View control \| Column visibility | | Toolbar right (children) |
-| Filter \| Sort \| Row height | | Discard changes \| Save changes |
+`defaultRowHeight` sets the initial row height before a saved view loads:
+`"extraShort"`, `"short"`, `"medium"`, `"tall"`, or `"extraTall"`.
 
-Any children passed to `<DatagridToolbar>` will be placed in the `toolbarRight` area. The `<DatagridPage>` also provides a `toolbarRight` prop for convenience.
-
-Set `defaultRowHeight` to choose the initial row height before a saved view is loaded. Options are `"extraShort"`, `"short"`, `"medium"`, `"tall"`, and `"extraTall"`.
+CRUD: create with `DatagridToolbar.AutoInsertButton`, update by inline cell
+editing or bulk update, and delete through bulk actions.
 
 ## Bulk Actions
 
-You can enable bulk actions to perform operations on multiple rows at once. This automatically makes the rows selectable.
+Enabling any `bulk` option (`delete`, `update`, `export`, `merge`, `actions`)
+makes rows selectable. Selected rows show a bottom popup with delete, bulk
+update dialog, CSV export, and any custom `bulk.actions`. `maxSelectedRows`
+caps the selection.
 
 @@{ "type": "code", "file": "examples/chinook/apps/chinook.yolmstaging.net.tsx", "name": "DATAGRID_BULK", "language": "tsx"}@@
 
-When one or more rows are selected, a popup appears at the bottom with options to:
-- **Delete**: Remove selected records.
-- **Bulk Update**: Open a dialog to update fields for all selected records.
-- **Export**: Export selected records to CSV.
-- **Custom Actions**: Any additional actions defined in the `bulk.actions` array.
+## Columns
 
-## Column Customization
-
-While columns default to direct mapping of table fields, you have total flexibility using the `columns` builder:
+`columns` receives a `DatagridBuilder`; when it is provided, `fields` and
+`ignoreFields` on the page are ignored and auto-generation is skipped unless
+you call `b.autoFields()`.
 
 @@{ "type": "code", "file": "examples/chinook/apps/chinook.yolmstaging.net.tsx", "name": "DATAGRID_COLUMNS", "language": "tsx"}@@
 
-### Customization Options
+| Method | Use |
+|--------|-----|
+| `autoFields({ ignoreFields?, fields? })` | Columns for table fields, optionally skipping or configuring fields. |
+| `addField(fieldName, config)` | One table field column with `FieldConfig`. |
+| `addFkVirtuals(fkField)` | Virtual columns for non-FK fields on the referenced table. |
+| `addFkField(fkField, fieldName, opts?)` | One read-only virtual column from the referenced table. |
+| `virtualColumn(config)` | Query-backed column with optional filter, sort, export, and custom `cell`. |
+| `cellOnlyColumn(config)` | UI-only column (buttons, menus, local toggles); no query data. |
+| `customFilterColumn(config)` | Filter-only predicate with optional custom filter UI. |
+| `customSortColumn(config)` | Sort-only SQL expression, generated only when actively sorted. |
+| `countVirtual(tableOrOpts)` | Related-row count column. |
+| `relationCountAndDialog(config)` | Related-row count whose cell opens a related-record dialog. |
+| `addSnackbarBulkAction(action)` | Selection snackbar bulk action. |
+| `column(column)` | Push a fully formed low-level column object. |
 
-- **`b.autoFields()`**: Automatically adds all table fields. Use `ignoreFields` to exclude specific ones.
-- **`b.virtualColumn()`**: Adds a computed column based on a SQL expression.
-- **`b.cellOnlyColumn()`**: Adds a column that only exists in the UI (e.g., for action buttons).
-- **`b.customFilterColumn()`**: Defines a custom filtering logic for a column.
-- **`b.countVirtual()`**: A helper to add a column showing the count of related records.
+See [Datagrid Virtual Columns](./datagrid_virtual_columns.md) for virtual
+column configuration and the `record` alias.
 
-For more details on computed columns, see [Datagrid Virtual Columns](./datagrid_virtual_columns.md).
+`FormattedCellValue` (from `pages/datagrid`) post-processes the default cell
+value: `format` receives the raw `AnyExpr` and returns a SQL expression.
 
-### `FormattedCellValue` — formatting raw cell values
-
-Use `FormattedCellValue` from `pages/datagrid` as the `cell` for a
-column whose default rendering needs to be post-processed — e.g.
-formatting a number as currency, capitalising a status, or composing
-multiple fields into one cell. The `format` callback receives the
-cell's raw `AnyExpr` value and returns a new SQL expression.
-
-```typescript
-import { FormattedCellValue } from "pages/datagrid";
-import { sql } from "std/sql_utils";
-
+```tsx
 b.virtualColumn({
   storageName: "formatted_amount",
   displayName: "Amount",
   expr: sql`amount`,
-  cell: () => (
-    <FormattedCellValue format={(v) => sql`format.currency(${v}, 'USD')`} />
-  ),
+  cell: <FormattedCellValue format={(v) => sql`format.currency(${v}, 'USD')`} />,
 });
 ```
 
-### Avoid row-keyed `<Data>` in visible cells
+### Keep cell data in the grid query
 
-Do not put a `<Data>` query inside a visible datagrid cell when that query is
-derived from `useCellHelper().recordId` or `useCellHelper().value`.
-
-That pattern runs once per rendered row/cell. A page that looks like one
-datagrid fetch can quietly become dozens of independent point lookups, counts,
-or `exists` checks. On large tables this shows up as high block usage and slow
-server-side rendering even when every individual lookup is selective.
-
-Prefer pushing the value into the datagrid query:
+Do not put a `<Data>` inside a visible cell keyed on
+`useCellHelper().recordId` or `.value`. It runs once per rendered row, turning
+one grid fetch into dozens of point lookups, counts, or `exists` checks, with
+high block usage and slow server rendering on large tables. Compute the value
+as a virtual column and render from `helper.value`:
 
 ```tsx
 b.virtualColumn({
@@ -110,65 +125,36 @@ b.virtualColumn({
       and ns.status = 'failed'
   )`,
   cell: ({ helper }) => (
-    <Show when={helper.value}>
+    <Show when={sql`${helper.value} = 'true'`}>
       <Chip size="sm" color="danger" variant="soft">Failed</Chip>
     </Show>
   ),
 });
 ```
 
-Use the same approach for:
-
-- Related-row counts: `b.virtualColumn({ expr: sql\`(select count(*) ... where fk = record.id)\` })`, or `b.countVirtual(...)` when it fits.
-- Related-row existence flags: `exists(select 1 ... where fk = record.id)`.
-- Lookup labels for foreign keys: `b.addFkField("client_id", "acronym", { storageName: "client_id" })` instead of querying the related table from the cell.
-- Status chips or formatted labels: compute the raw display value as the virtual column expression, then render from `helper.value`.
-
-`cellOnlyColumn` is for UI-only cells such as buttons, menus, local toggles, or
-pure client-side state. If the cell needs database data for every visible row,
-it should almost always be a `virtualColumn` instead.
-
-Interactive controls are the main exception. Dialog and dropdown contents may
-load data lazily after the user opens them. Keep the always-visible label in the
-datagrid query, and fetch the heavier option/detail list only from the opened
-dialog or dropdown. For example, a multi-select cell should receive its selected
-label from `helper.value`; the available-options query can remain behind the
-open dropdown.
-
-Before changing an existing cell, verify display equivalence where practical by
-comparing the old row-keyed expression to the new `record.id`-based virtual
-expression over a representative set of rows. The expressions should produce
-the same labels/booleans/counts before the cell renderer is changed.
-
-## CRUD Operations
-
-The Datagrid supports full CRUD operations:
-- **Create**: Via `DatagridToolbar.AutoInsertButton`.
-- **Read**: The main Datagrid display.
-- **Update**: Via inline cell editing or bulk update.
-- **Delete**: Via bulk actions.
+The same applies to related-row counts (`b.countVirtual(...)` or a
+`(select count(*) ... where fk = record.id)` expression), existence flags, FK
+labels (`b.addFkField("client_id", "acronym", { storageName: "client_id" })`),
+and status labels. Grid query values reach cells as strings (booleans are
+`'true'`/`'false'`). If a cell needs database data for every visible row, it
+should be a `virtualColumn`, not a `cellOnlyColumn`. Exception: dialog and
+dropdown contents may load lazily once opened; keep the always-visible label
+in the grid query. When migrating an existing cell, compare the old row-keyed
+expression with the new `record.id`-based expression over representative rows
+before changing the renderer.
 
 ## Quick Search
 
-Pass `quickSearch` to add a search input to the toolbar. The current query is bound
-to the `?q=` URL param so search state is shareable.
+`quickSearch` adds a toolbar search input bound two-way to the `?q=` URL
+param (updating the URL with replace, so typing does not add history
+entries), so `/orders?q=42` opens pre-filtered.
 
-### Shorthand
-
-```tsx
-<DatagridPage table="customers" quickSearch />
-```
-
-The shorthand requires the table to declare a
-[`searchConfig`](../database/advanced_table_features.md). Each `field` becomes a
-fuzzy target; each `fieldGroup` is concatenated into one fuzzy haystack — the same
-match behavior `SearchDialog` uses, so a search like "John Smith" hits a row where
-`first_name = "John"` and `last_name = "Smith"`.
-
-### Explicit configuration
-
-For mixed modes (e.g. exact match on an id column alongside fuzzy match on names)
-pass an object:
+- `<DatagridPage table="customers" quickSearch />` requires the table's
+  [`searchConfig`](../database/advanced_table_features.md). Each `field` is a
+  fuzzy target and each `fieldGroup` one concatenated fuzzy haystack, matching
+  `SearchDialog` (so "John Smith" hits `first_name = "John"`,
+  `last_name = "Smith"`). Results are ranked.
+- The object form is required without a `searchConfig` or when mixing modes:
 
 ```tsx
 <DatagridPage
@@ -177,86 +163,52 @@ pass an object:
     fields: [
       { field: "br_id", mode: "exact" },
       { fields: ["first_name", "last_name"] },
-      { field: "reference" },
+      "reference",
     ],
     rank: true,
   }}
 />
 ```
 
-`fields` entries are one of:
-
-- `string` — single field, fuzzy. Shorthand for `{ field, mode: "fuzzy" }`.
-- `{ field, mode?, priority? }` — single field with explicit mode/priority.
-- `{ fields: [...], mode?, priority? }` — group whose fields are space-concatenated
-  into one fuzzy/contains haystack. Lets cross-field input ("John Smith") match a
-  row whose individual fields each hold one word. `mode: "exact"` is rejected for
-  groups (the concatenated haystack rarely equals a user input verbatim).
-
-### Match modes
+`fields` entries: a `string` (fuzzy), `{ field, mode?, priority? }`, or
+`{ fields: [...], mode?, priority? }` (space-concatenated haystack;
+`mode: "exact"` is rejected for groups). `placeholder` defaults to "Search…".
 
 | Mode | Semantics | Typical use |
 |------|-----------|-------------|
-| `fuzzy` (default) | `fuzzy_match(query, haystack, null)` — typo-tolerant ranked match. Requires String/PhoneNumber fields. | Names, descriptions. |
-| `contains` | `contains(lower(haystack), lower(query))` — case-insensitive substring. | Codes, SKUs, partial matches. |
-| `exact` | `lower(haystack) = lower(query)` — exact (case-insensitive) match. | Pasted ids/UUIDs/dates. |
+| `fuzzy` (default) | `fuzzy_match(query, haystack, null)`; String/PhoneNumber fields only. | Names, descriptions. |
+| `contains` | `contains(lower(haystack), lower(query))`. | Codes, SKUs. |
+| `exact` | `lower(haystack) = lower(query)`. | Pasted ids, UUIDs, dates. |
 
-### Input gates (auto-skip when input doesn't fit a column)
+An `exact` target on a non-string column (int, date, uuid, ...) is dropped from
+the runtime SQL when the input cannot be cast to that type.
 
-A target with `mode: "exact"` on a non-string column (int, date, uuid, …) is
-automatically *dropped* from the runtime SQL when the input can't be cast to that
-type. Typing "John" against an int `br_id` simply doesn't bother filtering by
-`br_id` — the WHERE clause shrinks to the remaining (string) targets.
-
-### Ranking
-
-When `rank: true` and the search box has text, results are ordered by best match
-first; the user's column sort becomes a tiebreaker. Per-target rank values are
-tiered so cross-mode ordering is predictable:
-
-| Tier | Rank value | Notes |
-|------|-----------|-------|
-| `exact` | `priority` (0..1e6) | Hard match, sorts first. |
-| `contains` | `1_000_000 + priority` | Substring hit, sorts after exact. |
-| `fuzzy` | `1_000_000_000 + fuzzy_rank_key(...)` | Typo-tolerant, sorts last. |
-
-`priority` defaults to the entry's index in `fields`. Set `priority` explicitly
-to bias rows that match a "more important" field above equally-confident hits in
-other fields.
-
-When `rank: false` the search acts purely as a filter — column sort wins.
-
-### URL persistence
-
-The current search term is two-way bound to `?q=` via `s.setQueryParam` so a
-pasted-id link like `/orders?q=42` opens the grid pre-filtered to that row.
+With `rank: true` and text present, best matches sort first and the column sort
+becomes a tiebreaker. Rank tiers: `exact` = `priority` (0..1e6), `contains` =
+`1_000_000 + priority`, `fuzzy` = `1_000_000_000 + fuzzy_rank_key(...)`.
+`priority` defaults to the entry's index (lower ranks higher). With
+`rank: false`, search only filters and column sort wins.
 
 ## Filtered and Sorted Deep Links
 
-Every datagrid accepts JSON arrays in the `filters` and `sort` query params.
-Column names are the storage names used by `defaultView` and saved views. URL
-filters are combined with AND.
+Every datagrid accepts JSON arrays in the `filters` and `sort` query params,
+using column storage names (as in `defaultView` and saved views). URL filters
+are AND-ed.
 
 ```text
 /orders?filters=[{"column":"status","op":"enum_eq","value_1":"pending"}]&sort=[{"column":"request_date","sort":"asc"}]
 ```
 
-Percent-encode JSON when constructing a literal URL. Prefer `datagridUrl` for
-links in Yolm UI; it handles JSON and URL encoding and accepts runtime SQL
+Percent-encode the JSON when writing a literal URL. Prefer `datagridUrl` from
+`pages/datagrid`; it handles JSON and URL encoding and accepts runtime SQL
 values:
 
 ```tsx
-import { datagridUrl } from "pages/datagrid";
-
 <a
   href={datagridUrl("/orders", {
     filters: [
       { column: "status", op: "enum_eq", value_1: "pending" },
-      {
-        column: "jurisdiction_id",
-        op: "fk_eq",
-        value_1: sql`county.id`,
-      },
+      { column: "jurisdiction_id", op: "fk_eq", value_1: sql`county.id` },
     ],
     sort: [{ column: "request_date", sort: "asc" }],
   })}
@@ -265,22 +217,18 @@ import { datagridUrl } from "pages/datagrid";
 </a>
 ```
 
-Each filter supports `value_1`, `value_2`, and `value_3`, matching the datagrid
-filter operators and saved-view representation. URL filters and sorting
-override those parts of a selected or default view; the view's column order,
-visibility, pinning, widths, and row height remain active. An explicit empty
-array clears that part of the view (`filters=[]` or `sort=[]`). Malformed JSON,
-unknown columns, invalid operators, and incompatible column/operator pairs are
-ignored rather than producing an invalid query.
-
-Navigating to another URL for the same datagrid reapplies changed `filters` and
-`sort` parameters, including removal of those parameters to restore the
-selected or default view.
+Filters take `value_1`..`value_3`, matching the saved-view operators. URL
+filters and sort override those parts of the selected or default view; column
+order, visibility, pinning, widths, and row height stay. An explicit empty
+array (`filters=[]`) clears that part. Malformed JSON, unknown columns, invalid
+operators, and incompatible column/operator pairs are ignored. Navigating to
+another URL for the same grid reapplies changed params, and removing them
+restores the view.
 
 ## Integrated Record Pages
 
-Pass record detail content through `recordPage` when users should browse the
-current filtered and sorted result set without losing the grid context:
+`recordPage` registers a detail route next to the grid so users can browse the
+current filtered, sorted result set:
 
 ```tsx
 <DatagridPage
@@ -298,140 +246,67 @@ current filtered and sorted result set without losing the grid context:
 />
 ```
 
-The page owns both routes:
+`/customers` renders the grid; `/customers/{record_id}` renders `content` with
+the same `record` and `ui.record_id` context as [`RecordPage`](./record_page.md).
+`recordPage` accepts the other `RecordPageContent` options (`queryParams`,
+`routeState`, `title`, `sx`, loading/error fallbacks); the grid supplies
+`table`, `children`, and `recordWhere`, so do not wrap `content` in
+`RecordPageContent`.
 
-- `/customers` renders the grid.
-- `/customers/{record_id}` renders the supplied content with the same `record`
-  and `ui.record_id` context as `RecordPage`.
+- `linkField` makes that field the record link instead of a View button. It
+  must be a displayed string or numeric auto field, or a virtual-column
+  storage name. Custom cell renderers cannot be link fields; virtual-column
+  links are read-only; the link column cannot be hidden. Linked field cells
+  keep inline editing.
+- Entering from the grid shows Close, Previous, and Next. Close is a
+  [back link](./routing.md#returning-to-a-list) to the grid: it restores the
+  grid's query, filters, and scroll. Navigation reuses
+  the loaded ordered rows; past the cache, Next extends the same bounded query
+  by one page; it never materializes the full filtered result set. Quick
+  search, filters, `additionalWhere`, and sort carry through, with the primary
+  key as tie-breaker.
+- The position label shows the discovered extent (`12 of 100+`) and becomes
+  exact on the final page (`201 of 275`). `showExactResultCount: true` runs
+  the grid's count query up front (`12 of 57 entries`); enable only when the
+  count is cheap.
+- Direct URLs, reloads, and new tabs have no navigation bar. The record fetch
+  still enforces `additionalWhere`; user filters never act as authorization.
+- Unsaved filters and sorts are transient `ui.*` state that survive moving
+  between the two routes in the current page session. `view` and `q` are kept
+  in record URLs and on Close.
 
-`recordPage.linkField` makes that field the record link instead of adding a separate
-View button. The linked cell retains its inline-edit affordance. It must name a
-displayed string or numeric field added by the page's automatic fields, or a
-displayed virtual-column storage name added by the `columns` callback.
-Custom cell renderers cannot be used for the link field because their arbitrary
-content cannot be safely nested inside a record link. Virtual-column links are
-read-only. The link column cannot be hidden, ensuring saved views always retain
-a way to open records. Omit it to retain the separate View button.
+Do not also register a `RecordPage` for the same route, and do not combine
+`recordPage` with `viewButtonUrl`. For a detail page large enough to compile
+separately, use `recordNavigation={{ linkField? }}` on the grid with a sibling
+`StandaloneDatagridRecordPage` (`table`, `listPath`, `content`).
 
-Entering a detail page with an ordinary grid link displays compact Close,
-Previous, and Next controls. Navigation reuses the grid's already loaded,
-ordered rows. At the end of that cache, Next extends the same bounded grid
-query by one page and then advances. It never materializes the complete
-filtered result set. The active quick search, filters, `additionalWhere`, and
-column sort therefore all carry through, with the primary key appended as a
-stable tie-breaker.
+See `DatagridPageProps`, `DatagridRecordPage`, and `QuickSearchConfig` in
+`pages/datagrid` for the full contract.
 
-By default the controls show the position and the discovered result extent,
-such as `12 of 100+`. The plus sign means the bounded query confirmed that
-more records exist. Crossing the cache boundary extends it by one page. When
-the query reaches the final page, the label becomes exact without a count
-query, such as `201 of 275`. Set
-`recordPage={{ ..., showExactResultCount: true }}` to show
-`12 of 57 entries`. This runs the grid's count query, so only enable it when an
-exact count is acceptably cheap for that page.
+## Low-Level Exports
 
-A direct detail URL, reload, or modified-click into a new tab has no grid
-navigation bar because there is no in-memory result context to navigate. The
-record fetch still enforces `additionalWhere`, so direct URLs cannot bypass the
-grid's fixed scope; user-entered filters only determine session navigation and
-do not act as record authorization.
+New grids should use `DatagridPage` with `columns`, `quickSearch`, and the
+toolbar props above. The `pages/datagrid_internals/*` modules exist for
+maintaining older custom grids:
 
-Unsaved filters and sorts remain transient `ui.*` state and survive navigation
-between these two routes in the current page session. The `view` and `q` query
-parameters are preserved in record URLs and when Close returns to the grid.
-Reloading or opening the record URL directly intentionally discards the
-transient navigation context.
-
-Do not register a separate `RecordPage` for the same table route when using
-`recordPage`, and do not combine `recordPage` with `viewButtonUrl`.
-
-The `recordPage` object accepts the route-less `RecordPageContent` options
-directly, including `queryParams`, `routeState`, `title`, `sx`, and loading or
-error fallbacks. The datagrid supplies `table`, `children`, and `recordWhere`;
-application code should not wrap `content` in `RecordPageContent`. This keeps
-the grid's `additionalWhere` scope enforced automatically on direct record URLs.
-
-## Low-Level Datagrid Exports
-
-Prefer `DatagridPage`, `Datagrid`, and toolbar exports from `pages/datagrid`.
-The direct `pages/datagrid_internals/*` paths below exist for maintaining older
-custom grids.
-
-### `DatagridBuilder`
-
-`DatagridPage`/`Datagrid` column callbacks receive `DatagridBuilder`:
-
-```tsx
-import { DatagridPage, type DatagridBuilder } from "pages/datagrid";
-
-function configureColumns(b: DatagridBuilder) {
-  b.autoFields({ ignoreFields: ["internal_notes"] });
-  b.addFkField("customer_id", "name", {
-    displayName: "Customer",
-    initiallyDisplaying: true,
-    filter: true,
-    sort: true,
-  });
-  b.virtualColumn({
-    storageName: "open_case_count",
-    displayName: "Open Cases",
-    expr: sql`(
-      select count(*)
-      from db.cases
-      where cases.customer_id = record.id and not cases.closed
-    )`,
-    filter: { type: "number", notNull: true },
-    sort: { type: "numeric" },
-  });
-}
-```
-
-| Method | Use |
-|--------|-----|
-| `autoFields({ ignoreFields?, fields? })` | Add columns for table fields, optionally skipping or configuring individual fields. |
-| `addField(fieldName, config)` | Add one table field column with `FieldConfig`. |
-| `addFkVirtuals(fkField)` | Add virtual columns for non-FK fields on the referenced table. |
-| `addFkField(fkField, fieldName, opts?)` | Add one read-only virtual column from the referenced table. |
-| `virtualColumn(config)` | Add a query-backed column with optional display, filter, sort, export, and custom cell config. |
-| `cellOnlyColumn(config)` | Add a UI-only column; use for controls/buttons that do not need query-backed data. |
-| `customFilterColumn(config)` | Add a filter-only predicate with optional custom filter UI. |
-| `customSortColumn(config)` | Add a sort-only SQL expression generated only when actively sorted. |
-| `countVirtual(tableOrOpts)` | Add a related-row count virtual column. |
-| `relationCountAndDialog(config)` | Add a related-row count column whose cell opens a related-record dialog. |
-| `addSnackbarBulkAction(action)` | Add a selection snackbar bulk action. |
-| `column(column)` | Push a fully formed low-level column object. |
-
-### `pages/datagrid_internals/toolbar`
-
-```tsx
-import { Button } from "components/button";
-import { DatagridToolbar } from "pages/datagrid_internals/toolbar";
-
-<DatagridToolbar disableViews disableColumns>
-  <Button>Custom action</Button>
-</DatagridToolbar>
-```
-
-`DatagridToolbar` must be rendered inside `Datagrid` or `DatagridPage`. Props:
-
-| Prop | Effect |
-|------|--------|
-| `disableFiltering` | Hides the filter control. |
-| `disableSorting` | Hides the sort control. |
-| `disableColumns` | Hides the column chooser. |
-| `disableViews` | Hides saved views. |
-| `disableRowHeight` | Hides the row-height selector. |
-| `disableSearch` | Hides quick search even when the table has search config. |
-| `children` | Extra toolbar nodes. |
-
-### `pages/datagrid_internals/action_dialog_datagrid`
+- `action_dialog_datagrid`: `DatagridActionDialog` runs an action on the
+  current selection. `open` is a SQL boolean and `onClose` runs on close;
+  optional props are `title` (string or SQL), `titleProps`, `header`,
+  `description`, `form`, `defaultFieldComponent`, `confirmDisabled` (SQL
+  boolean), `maxWidth` (`"sm"`, `"md"`, `"lg"`), and `sx`. `action` takes
+  `beforeTransactionStart`, `afterTransactionStart`, `beforeTransactionCommit`,
+  and `afterTransactionCommit`, each receiving server statements and a SQL
+  table expression of selected ids. `WithTotalCount` exposes the selected
+  count, including "select all".
+- `toolbar_filter`: `FilterTermHelper`, `FilterStringInput`,
+  `FilterEnumSelect`, `FilterDateInput`, `CheckboxFilter`, `FilterNumberInput`,
+  `FilterDurationInput`, `FilterEnumLikeBool`, `ToolbarFilterButton`, `FkFilter`.
 
 ```tsx
 import {
   DatagridActionDialog,
   WithTotalCount,
 } from "pages/datagrid_internals/action_dialog_datagrid";
-import { sql } from "std/sql_utils";
 
 <DatagridActionDialog
   open={sql`ui.archive_open`}
@@ -452,41 +327,3 @@ import { sql } from "std/sql_utils";
   </WithTotalCount>
 </DatagridActionDialog>
 ```
-
-`DatagridActionDialog` runs bulk actions on the current selection:
-
-| Prop | Description |
-|------|-------------|
-| `open` | SQL boolean controlling dialog visibility. |
-| `onClose` | DOM/server statements run when closing. |
-| `maxWidth` | Optional `"sm"`, `"md"`, or `"lg"`. |
-| `sx` | Dialog style overrides. |
-| `title` | Static string or SQL title. |
-| `titleProps` | Typography props for the title. |
-| `header` | Optional header node. |
-| `description` | Optional description node. |
-| `form` | Optional form node. |
-| `defaultFieldComponent` | Field component used by generated form content. |
-| `confirmDisabled` | SQL boolean disabling the confirm action. |
-| `action` | Transaction hooks for the selected row set. |
-
-`action` hooks: `beforeTransactionStart`, `afterTransactionStart`,
-`beforeTransactionCommit`, `afterTransactionCommit`. Each receives server
-statements and a SQL table expression of selected ids. `WithTotalCount` exposes
-the selected count, including "select all".
-
-### `pages/datagrid_internals/toolbar_filter`
-
-```tsx
-import {
-  FilterStringInput,
-  ToolbarFilterButton,
-} from "pages/datagrid_internals/toolbar_filter";
-```
-
-Low-level custom-toolbar filters:
-`FilterTermHelper`, `FilterStringInput`, `FilterEnumSelect`,
-`FilterDateInput`, `CheckboxFilter`, `FilterNumberInput`,
-`FilterDurationInput`, `FilterEnumLikeBool`, `ToolbarFilterButton`, and
-`FkFilter`. New grids should prefer `filterable`, `quickSearch`, and standard
-toolbar APIs.

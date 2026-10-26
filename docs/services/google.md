@@ -96,7 +96,7 @@ Every Google client method that hits the API accepts OAuth token options:
 
 - `managedOauthCredentialId` — credential row id in `managed_oauth_credentials`.
 - `onReauthRequired` — runs when Yolm detects an expired/revoked refresh token.
-- `optIn` — required in non-prod environments where external services are opt-in.
+- `optIn` — see [External-Service Opt-In](./solution_services.md#external-service-opt-in).
 
 ## Prerequisites
 
@@ -106,6 +106,6 @@ Every Google client method that hits the API accepts OAuth token options:
 
 ## Related
 
-- [OAuth credentials block](../blocks/oauth_credentials.md)
+- Managed OAuth credentials are stored server-side.
 - [Gmail bulk email campaign provider](../blocks/gmail_campaign.md)
 - [Service integrations](../concepts/service_integrations.md)

@@ -5,13 +5,11 @@ import { FormLabel } from "components/form_label";
 import { MaterialIcon } from "components/material_icon";
 import type { IconName } from "components/material_icon_names";
 import { Typography } from "components/typography";
-import { Data } from "std/data";
 import { Form } from "std/form";
-import { useJsModule } from "std/js_modules";
 import { sql } from "std/sql_utils";
-import type { BooleanExpr, Sql } from "std/sql_utils";
-import type { DomStatements, UiServerStatements } from "std/statements";
-import { Show, useUniqueId } from "std/ui";
+import type { Sql } from "std/sql_utils";
+import type { UiServerStatements } from "std/statements";
+import { Show } from "std/ui";
 import type { Node } from "std/ui";
 
 const assessmentResponseFieldCodes = {
@@ -94,25 +92,74 @@ export function callSaveAssessmentMetadataResponse(
   });
 }
 
+/**
+ * Page frame shared by every training page: an optional back link above the
+ * title, the page's primary actions beside it, then the page content. `narrow`
+ * keeps reading/step pages to one comfortable column with the title aligned
+ * to the content.
+ */
 export function PageShell(
-  props: { title: Node; subtitle?: Node; children: Node },
+  props: {
+    title: Node;
+    subtitle?: Node;
+    back?: Node;
+    actions?: Node;
+    narrow?: boolean;
+    children: Node;
+  },
 ) {
   return (
     <div className="min-h-dvh bg-neutral-50 pb-8">
-      <div className="px-4 py-5 md:px-8 md:py-8 max-w-7xl mx-auto flex flex-col gap-6">
-        <div className="flex flex-col gap-1">
-          <Typography level="h2" className="tracking-normal">
-            {props.title}
-          </Typography>
-          <Show when={props.subtitle ? sql`true` : sql`false`}>
-            <Typography level="body-md" className="text-neutral-600 max-w-3xl">
-              {props.subtitle}
-            </Typography>
-          </Show>
+      <div
+        className={`px-4 py-5 md:px-8 md:py-8 mx-auto flex flex-col gap-6 ${
+          props.narrow ? "max-w-4xl" : "max-w-7xl"
+        }`}
+      >
+        <div className="flex flex-col gap-2">
+          {props.back ? <div className="-ml-2">{props.back}</div> : null}
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div className="flex min-w-0 flex-col gap-1">
+              <Typography level="h3" className="text-balance">
+                {props.title}
+              </Typography>
+              <Show when={props.subtitle ? sql`true` : sql`false`}>
+                <Typography
+                  level="body-md"
+                  className="text-neutral-600 max-w-3xl"
+                >
+                  {props.subtitle}
+                </Typography>
+              </Show>
+            </div>
+            {props.actions
+              ? (
+                <div className="flex flex-wrap items-center gap-2 md:shrink-0">
+                  {props.actions}
+                </div>
+              )
+              : null}
+          </div>
         </div>
         {props.children}
       </div>
     </div>
+  );
+}
+
+/** Quiet text-style link back to the parent page, for `PageShell.back`. */
+export function BackLink(props: { href: string | Sql; label: Node }) {
+  return (
+    <Button
+      component="a"
+      href={props.href}
+      backLink
+      variant="plain"
+      color="neutral"
+      size="sm"
+      startIcon="ArrowBack"
+    >
+      {props.label}
+    </Button>
   );
 }
 
@@ -174,104 +221,4 @@ export function FormFieldWithLabel(props: {
   );
 }
 
-export function SignaturePad(props: {
-  onSigned: (s: DomStatements, signatureData: Sql) => void;
-  label: Sql | string;
-  submitLabel?: Sql | string;
-  submitDisabled?: BooleanExpr;
-}) {
-  useJsModule("signature_pad");
-  const signatureId = useUniqueId();
-  const handle = sql.concat(signatureId, sql.lit`-signature-pad`);
-  return (
-    <Data
-      local
-      procedure={(s) => {
-        s.defScalar("has_signature", sql`false`);
-        s.defScalar("signature_data", sql.lit``);
-        s.defScalar("canvas_id", sql`'signature-canvas-' || ${handle}`);
-      }}
-    >
-      <div
-        js={{
-          handles: [
-            {
-              module: "signature_pad",
-              cleanup: "cleanup",
-              handle,
-            },
-          ],
-          on: {
-            "signature_pad.signatureChanged": (s) => {
-              s.setScalar("has_signature", sql`true`);
-            },
-            "signature_pad.signatureCleared": (s) => {
-              s.setScalar("has_signature", sql`false`);
-              s.setScalar("signature_data", sql.lit``);
-            },
-          },
-        }}
-      >
-        <div className="grid gap-2">
-          <Typography level="title-sm">{props.label}</Typography>
-          <canvas
-            id={sql`canvas_id`}
-            className="w-full h-40 border border-divider rounded-md bg-white cursor-crosshair"
-            onMount={(s) => {
-              s.jsCall({
-                module: "signature_pad",
-                exportName: "initializeCanvas",
-                handle,
-                argJson: sql`json_build_object(
-                  'handle', ${handle},
-                  'elementId', canvas_id
-                )`,
-              });
-            }}
-          />
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="plain"
-              color="neutral"
-              size="sm"
-              onClick={(s) => {
-                s.jsCall({
-                  module: "signature_pad",
-                  exportName: "clearSignature",
-                  handle,
-                  argJson: sql`json_build_object('handle', ${handle})`,
-                });
-              }}
-            >
-              Clear
-            </Button>
-            <Button
-              variant="solid"
-              color="primary"
-              size="sm"
-              disabled={sql`not has_signature or ${
-                props.submitDisabled ?? sql`false`
-              }`}
-              onClick={(s) => {
-                s.jsCall({
-                  module: "signature_pad",
-                  exportName: "getSignatureData",
-                  handle,
-                  argJson: sql`json_build_object('handle', ${handle})`,
-                  resultJsonScalar: "signature_result",
-                });
-                s.setScalar(
-                  "signature_data",
-                  sql`signature_result->>'signature'`,
-                );
-                props.onSigned(s, sql`ui.signature_data`);
-              }}
-            >
-              {props.submitLabel ?? "Save signature"}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </Data>
-  );
-}
+export { SignaturePad } from "components/signature_pad";

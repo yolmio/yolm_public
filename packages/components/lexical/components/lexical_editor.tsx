@@ -119,10 +119,15 @@ interface RichTextSimpleEditorProps {
   /** A platform file input receiving each managed inline image upload. */
   imageUploadInputId?: Sql;
   onImageUploadStateChange?: (s: DomStatements, state: Sql) => void;
+  onError?: (s: DomStatements, message: Sql) => void;
   /** Debounce editor change callbacks in milliseconds. Defaults to 50. */
   onChangeDebounceMs?: number;
   /** Show extended toolbar with underline, subscript, superscript, alignment, and clear formatting */
   extendedToolbar?: boolean;
+  /** Caller controls appended after the built-in toolbar groups. */
+  toolbarItems?: Node;
+  /** Keep the toolbar pinned to the top of the scroll container. */
+  stickyToolbar?: boolean;
   /** Preserve intentional inline styles already present in serialized JSON. */
   preserveStoredTextStyles?: boolean;
   /** Preserve inline CSS copied from external HTML. */
@@ -150,6 +155,23 @@ export const lexicalDocumentFormattingStyles: Style = {
   fontSize: "10pt",
   lineHeight: 1.56,
   textAlign: "justify",
+  "& .lexical-image": {
+    float: "none !important",
+    width: "100% !important",
+    clear: "both !important",
+    marginX: "0 !important",
+    lineHeight: 0,
+    marginBottom: "6pt",
+  },
+  "& .lexical-image img": {
+    borderWidth: "0 !important",
+    maxWidth: "100%",
+    maxHeight: "9in",
+    height: "auto !important",
+    objectFit: "contain",
+  },
+  "& .lexical-video": { lineHeight: 1.56 },
+  "& .lexical-video img": { objectFit: "cover" },
   "& .lexical-paragraph, & p": {
     marginTop: 0,
     marginX: 0,
@@ -223,8 +245,9 @@ export const lexicalDocumentDisplayStyles: Style = {
 const lexicalDocumentEditorStyles: Style = {
   ...lexicalDocumentFormattingStyles,
   boxSizing: "border-box",
-  width: "100%",
-  maxWidth: "calc(6.8in + var(--editor-padding-x) + var(--editor-padding-x))",
+  // Scale this fixed document width to the available space in the JS module.
+  // Reflowing to the panel width changes the exported PDF's line breaks.
+  width: "calc(6.8in + var(--editor-padding-x) + var(--editor-padding-x))",
   marginX: "auto",
 };
 
@@ -285,7 +308,20 @@ const styles = createStyles({
     px: "var(--editor-padding-x)",
     py: 1,
   },
+  stickyToolbar: {
+    position: "sticky",
+    top: 0,
+    zIndex: 20,
+    alignItems: "center",
+    backgroundColor: cssVar("palette-background-surface"),
+    borderBottom: "1px solid",
+    borderColor: cssVar("palette-divider"),
+    borderTopLeftRadius: "var(--editor-radius)",
+    borderTopRightRadius: "var(--editor-radius)",
+  },
   editor: {
+    // Contain left/right-floated images inside the editor surface.
+    display: "flow-root",
     cursor: "text",
     minHeight: "var(--editor-min-height)",
     paddingX: "var(--editor-padding-x)",
@@ -518,6 +554,7 @@ export function RichTextSimpleEditor(props: RichTextSimpleEditorProps) {
     id: idProp,
     className,
     extendedToolbar = false,
+    stickyToolbar = false,
     showVariables = false,
     variables = {},
     variableButtonLabel,
@@ -632,9 +669,23 @@ export function RichTextSimpleEditor(props: RichTextSimpleEditorProps) {
         s.defScalar("on_change_task", { type: "BigUint" });
       }}
     >
-      <div sx={{ ...styles.root(ownerState), ...sx }} className={className}>
+      <div
+        sx={{
+          ...styles.root(ownerState),
+          // The toolbar alignment buttons also align a selected image.
+          ...(extendedToolbar
+            ? { "& .lexical-image-alignment": { display: "none !important" } }
+            : {}),
+          ...sx,
+        }}
+        className={className}
+      >
         {/* Toolbar */}
-        <div sx={styles.toolbar}>
+        <div
+          sx={stickyToolbar
+            ? { ...styles.toolbar, ...styles.stickyToolbar }
+            : styles.toolbar}
+        >
           {documentFormatting && (
             <>
               <Select
@@ -962,6 +1013,7 @@ export function RichTextSimpleEditor(props: RichTextSimpleEditorProps) {
               />
             )}
           </ButtonGroup>
+          {props.toolbarItems}
         </div>
 
         {
@@ -988,6 +1040,7 @@ export function RichTextSimpleEditor(props: RichTextSimpleEditorProps) {
           allowImages={allowImages}
           imageUploadInputId={props.imageUploadInputId}
           onImageUploadStateChange={props.onImageUploadStateChange}
+          onError={props.onError}
         />
       </div>
     </Data>
@@ -1016,6 +1069,7 @@ interface EditorBodyProps {
   allowImages: boolean;
   imageUploadInputId?: Sql;
   onImageUploadStateChange?: (s: DomStatements, state: Sql) => void;
+  onError?: (s: DomStatements, message: Sql) => void;
 }
 
 function EditorBody(props: EditorBodyProps) {
@@ -1138,6 +1192,12 @@ function EditorBody(props: EditorBodyProps) {
                 sql`coalesce(event.payload_json->>'can_redo' = 'true', false)`,
               );
             },
+            ...(props.onError
+              ? {
+                "lexical_editor.error": (s: DomStatements) =>
+                  props.onError?.(s, sql`event.payload_json->>'message'`),
+              }
+              : {}),
             ...(props.onImageUploadStateChange
               ? {
                 "lexical_editor.imageUploadState": (s: DomStatements) =>

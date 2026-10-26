@@ -1,197 +1,268 @@
 ---
-title: Styling and Themes
-description: Guidelines for styling Yolm components, theme system overview, and converting existing HTML/Tailwind CSS into Yolm-compatible code.
+title: Styling
+description: How to style Yolm UI with className, sx, style, color/variant/size props, dynamic classes, semantic Tailwind colors, layout, and HTML conversion.
 tags:
   - ui
   - styling
   - css
   - tailwind
+  - layout
+related:
+  - ui/theming.md
+  - ui/website_styling.md
+  - ui/overview.md
 ---
 
-# Styling and Themes
+# Styling
 
-Yolm provides a powerful styling system that combines the ease of Tailwind CSS with the flexibility of CSS-in-JS via the `sx` prop.
+Yolm compiles styles at generation time. Pick the styling tool by whether the
+value is static or changes at runtime:
 
-## Theme Overview
+| Need | Use | Runtime SQL? |
+| --- | --- | --- |
+| Static Tailwind utilities | `className="flex gap-4 p-6"` | No |
+| Static style object, theme tokens, selectors, breakpoints | `sx={{ ... }}` | No |
+| Existing raw CSS class names | `classes="my-class"` | No |
+| Tailwind classes toggled by a condition | `dynamicClassNames` | Condition only |
+| Raw class names toggled by a condition | `dynamicClass` / `dynamicClasses` | Condition only |
+| A CSS value computed at runtime | `style={{ width: sql\`...\` }}` | Yes |
+| Component look | `color`, `variant`, `size` props | No |
 
-Yolm themes define the visual appearance of your app. They include:
+`className` is converted to an `sx` style object, and `sx` is compiled into a
+generated CSS class. Neither accepts SQL. There is no `class` attribute.
 
-- **Color schemes** - Light and dark mode palettes
-- **Text styles** - Typography scale and weights
-- **Spacing** - Consistent padding and margin values
-- **Breakpoints** - Screen size thresholds for responsive design (sm, md, lg, xl)
-- **Shadows** - Elevation levels
-- **Border radius** - Corner roundness
-- **Focus styles** - Accessibility focus indicators
-- **Z-index layers** - Layer ordering for overlays
-- **Animation timing** - Transition durations
+## Color, Variant, and Size
 
-## Component Props
+Most components share these static props:
 
-Most components accept these styling props:
+| Prop | Values |
+| --- | --- |
+| `color` | `primary`, `neutral`, `danger`, `success`, `warning`, `harmonize` |
+| `variant` | `plain`, `outlined`, `soft`, `solid` |
+| `size` | `xs`, `sm`, `md`, `lg` (components that expose `size`) |
 
-| Prop | Values | Description |
-|------|--------|-------------|
-| `color` | `"primary"`, `"neutral"`, `"danger"`, `"success"`, `"warning"`, `"harmonize"` | Theme color |
-| `variant` | `"soft"`, `"solid"`, `"outlined"`, `"plain"` | Visual style |
-| `size` | `"xs"`, `"sm"`, `"md"`, `"lg"` | Component size |
-
-**Important:** These props expect static strings, not SQL expressions. See [Dynamic Styling](./dynamic_styling.md) for conditional styling patterns.
-
-The `Color` type (from `components/types`) is the union of valid
-`color` values:
+Use the exported types when building components that accept the same values:
 
 ```tsx
-import type { Color } from "components/types";
-
-// Color = "primary" | "neutral" | "danger" | "success" | "warning" | "harmonize"
-
-interface MyChipProps {
-  color?: Color;
-}
+import type { Color, Size, Variant } from "components/types";
 ```
 
-Use it as the prop type when building components that should accept
-the same colors as the rest of the system. The `harmonize` value
-opts in to colors from a surrounding harmonized container (e.g.
-inside a `Card` whose variant set `--harmonize-*` CSS variables) — see
-[Colors](./colors.md) and [Style Utils](./style_utils.md).
+`harmonize` takes its colors from the nearest harmonized container, such as
+`<Card harmonize variant="soft" color="primary">`; see
+[Theming](./theming.md#harmonized-surfaces).
+
+These props are generation-time strings. To choose a color from data, render
+static variants with `Switch`/`Match` or `Show`:
 
 ```tsx
-// ✅ Correct
-<Button variant="soft" color="primary" size="md">Click</Button>
-
-// ❌ Wrong - will cause errors
-<Button color={sql`case when active then 'primary' else 'neutral' end`} />
+<Switch>
+  <Match when={sql`order.status = 'late'`}>
+    <Chip color="danger">Late</Chip>
+  </Match>
+  <Match when={sql.true}>
+    <Chip color="neutral">{sql`order.status`}</Chip>
+  </Match>
+</Switch>
 ```
 
-Components with a `size` prop use the shared `Size` type and support `"xs"`,
-`"sm"`, `"md"`, and `"lg"`. Layout primitives that do not expose a size prop
-are sized through their child components and `sx` styles.
+## Dynamic Classes
 
-## Style Types
+Three props toggle classes from a SQL condition. They differ in what the class
+string means:
 
-Use exported style types for component style props:
+| Prop | Shape | Class string is |
+| --- | --- | --- |
+| `dynamicClassNames` | `{ condition, classNames }[]` | Tailwind utilities, compiled like `className` |
+| `dynamicClass` | `{ condition, classes }` | Raw CSS class names |
+| `dynamicClasses` | `{ condition, classes }[]` | Raw CSS class names (several entries) |
+
+Use `dynamicClassNames` for conditional Tailwind. All entries whose condition
+is true are applied alongside the static `className`.
 
 ```tsx
-import type { Style, StyleObject } from "std/style_types";
-
-interface BannerProps {
-  sx?: Style;
-}
-
-const rootStyle = {
-  display: "flex",
-  gap: 2,
-  ":hover": {
-    bgcolor: "neutral-100",
-  },
-} satisfies StyleObject;
+<span
+  className="text-sm"
+  dynamicClassNames={[
+    { condition: sql`actual >= budget`, classNames: "text-success-700" },
+    { condition: sql`actual < budget`, classNames: "text-danger-700 font-semibold" },
+  ]}
+>
+  {sql`format.decimal(variance) || '%'`}
+</span>
 ```
 
-`StyleObject` is one `sx` object: CSS properties, Yolm aliases, pseudo
-selectors, breakpoint keys, `dark`/`light`, nested selectors, and CSS variables.
-`Style` is any `sx` value: a `StyleObject`, style array, or falsy conditional
-value (`null`, `false`, `undefined`). Arrays merge in order.
-
-## Theme Types
-
-Type theme options with `ThemeOpts`:
-
-```tsx
-import type { ThemeOpts } from "std/create_theme";
-
-export const appTheme = {
-  lightColorScheme: {
-    palette: {
-      primary: {
-        solidBg: "#14532d",
-      },
-    },
-  },
-  fontFamily: {
-    body: "Inter, sans-serif",
-  },
-} satisfies ThemeOpts;
-```
-
-`ThemeOpts` supports these top-level keys:
-
-| Key | Purpose |
-|-----|---------|
-| `lightColorScheme` | Partial light-mode color scheme overrides |
-| `darkColorScheme` | Partial dark-mode color scheme overrides |
-| `focus` | Focus ring and focus highlight settings |
-| `typography` | Typography scale and text style overrides |
-| `fontFamily` | Font family tokens |
-| `transitionDurations` | Named duration tokens |
-| `transitionEasings` | Named easing tokens |
-| `tokens` | Shared design tokens, including color scales |
-
-## Converting HTML and Tailwind to Yolm
-
-When migrating existing HTML or Tailwind CSS components to Yolm, follow these transformation rules:
-
-### Class and sx Properties
-
-When copying HTML that uses Tailwind classes, keep static utility strings in
-`className`. Convert to `sx` only when you intentionally want a style object.
-
-- **No `class` attribute**: There is no `class` attribute on Yolm components. Use `className` for static strings of classes (no SQL expressions) and `sx` for style objects.
-- **className limitations**: The `className` prop accepts only static strings, NOT SQL expressions. For dynamic classes based on runtime conditions, use the `dynamicClass` prop instead.
-- **Style Objects**: Use `createStyles` or plain objects within the `sx` prop.
-
-#### Conversion Example
-
-Original Tailwind HTML:
-
-```html
-<div class="px-4 py-6 sm:px-0">
-  <dt class="text-sm font-medium leading-6 text-gray-900">Salary expectation</dt>
-  <dd class="mt-1 text-sm leading-6 text-gray-700 sm:mt-0">$120,000</dd>
-</div>
-```
-
-Converted Yolm Code:
+Use `dynamicClass`/`dynamicClasses` when the class is a plain name that some
+CSS already targets, usually an `sx` selector on the same element. Tailwind
+utilities in `classes` are not compiled and have no effect.
 
 ```tsx
 <div
   sx={{
-    px: 4,
-    py: 6,
-    sm: {
-      px: 0,
-    }
+    borderLeft: "3px solid transparent",
+    "&.selected": { borderLeftColor: "primary-500", bgcolor: "background-level1" },
   }}
+  dynamicClass={{ condition: sql`row.id = selected_id`, classes: "selected" }}
 >
-  <dt
-    sx={{
-      fontSize: "sm",
-      lineHeight: "normal",
-      fontWeight: "medium",
-      color: "neutral-900",
-    }}
-  >
-    Salary expectation
-  </dt>
-  <dd
-    sx={{
-      fontSize: "sm",
-      lineHeight: "normal",
-      color: "neutral-700",
-    }}
-  >
-    $120,000
-  </dd>
+  {sql`row.name`}
 </div>
 ```
 
-### Dynamic Inline Styles
+Animations follow the same pattern: register keyframes once and enable them
+with a raw class.
 
-For runtime-dependent styles, both `sx` and `style` accept `sql` expressions as values. Use `style` for simple inline runtime values; use `sx` when you also need theme tokens, responsive keys, or selectors. See [Dynamic Styling](./dynamic_styling.md).
+```tsx
+const pulse = useApp().registerKeyframes({
+  "0%": { transform: "scale(1)" },
+  "50%": { transform: "scale(1.1)" },
+});
 
-## CSS Guidelines
+<Button
+  sx={{ "&.pulse": { animation: `${pulse} 1s ease-in-out` } }}
+  dynamicClass={{ condition: sql`has_unsaved_changes`, classes: "pulse" }}
+>
+  Save Changes
+</Button>
+```
 
-1. **Convert to Style Objects**: When copying raw CSS, convert it to a style object format.
-2. **Use createStyles**: For complex, reusable styles, use the `createStyles` utility.
-3. **Responsive Design**: Use the shorthand responsive keys (e.g., `sm:`, `md:`, `lg:`) within the `sx` object.
+## Runtime Values With style
+
+`style` values may be SQL expressions. They are written as inline CSS, so they
+must evaluate to real CSS values; theme shorthands such as `primary-500` are
+only translated inside `sx`. Use `var(--palette-...)` for theme colors.
+
+```tsx
+<div className="h-2 rounded bg-neutral-100 overflow-hidden">
+  <div
+    className="h-full"
+    style={{
+      width: sql`cast(task.completion as string) || '%'`,
+      backgroundColor: sql`case
+        when task.completion = 100 then 'var(--palette-success-500)'
+        else 'var(--palette-primary-500)'
+      end`,
+    }}
+  />
+</div>
+```
+
+Prefer a static class plus `dynamicClassNames` when the set of looks is small;
+use `style` for continuous values such as widths and positions.
+
+## The sx Prop
+
+`sx` takes a `StyleObject` (or an array of them, merged in order; falsy entries
+are skipped): CSS properties, aliases (`p`, `px`, `m`, `bgcolor`, ...),
+pseudo selectors, nested selectors, CSS variables, `dark`/`light` keys, and
+breakpoint keys `sm`, `md`, `lg`, `xl`, `2xl`.
+
+```tsx
+import type { Style, StyleObject } from "std/style_types";
+
+const rowStyle = {
+  display: "flex",
+  gap: 2,
+  px: 4,
+  sm: { px: 0 },
+  ":hover": { bgcolor: "background-level1" },
+  dark: { borderColor: "neutral-700" },
+} satisfies StyleObject;
+
+interface BannerProps {
+  sx?: Style;
+}
+```
+
+Color properties accept theme tokens: palette steps (`primary-500`), variant
+tokens (`danger-soft-bg`, `neutral-outlined-border`), and semantic tokens
+(`text-secondary`, `background-surface`, `divider`). Dots are normalized to
+dashes, but camelCase names such as `outlinedBorder` are not recognized.
+Use `createStyles` from `std/style_utils` for reusable named style sets; see
+[Theming](./theming.md#style-utilities).
+
+## Semantic Tailwind Colors
+
+Prefer semantic classes so light/dark mode and app themes keep working.
+
+| Purpose | Classes |
+| --- | --- |
+| Text hierarchy | `text-primary`, `text-secondary`, `text-tertiary`, `text-icon` |
+| Backgrounds | `bg-body`, `bg-surface`, `bg-level1`, `bg-level2`, `bg-level3`, `bg-popup`, `bg-tooltip`, `bg-backdrop` |
+| Borders | `border-divider` |
+| Palette steps | `bg-primary-100`, `text-danger-700`, `border-neutral-200`, `bg-primary-500/50` |
+| Variant pairs | `bg-{color}-{variant}` + `text-{color}-{variant}`, with `-hover`, `-active`, `-disabled` suffixes; `border-{color}-outlined` |
+
+Palette and variant colors are `primary`, `neutral`, `danger`, `success`, and
+`warning`; steps are `50`-`950`.
+
+```tsx
+<span className="bg-success-soft text-success-soft px-2 py-0.5 rounded text-xs">
+  Completed
+</span>
+<div className="px-4 py-3 hover:bg-level1 transition-colors">Row content</div>
+```
+
+## Layout
+
+Tailwind layout utilities work as usual. Density and width depend on the users
+and device (see [UX](../ai/review.md#ux)): back-office screens use the available
+width with tight spacing; public or portal forms may cap their width. Common
+app patterns:
+
+```tsx
+// Back-office page: full width, compact padding
+<div className="p-4">...</div>
+
+// Public or portal form page
+<div className="p-6 max-w-3xl mx-auto">...</div>
+
+// 12-column responsive grid
+<div className="grid grid-cols-12 gap-4">
+  <Card className="col-span-12 lg:col-span-6" variant="outlined">...</Card>
+  <Card className="col-span-12 lg:col-span-6" variant="outlined">...</Card>
+</div>
+
+// Header row and right-aligned actions
+<div className="flex items-center justify-between">...</div>
+<div className="flex justify-end gap-3 pt-4 border-t border-divider">...</div>
+
+// Empty state
+<div className="p-6 text-center text-tertiary">No results found</div>
+```
+
+Breakpoint prefixes are `sm:` (640px), `md:` (768px), `lg:` (1024px), and
+`xl:` (1280px) in `className`. In `sx`, use the same names as object keys
+(`sm: { ... }`), not prefixes.
+
+## Converting HTML and Tailwind
+
+- Rename `class` to `className` and keep static Tailwind utilities as they are.
+- Replace runtime-built class strings with `dynamicClassNames`.
+- Map hard-coded grays and brand colors to semantic classes (`text-gray-900` to
+  `text-primary`, `text-gray-500` to `text-tertiary`, `bg-white` to
+  `bg-surface`).
+- Convert raw CSS to `sx` objects only when Tailwind cannot express it
+  (complex selectors, CSS variables, keyframes).
+
+```html
+<div class="px-4 py-6 sm:px-0">
+  <dt class="text-sm font-medium text-gray-900">Salary expectation</dt>
+  <dd class="mt-1 text-sm text-gray-700 sm:mt-0">$120,000</dd>
+</div>
+```
+
+```tsx
+<div className="px-4 py-6 sm:px-0">
+  <dt className="text-sm font-medium text-primary">Salary expectation</dt>
+  <dd className="mt-1 text-sm text-secondary sm:mt-0">{sql`job.salary_label`}</dd>
+</div>
+```
+
+## Common Mistakes
+
+- Putting SQL in `sx` or `className`; use `style` or `dynamicClassNames`.
+- Putting Tailwind utilities in `dynamicClass`/`dynamicClasses`; they are raw
+  class names and are not compiled.
+- Using `sm:` prefixes inside `sx`; use `sm: { ... }` keys.
+- Returning theme shorthands like `'success-600'` from a `style` expression;
+  return `'var(--palette-success-600)'`.
+- Hard-coding hex colors where a semantic class or theme token exists.

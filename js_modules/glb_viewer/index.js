@@ -730,6 +730,7 @@ class GlbViewer {
       throw new Error("The GLB scene contains no visible geometry.");
     }
     this.modelSphere = this.modelBounds.getBoundingSphere(new THREE.Sphere());
+    this.recommendedFitBounds ??= this.robustMeshBounds();
     this.buildNodeIndex();
     this.indexSemantics();
     this.buildExplodeEntries();
@@ -737,6 +738,75 @@ class GlbViewer {
     this.applyExplode();
     this.applySection();
     this.modelSummary = this.sceneSummary();
+  }
+
+  // Opening bounds that skip parts whose centers sit far outside the
+  // interquartile spread of the rest (IFC survey markers, stray exports),
+  // matching the fences yolm-fab bakes into DWG GLBs.
+  robustMeshBounds() {
+    const boxes = [];
+    this.modelRoot.traverse((object) => {
+      if (!object.isMesh || !object.geometry) return;
+      if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+      const count = object.isInstancedMesh ? object.count : 1;
+      const instanceMatrix = new THREE.Matrix4();
+      for (let index = 0; index < count; index += 1) {
+        const box = object.geometry.boundingBox.clone();
+        if (object.isInstancedMesh) {
+          object.getMatrixAt(index, instanceMatrix);
+          box.applyMatrix4(instanceMatrix);
+        }
+        box.applyMatrix4(object.matrixWorld);
+        if (!box.isEmpty()) boxes.push(box);
+      }
+    });
+    if (boxes.length < 3) return null;
+    // Weight parts by size so a cluster of tiny markers (IFC survey points,
+    // origin glyphs) cannot hold the fences open, while one long real part
+    // still anchors them.
+    const weights = boxes.map((box) =>
+      Math.max(box.getSize(new THREE.Vector3()).length(), 1e-9)
+    );
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    const centers = boxes.map((box) => box.getCenter(new THREE.Vector3()));
+    const quantile = (entries, fraction) => {
+      let cumulative = 0;
+      for (const entry of entries) {
+        cumulative += entry.weight;
+        if (cumulative >= totalWeight * fraction) return entry.value;
+      }
+      return entries.at(-1).value;
+    };
+    const fences = ["x", "y", "z"].map((axis) => {
+      const entries = centers
+        .map((center, index) => ({
+          value: center[axis],
+          weight: weights[index],
+        }))
+        .sort((a, b) => a.value - b.value);
+      const lower = quantile(entries, 0.25);
+      const upper = quantile(entries, 0.75);
+      const padding = Math.max((upper - lower) * 3, 1e-9);
+      return [axis, lower - padding, upper + padding];
+    });
+    const retainedIndices = boxes.map((_, index) => index).filter((index) =>
+      fences.every(([axis, lower, upper]) =>
+        centers[index][axis] >= lower && centers[index][axis] <= upper
+      )
+    );
+    const retainedWeight = retainedIndices.reduce(
+      (sum, index) => sum + weights[index],
+      0,
+    );
+    if (
+      retainedIndices.length === boxes.length ||
+      retainedWeight < totalWeight / 2
+    ) return null;
+    const retained = retainedIndices.map((index) => boxes[index]);
+    return retained.reduce(
+      (bounds, box) => bounds.union(box),
+      new THREE.Box3(),
+    );
   }
 
   buildNodeIndex() {
@@ -1353,7 +1423,9 @@ class GlbViewer {
       throw new Error(`Unknown model view: ${view}`);
     }
     this.fitBounds(
-      this.selectedEntry ? this.selectionBounds() : this.activeBounds(),
+      this.selectedEntry
+        ? this.selectionBounds()
+        : this.recommendedFitBounds ?? this.activeBounds(),
       view,
     );
   }

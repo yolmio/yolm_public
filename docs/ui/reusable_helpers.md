@@ -1,6 +1,6 @@
 ---
 title: Reusable UI Helpers
-description: Small reusable components for page headers, boolean display, status chips, and XML payload inspection.
+description: Usage details for small display helpers without their own page - BooleanIcon, FieldRow, StatusChip, and XmlPayloadModal.
 tags:
   - ui
   - components
@@ -14,26 +14,9 @@ related:
 
 # Reusable UI Helpers
 
-These helpers live in `packages/components` and are intended for custom
-operational pages that are too specific for a page template but still need
-consistent display patterns.
-
-## PageTitleHeader
-
-`PageTitleHeader` wraps `PageHeader` with a typography title and optional
-actions. It inherits sidebar-trigger behavior from `PageHeader`.
-
-```tsx
-import { PageTitleHeader } from "components/page_header";
-import { Button } from "components/button";
-
-<PageTitleHeader
-  title="Invoice Review"
-  actions={<Button startIcon="Add">New Invoice</Button>}
-/>;
-```
-
-Use `level` when a panel needs a smaller title such as `"title-lg"`.
+Usage details for small display helpers used on custom operational pages.
+Every helper is listed in the [component catalog](./solution_components.md);
+`PageTitleHeader` is documented in [PageHeader](./page_header.md#pagetitleheader).
 
 ## Boolean And Field Display
 
@@ -50,8 +33,11 @@ import { sql } from "std/sql_utils";
 <BoolFieldRow label="Verified" field="verified" />;
 ```
 
-`FieldRow` can render explicit `value` / `children`, or a legacy-style
-`field` prop that resolves to `record.<field>`.
+`FieldRow` renders `value` / `children`, or a legacy `field` prop that
+resolves to `record.<field>` (`field` wins when set). `BooleanIcon` accepts
+`trueIcon` / `falseIcon` and `trueClassName` / `falseClassName`; `BoolIcon` is
+a backward-compatible alias. `BoolDisplay` shows a label plus icon for an
+arbitrary `expr` or `field`.
 
 ## StatusChip
 
@@ -81,9 +67,11 @@ import { sql } from "std/sql_utils";
 />;
 ```
 
-Keep cases mutually exclusive. The component applies the matching
-`conditionalVariants` to the underlying `Chip`. If a case omits `label`, it
-uses `fallbackLabel`.
+Keep cases mutually exclusive. The matching case's `variant` / `color` are
+applied to the underlying `Chip` as conditional variants; a case without
+`label`, `variant`, or `color` uses the parent `fallbackLabel`, `variant`, or
+`color` (defaults `soft` / `neutral`, `size` `sm`), which also render when no
+case matches.
 
 ## XmlPayloadModal
 
@@ -115,5 +103,6 @@ import { sql } from "std/sql_utils";
 </Data>;
 ```
 
-The modal escapes XML for inline display and can open the raw XML in a browser
-tab through the shared `xml_viewer` JS module.
+The modal escapes XML for inline display and, unless `openInBrowser={false}`,
+can open the raw XML in a browser tab through the shared `xml_viewer` JS
+module. Set `scalarPrefix` when several viewers share one scope.

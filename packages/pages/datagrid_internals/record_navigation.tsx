@@ -211,12 +211,10 @@ export function DatagridRecordNavigation(
           variant="plain"
           color="neutral"
           size="xs"
+          href={withCurrentQuery(sql.lit(props.listPath))}
+          backLink
           onClick={(s) => {
             s.setScalar("ui.datagrid_record_navigation_context", false);
-            s.navigate(
-              withCurrentQuery(sql.lit(props.listPath)),
-              sql.true,
-            );
           }}
         />
         <ButtonGroup size="xs" variant="outlined" color="neutral">

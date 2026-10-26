@@ -15,35 +15,30 @@ related:
 
 # PdfMarkup
 
-`components/pdf_markup` renders a PDF inside the app. Use `PdfMarkupViewer` for
-read-only display with page navigation and zoom, and `PdfMarkupEditor` to add
-pen, highlight, and text-note annotations and persist them through a server
-handler. Use `PdfWorkspaceViewer` and `PdfWorkspaceEditor` when users need to
-move through an ordered set of PDFs without leaving the viewer.
+`components/pdf_markup` renders PDFs in the app. `PdfMarkupViewer` is
+read-only with page navigation and zoom; `PdfMarkupEditor` adds pen,
+highlight, and text-note annotations saved by a server handler.
+`PdfWorkspaceViewer` / `PdfWorkspaceEditor` do the same for an ordered set of
+PDFs.
 
 ```tsx
 import {
   changePdfWorkspaceDocument,
   downloadFlattenedPdf,
   PdfMarkupEditor,
-  type PdfMarkupRotationEvent,
-  type PdfMarkupSaveEvent,
   PdfMarkupViewer,
   PdfWorkspaceEditor,
   PdfWorkspaceViewer,
+  setPdfWorkspaceDocuments,
 } from "components/pdf_markup";
 ```
 
-Both components register their own JS module (`useJsModule("pdf_markup")`) and
-wrap themselves in a `local` `Data` scope that holds toolbar/UI state. You do
-not register the module or add a surrounding `Data`/`Form` yourself. Any outer
-`Data` only exists to fetch the `fileUrl` / `annotations` values you pass in.
+Each component loads the `pdf_markup` JS module and wraps itself in a `local`
+`Data` for toolbar state. Do not call `useJsModule("pdf_markup")` or add a
+`Data`/`Form` for its state; an outer `Data` only fetches the values you pass
+in.
 
-## Usage
-
-Editor that loads a PDF, shows existing annotations, and saves edits on the
-server. `onSave` runs as a server statement; `event.annotations` is the JSON to
-persist. Wrap the writes in a transaction inside the handler.
+## Single file
 
 ```tsx
 <PdfMarkupEditor
@@ -61,29 +56,72 @@ persist. Wrap the writes in a transaction inside the handler.
     `);
     s.commitTransaction();
   }}
-/>;
+/>
 ```
 
-Read-only viewer:
+`PdfMarkupViewer` takes the same props without `onSave`, `onChange`, `tools`,
+`initialTool`, `disabled`, and `saveLabel`.
 
-```tsx
-<PdfMarkupViewer
-  fileUrl={sql`'/api/project-files/' || cast(file.id as string)`}
-  annotations={sql`file.annotation_json`}
-  fileName={sql`file.file_name`}
-/>;
-```
+Non-obvious props:
 
-## Ordered PDF Workspaces
+- SQL-valued (runtime): `fileUrl`, `annotations` (JSON array, default `[]`),
+  `fileName` (download name, default `marked-up.pdf`), `initialPage`
+  (1-based), `initialFocus` (a rendered-pixel crop to frame on open),
+  `handle`, and the editor's `disabled`.
+- Generation-time: `height` (default `calc(100vh - 150px)`, min `520px`),
+  `className`, `showToolbar` (default `true`), `allowDownloadFlattened` (adds
+  a "Download Marked-Up PDF" toolbar button), `tools`, `initialTool`, and
+  `saveLabel` (default `"Save Markups"`).
+- `handle` is auto-generated when omitted. Pass a stable value to target the
+  component from `downloadFlattenedPdf` or the workspace helpers.
+- `tools` defaults to `["hand", "select", "pen", "highlight", "text"]`;
+  `initialTool` defaults to `"select"`. `PdfMarkupTool` is
+  `"hand" | "select" | "pen" | "highlight" | "text"`.
+- `pdfJsUrl`, `pdfJsWorkerUrl`, and `pdfJsWasmUrl` override the bundled pdf.js
+  assets.
 
-Workspace components accept one runtime JSON array instead of individual file
-props. Each document has a stable `key`, PDF URL, and name. For a workspace that
-can grow, use `dataUrl` to lazy-load that document's annotations, optimistic
-`revision`, and optional per-page quarter-turn rotations only when the document
-opens:
+See `PdfMarkupViewerProps`, `PdfMarkupEditorProps`, and the workspace
+`PdfWorkspace*Props` in `components/pdf_markup` for the full contract.
+
+## Save handler and events
+
+`onSave` is a `PdfMarkupSaveHandler`, `(s: UiServerStatements, event:
+PdfMarkupSaveEvent) => void`, and runs on the server when the user saves.
+The component does **not** open a transaction; wrap the writes yourself. On
+success the dirty state clears and a "Saved" alert shows. A thrown error
+shows in a `danger` alert above the PDF.
+
+`PdfMarkupSaveEvent` fields are SQL expressions:
+
+| Field | Meaning |
+|---|---|
+| `annotations` | JSON array to persist. Write this, not `payload`. |
+| `changeSequence` | Client mutation sequence captured with `annotations`. It keeps a finished save from clearing newer edits. |
+| `revision` | Optimistic revision of the active document (workspaces). |
+| `documentKey`, `documentIndex`, `documentCount`, `fileName` | Active document identity. Single-file components use key `"document"`. |
+| `fileItemId`, `contextKey`, `canEdit` | Pass-through values from the workspace descriptor. |
+| `page`, `pageCount`, `dirty`, `handle`, `payload` | Viewer state and raw result JSON. |
+
+`onReady`, `onPageChange`, `onChange`, `onError`, and workspace
+`onDocumentChange` are client-side `PdfMarkupEventHandler`s
+(`(s: DomStatements, event: PdfMarkupEvent)`). `PdfMarkupEvent` has the
+same fields without `annotations` or `changeSequence`. Only `onSave` and
+`onRotationChange` run on the server.
+
+## Workspaces
+
+Workspace components take one runtime JSON array, `documents`, in place of the
+file props. Each descriptor has a stable `key`, `fileUrl`, and `fileName`. It
+may also carry `annotations`, `revision`, `rotations`, `page`, `href`,
+`fileItemId`, `contextKey`, and `canEdit` (`false` makes that document
+read-only). For large sets, use `dataUrl` instead of inline markup: the
+workspace fetches it when the document opens. The endpoint returns
+`{ annotations, revision, rotations }`, where `rotations` is an array of
+`{ page, quarterTurns }`.
 
 ```tsx
 <PdfWorkspaceEditor
+  handle={sql.lit`project-file-markup-editor`}
   documents={sql`
     coalesce((
       select json_array_agg(json_build_object(
@@ -102,171 +140,54 @@ opens:
   `}
   initialDocumentKey={sql`cast(ui.selected_file_id as string)`}
   onSave={(s, event) => {
-    // Persist event.annotations for event.documentKey, comparing event.revision.
+    // Persist event.annotations for event.documentKey; check event.revision.
   }}
   onRotationChange={(s, event) => {
     // Persist event.quarterTurns for event.documentKey and event.page.
   }}
-/>;
+/>
 ```
 
-The `dataUrl` endpoint returns an object with `annotations`, `revision`, and
-`rotations`; the latter is an array of `{ page, quarterTurns }`. Small
-workspaces can put those same fields directly on each descriptor instead.
-Descriptors may include `href`; after a document opens, the workspace replaces
-the browser URL with it and keeps matching external file-rail links synchronized
-so refresh and copied links target the active file.
+Workspace behavior:
 
-The workspace loads only its active PDF and active markup data. Switching
-documents destroys the previous PDF.js loading task and page resources. If the
-active document has unsaved markups, the editor runs `onSave` successfully
-before it switches. Page navigation crosses document boundaries at the first and
-last page. Set `showDocumentNavigation={false}` when a surrounding file rail is
-the workspace's document navigator; call `changePdfWorkspaceDocument` from that
-rail so the same save guard still applies. When `revision` is used for
-optimistic locking, `onSave` must increment it by one; after a successful save
-the workspace advances its in-memory revision by the same amount.
+- Only the active PDF and its markup data are loaded. Switching documents
+  releases the previous PDF.js resources. If there are unsaved markups,
+  `onSave` must succeed before the switch.
+- Page navigation continues across document boundaries.
+- When a descriptor has `href`, the workspace replaces the browser URL with it
+  after the document opens and keeps matching external file-rail links in sync.
+- With `revision` locking, `onSave` must increment the stored revision by
+  exactly one. The workspace advances its in-memory revision by one after a
+  successful save.
+- `showDocumentNavigation={false}` hides the built-in document navigation for
+  pages where a file rail selects documents. From the rail, call
+  `changePdfWorkspaceDocument(s, handle, documentKey, targetPage?)`, where
+  `targetPage` is a number, SQL, or `"last"`, so the save guard still applies.
+- `setPdfWorkspaceDocuments(s, handle, documents, initialDocumentKey?,
+  resultJsonScalar?)` replaces the document set in place and keeps the
+  viewer, tool, and zoom. It discards unsaved edits, so flush them first.
+- Rotation: `PdfWorkspaceViewer` supports transient rotation with
+  `allowRotation`. `PdfWorkspaceEditor` shows rotation controls only when
+  `onRotationChange` is supplied. The page turns at once, the server handler
+  runs, and a failure restores the previous orientation.
+  `PdfMarkupRotationEvent` adds `quarterTurns`, `previousQuarterTurns`, and
+  an opaque `requestId`.
 
-All four components virtualize page surfaces. They keep lightweight
-dimension-aware placeholders for every page, but retain at most five rendered
-PDF/markup canvas pairs under a 128 MiB canvas budget. Flattened downloads fetch
-the active PDF bytes only when requested and build the export in the browser;
-source and output buffers therefore exist only for the duration of an export.
+All four components virtualize pages: every page gets a placeholder, but at
+most five PDF and markup canvas pairs stay rendered, under a 128 MiB canvas
+budget.
 
-`PdfWorkspaceViewer` shares the workspace props and can enable transient page
-rotation with `allowRotation`. `PdfWorkspaceEditor` shows rotation controls only
-when `onRotationChange` is supplied, because edited rotations must be persisted.
+## Flattened download
 
-## Shared Props
-
-`PdfMarkupViewer` and `PdfMarkupEditor` share these props. Runtime values such
-as `fileUrl`, `annotations`, `fileName`, `initialPage`, and `handle` are `Sql`
-expressions (several also accept a plain string literal); `showToolbar`,
-`allowDownloadFlattened`, `height`, and `className` are generation-time config.
-
-| Prop                     | Type                    | Required | Description                                                                                                                     |
-| ------------------------ | ----------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `fileUrl`                | `Sql \| string`         | Yes      | URL of the PDF to load.                                                                                                         |
-| `handle`                 | `Sql \| string`         | No       | Stable id for this viewer instance. Auto-generated if omitted; pass an explicit value to target it from `downloadFlattenedPdf`. |
-| `annotations`            | `Sql`                   | No       | JSON array of existing annotations to render. Defaults to `[]`.                                                                 |
-| `fileName`               | `Sql \| string`         | No       | File name used for the flattened download. Defaults to `marked-up.pdf`.                                                         |
-| `initialPage`            | `Sql`                   | No       | 1-based page to open on. Defaults to `1`.                                                                                       |
-| `height`                 | `string`                | No       | CSS height of the PDF mount. Defaults to `calc(100vh - 150px)` (min `520px`).                                                   |
-| `className`              | `string`                | No       | Class applied to the outer frame.                                                                                               |
-| `showToolbar`            | `boolean`               | No       | Show the built-in toolbar. Default `true`.                                                                                      |
-| `allowDownloadFlattened` | `boolean`               | No       | Add a "Download Marked-Up PDF" button to the toolbar. Default off.                                                              |
-| `pdfJsUrl`               | `Sql \| string`         | No       | Override the bundled pdf.js module URL.                                                                                         |
-| `pdfJsWorkerUrl`         | `Sql \| string`         | No       | Override the bundled pdf.js worker URL.                                                                                         |
-| `onReady`                | `PdfMarkupEventHandler` | No       | Runs when the viewer finishes loading.                                                                                          |
-| `onPageChange`           | `PdfMarkupEventHandler` | No       | Runs when the current page changes.                                                                                             |
-| `onError`                | `PdfMarkupEventHandler` | No       | Runs when loading or rendering fails.                                                                                           |
-
-## PdfMarkupEditor Props
-
-In addition to the shared props, the editor adds:
-
-| Prop          | Type                    | Required | Description                                                            |
-| ------------- | ----------------------- | -------- | ---------------------------------------------------------------------- |
-| `onSave`      | `PdfMarkupSaveHandler`  | Yes      | Server handler that persists annotations. See below.                   |
-| `tools`       | `PdfMarkupTool[]`       | No       | Which tools to show. Default `["select", "pen", "highlight", "text"]`. |
-| `initialTool` | `PdfMarkupTool`         | No       | Tool selected on open. Default `"select"`.                             |
-| `disabled`    | `BooleanExpr`           | No       | SQL boolean that disables all editing controls.                        |
-| `saveLabel`   | `string`                | No       | Label of the save button. Default `"Save Markups"`.                    |
-| `onChange`    | `PdfMarkupEventHandler` | No       | Runs client-side whenever annotations change.                          |
-
-`PdfMarkupViewer` takes the shared props only.
-
-`PdfMarkupTool` is `"hand" | "select" | "pen" | "highlight" | "text"`.
-
-Workspace components additionally accept `showDocumentNavigation`; it defaults
-to `true`. Turn it off when an external file rail owns document selection.
-
-## Save Handler and Events
-
-The editor's Save button (and a save requested from within the PDF surface)
-collects the current annotations, then runs `onSave` on the server. On success
-the "dirty" state clears and a `success` "Saved" alert shows; a thrown error is
-caught and surfaced in a `danger` alert above the PDF. `onSave` is responsible
-for its own transaction (wrap writes in `s.startTransaction()` /
-`s.commitTransaction()` as in the example above).
-
-`onSave` has the signature:
-
-```ts
-type PdfMarkupSaveHandler = (
-  s: UiServerStatements,
-  event: PdfMarkupSaveEvent,
-) => void;
-```
-
-`PdfMarkupSaveEvent` fields (all `Sql` expressions):
-
-| Field            | Description                                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `annotations`    | JSON array of annotations to persist. This is what you write to the database.                                                   |
-| `changeSequence` | Client mutation sequence captured with `annotations`; the component uses it to avoid clearing newer edits when a save finishes. |
-| `page`           | Current page number.                                                                                                            |
-| `pageCount`      | Total page count.                                                                                                               |
-| `dirty`          | Whether unsaved changes exist.                                                                                                  |
-| `handle`         | The viewer handle.                                                                                                              |
-| `payload`        | Raw save result JSON.                                                                                                           |
-| `documentKey`    | Stable key of the active workspace document. Single-file components use `"document"`.                                           |
-| `documentIndex`  | Zero-based position in the workspace.                                                                                           |
-| `documentCount`  | Number of documents in the workspace.                                                                                           |
-| `fileName`       | Active document name.                                                                                                           |
-| `revision`       | Optimistic revision supplied by the active document.                                                                            |
-
-The other handlers (`onReady`, `onPageChange`, `onChange`, `onError`) use:
-
-```ts
-type PdfMarkupEventHandler = (
-  s: DomStatements,
-  event: PdfMarkupEvent,
-) => void;
-```
-
-`PdfMarkupEvent` carries the same document identity fields plus `handle`,
-`payload`, `page`, `pageCount`, and `dirty` (no `annotations`). Workspace
-`onDocumentChange` receives this event after a new PDF is ready. These handlers
-run client-side; only `onSave` and workspace `onRotationChange` run on the
-server.
-
-Persistent rotation is optimistic: the page turns immediately, the editor runs
-`onRotationChange`, and a failed server handler restores the prior orientation.
-The rotation event includes `quarterTurns`, `previousQuarterTurns`, and an
-opaque `requestId`.
-
-An external file rail can request a guarded document change with:
-
-```ts
-changePdfWorkspaceDocument(
-  s,
-  sql.lit`project-file-markup-editor`,
-  sql`cast(file.id as string)`,
-);
-```
-
-## Downloading a Flattened PDF
-
-Set `allowDownloadFlattened` to add a download button to the toolbar, or call
-the exported helper from your own control. `fileName` is a positional argument:
-pass a value or `undefined` (it is not an optional/omittable parameter).
-
-```ts
-downloadFlattenedPdf(
-  s: DomStatements,
-  handle: Sql | string,
-  fileName: Sql | string | undefined,
-): void
-```
-
-To call it from outside the component you must pass the same `handle` you gave
-the editor/viewer:
+`allowDownloadFlattened` adds a toolbar button. From your own control, call
+`downloadFlattenedPdf(s, handle, fileName)` with the component's explicit
+`handle`. `fileName` is positional and required; pass `undefined` to use the
+default. The export fetches the PDF bytes on demand and is built in the
+browser.
 
 ```tsx
 <Button
   variant="outlined"
-  color="neutral"
   startIcon="Download"
   onClick={(s) =>
     downloadFlattenedPdf(
@@ -276,25 +197,16 @@ the editor/viewer:
     )}
 >
   Download Marked-Up PDF
-</Button>;
+</Button>
 ```
 
-## Common Mistakes
+## Common mistakes
 
-- Omitting `onSave` on `PdfMarkupEditor` — it is required. Use `PdfMarkupViewer`
-  if you only need read-only display.
-- Writing `event.payload` to the database in `onSave`. Persist
-  `event.annotations` (the annotation JSON array), not the raw payload.
-- Forgetting that `onSave` must open its own transaction; the component runs it
-  on the server but does not wrap it in one.
-- Calling `downloadFlattenedPdf` (or the toolbar download) without giving the
-  component a stable `handle`. Without an explicit `handle` the generated id is
-  not addressable from an external button.
-- Calling `downloadFlattenedPdf` with only two arguments. The `fileName`
-  parameter is required; pass an `Sql`/string value or `undefined`.
-- Treating `showToolbar`, `allowDownloadFlattened`, `tools`, `initialTool`,
-  `saveLabel`, or `height` as SQL — they are generation-time config. Use `Sql`
-  for `fileUrl`, `annotations`, `fileName`, `initialPage`, `handle`, and
-  `disabled`.
-- Manually calling `useJsModule("pdf_markup")` or wrapping the component in an
-  extra `Data` for its state — both are handled internally.
+- Omitting `onSave` on an editor (it is required); use a viewer for read-only
+  display.
+- Persisting `event.payload` instead of `event.annotations`.
+- Forgetting the transaction in `onSave`.
+- Calling `downloadFlattenedPdf` without an explicit `handle` on the component,
+  or with only two arguments.
+- Passing SQL to generation-time props such as `tools`, `saveLabel`, or
+  `height`.

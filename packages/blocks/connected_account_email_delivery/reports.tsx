@@ -6,6 +6,8 @@ import { StatRow } from "components/stat_row";
 import { Typography } from "components/typography";
 import { sql } from "std/sql_utils";
 import { useState } from "std/ui";
+import { system } from "std/system";
+import { ConnectedAccountEmailDeliveryBlock } from "./index";
 
 /**
  * Route-free reporting for deliveries sent through connected email accounts.
@@ -13,6 +15,8 @@ import { useState } from "std/ui";
  * navigation wrapper.
  */
 export function ConnectedAccountEmailDeliveryReport() {
+  const marketing = !!system.block(ConnectedAccountEmailDeliveryBlock).opts
+    .bulkEmailDelivery;
   useState((s) => {
     s.defScalar("connected_report_delivery_id", { type: "BigInt" });
   });
@@ -64,6 +68,7 @@ export function ConnectedAccountEmailDeliveryReport() {
             count(case when recipient.status = 'rate_limited' then 1 end) as rate_limited_count,
             count(case when recipient.status = 'sending' then 1 end) as sending_count,
             count(case when recipient.status = 'sent' then 1 end) as sent_count,
+            count(case when recipient.status = 'excluded' then 1 end) as excluded_count,
             count(case when recipient.status = 'failed' then 1 end) as failed_count,
             count(case when recipient.status = 'send_unknown' then 1 end) as send_unknown_count
           from connected_account_email_deliveries delivery
@@ -102,6 +107,7 @@ export function ConnectedAccountEmailDeliveryReport() {
           b.simpleColumn("rate_limited_count", "Rate limited");
           b.simpleColumn("sending_count", "Sending");
           b.simpleColumn("sent_count", "Sent");
+          b.simpleColumn("excluded_count", "Excluded");
           b.simpleColumn("failed_count", "Failed");
           b.simpleColumn("send_unknown_count", "Unknown");
           b.field("created_at");
@@ -122,14 +128,16 @@ export function ConnectedAccountEmailDeliveryReport() {
           {sql`'Recipients for connected-account delivery ' || connected_report_delivery_id::string`}
         </Typography>
         <Alert color="neutral">
-          Failed recipients were not sent. Check the error and current contact
-          eligibility before preparing a new message. Unknown outcomes need
-          provider confirmation; pending, rate-limited, and sending recipients
-          are still queued or in progress.
+          Excluded recipients were skipped because of current contact
+          eligibility or a marketing opt-out. Failed recipients were not sent.
+          Check the error and current contact eligibility before preparing a new
+          message. Unknown outcomes need provider confirmation; pending,
+          rate-limited, and sending recipients are still queued or in progress.
         </Alert>
         <DataTable
           query={sql`select id, delivery_id, source_recipient_key,
               recipient_email, status, error, attempted_at, completed_at
+              ${marketing ? sql`, unsubscribed_at` : sql``}
             from connected_account_email_recipient_outbox
             where delivery_id = connected_report_delivery_id
             order by id`}
@@ -149,6 +157,7 @@ export function ConnectedAccountEmailDeliveryReport() {
             );
             b.field("attempted_at");
             b.field("completed_at");
+            if (marketing) b.field("unsubscribed_at");
           }}
           searchable={["recipient_email", "source_recipient_key", "error"]}
           filterable

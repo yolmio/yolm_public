@@ -537,16 +537,6 @@ function AppointmentList({
           : undefined)}
       procedure={(s) => {
         s.defScalar("appointment_status", sql.lit``);
-
-        s.defScalar("appointment_id", {
-          type: "BigInt",
-        });
-        s.defScalar(
-          "exists_appointments",
-          sql`exists (select 1 from ${sql.ref(appointmentTable)}
-            where ${filter} ${userFilter}${additionalFilters}
-            )`,
-        );
       }}
     >
       <Data
@@ -720,9 +710,7 @@ function DevDefinedAppointmentItem({
       local
       procedure={(s) => {
         s.defScalar("reassign_appointment", false);
-        s.defScalar("notifications_dialog", false);
         s.defScalar("changing_status", false);
-        s.defScalar("history_dialog", false);
       }}
     >
       <ExpandableAppointmentRow
@@ -918,46 +906,35 @@ function DevDefinedAppointmentItem({
                               appointmentTable,
                               appointmentId: sql`appointment_id`,
                             });
-                          // if (schedulingBlock.opts.webhooks) {
-                          //   system.block(OutgoingWebhooksBlock).trigger(s, {
-                          //     recordId: sql`appointment_id`,
-                          //     type: "appointment_cancelled",
-                          //   });
-                          // }
                           onCancel?.beforeTransactionCommit?.(
                             s,
                             sql`appointment_id`,
                           );
-                          if (eventType?.notifications?.cancellationEmail) {
-                            schedulingBlock.enqueueBackgroundTask(s, {
-                              taskType: "email_dev",
-                              appointmentTable,
-                              appointmentId: sql`appointment_id`,
-                              emailType: "invitee_cancellation_email",
-                              insideTransaction: true,
-                            });
+                          if (eventType) {
+                            schedulingBlock.enqueueDevDefinedAppointmentTasks(
+                              s,
+                              {
+                                eventType,
+                                appointmentId: sql`appointment_id`,
+                                change: "cancelled",
+                                insideTransaction: true,
+                              },
+                            );
+                          } else {
+                            for (
+                              const taskType of [
+                                "calendar_delete",
+                                "meeting_delete",
+                              ]
+                            ) {
+                              schedulingBlock.enqueueBackgroundTask(s, {
+                                taskType,
+                                appointmentTable,
+                                appointmentId: sql`appointment_id`,
+                                insideTransaction: true,
+                              });
+                            }
                           }
-                          if (eventType?.notifications?.hostCancellationEmail) {
-                            schedulingBlock.enqueueBackgroundTask(s, {
-                              taskType: "email_dev",
-                              appointmentTable,
-                              appointmentId: sql`appointment_id`,
-                              emailType: "host_cancellation_email",
-                              insideTransaction: true,
-                            });
-                          }
-                          schedulingBlock.enqueueBackgroundTask(s, {
-                            taskType: "calendar_delete",
-                            appointmentTable,
-                            appointmentId: sql`appointment_id`,
-                            insideTransaction: true,
-                          });
-                          schedulingBlock.enqueueBackgroundTask(s, {
-                            taskType: "meeting_delete",
-                            appointmentTable,
-                            appointmentId: sql`appointment_id`,
-                            insideTransaction: true,
-                          });
                           s.commitTransaction();
                           onCancel?.afterTransactionCommit?.(
                             s,

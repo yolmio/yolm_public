@@ -41,8 +41,9 @@ Table blocks are related to a single database table. They add fields (physical o
 
 **Examples:** Address, Attachments, Notes List, Translations, and Synonyms
 
-Audit fields are a schema pattern, not a table block. Add only the provenance
-fields the workflow actually reads and writes.
+Audit fields are a schema pattern, not a table block. Add a provenance field
+only when a frequent query, the UI, or a workflow reads it; transaction queries
+cover developer forensics.
 
 **Usage:** Added via `table.addBlock(BlockClass)` inside a table definition
 
@@ -276,3 +277,20 @@ import { NotesListTableBlock } from "table_blocks/notes_list";
 See the dedicated documentation for each block:
 
 - [AuthBlock](../blocks/auth.md) - Complete authentication and authorization system
+- [CrmBlock](../blocks/crm.md) - Contacts, organizations, sales pipelines, and CRM pages
+- [Scheduling Block](../blocks/scheduling.md) - Event types, public booking pages, and appointments
+- [Calendar Integrations](../blocks/calendar_integrations.md) - Google and Outlook calendar sync for scheduling
+- [Bulk Email Delivery Block](../blocks/bulk_email_delivery.md) - Platform-managed bulk email delivery
+- [Marketing Email Campaign Block](../blocks/marketing_email_campaign.md) - Scheduled template-based marketing campaigns
+- [Email Templates Block](../blocks/email_templates.md) - Basic and advanced email templates
+- [Glossary Block](../blocks/glossary.md) - Shared glossary of terms with an admin page
+- [Daily Log Block](../blocks/daily_log.md) - Per-user daily log entries and review pages
+- Static secrets - Encrypted server-side values read with `getStaticSecret`
+- Table blocks: [Address](../blocks/table_blocks/address.md),
+  [Attachments](../blocks/table_blocks/attachments.md),
+  [Notes List](../blocks/table_blocks/notes_list.md),
+  [Translations](../blocks/table_blocks/translations.md), and
+  [Synonyms](../blocks/table_blocks/synonyms.md)
+
+For the full catalog of blocks, providers, and table blocks, see
+[Solution Blocks](../blocks/solution_blocks.md).

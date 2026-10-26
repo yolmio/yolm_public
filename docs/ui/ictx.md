@@ -70,6 +70,23 @@ function ConsumerB() {
 }
 ```
 
+## Gather phase
+
+Some parents need to know what their descendants will request before they
+render. `Form`, menus, `WorkQueue`, and toolbars call
+`gatherChildrenContextInfo(children)` (from `std/ui`), which runs the child
+component functions once in a `"gather"` pass that produces no output, so
+children can register context (form fields, toolbar state, menu nodes) with
+the parent. The parent then renders normally in the `"render"` phase.
+
+Consequences for component authors:
+
+- A component function may run more than once at generation time. Keep it free
+  of side effects other than `addCtx`/ICtx registration.
+- `usePhase()` returns `"gather"` or `"render"`; check it only when a component
+  must register something during gather (as `useToolbarState` does) or must
+  skip work that only makes sense while rendering.
+
 ## Built-in ICtx keys
 
 `std/ictx` exports the keys produced by Yolm's standard components.
@@ -130,7 +147,7 @@ Advanced components sometimes consume these keys directly:
 |--------|-----|
 | `DynamicDatagridICtxKey` | Context for the active dynamic datagrid: selected-row query/state, columns, and toolbar change triggers. Only consume inside `Datagrid`/`DatagridPage`. |
 | `LogoutICtxKey` | Auth providers expose `logout(s)` here so navbars and app shells can trigger sign-out without knowing the auth implementation. |
-| `useToolbarState(fn)` | Registers state on the enclosing toolbar during the gather phase. Use from toolbar items that need backing state mounted at toolbar level. |
+| `useToolbarState(fn)` | Registers state on the enclosing toolbar during the [gather phase](#gather-phase). Use from toolbar items that need backing state mounted at toolbar level. |
 
 `components/menu` also exports backward-compatible dropdown aliases:
 `useDropdownNode` is an alias for `useMenuNode`, and `useDropdownState` is an
@@ -145,9 +162,9 @@ or component primitives:
 | Hook | Description |
 |------|-------------|
 | `useRoute(pathOrOptions)` | Wraps the current component in a `Route`. Accepts a string path or `{ path, exact? }`. |
-| `useQueryParams(params)` | Wraps the current component in `QueryParams`; `params` is an array of `{ name, type, default }` declarations. This differs from `Data.queryParams`, which is a record map such as `{ search: { type: "String", default: sql.lit\`\` } }`. |
+| `useQueryParams(params)` | Wraps the current component in the low-level `QueryParams` node; `params` is an array of `{ name, type, default }` declarations. Solution code should use `Data` `queryParams` instead, which is a record map such as `{ search: { type: "String", default: sql.lit\`\` } }` and can infer types (see [Routing](./routing.md)). |
 | `useUniqueId()` | Returns a stable unique SQL id expression for the current component, with `Each` and datagrid row context included when present. |
-| `usePhase()` | Returns the current render phase (`"gather"` or `"render"`). Use only for components that must behave differently while collecting context. |
+| `usePhase()` | Returns `"gather"` or `"render"`; see [Gather phase](#gather-phase). |
 
 ## See also
 

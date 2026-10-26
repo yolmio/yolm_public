@@ -16,8 +16,8 @@ related:
 
 # Mobile Capture And Scanning
 
-Build mobile workflows that scan QR codes, confirm physical work, capture
-photos, and show image evidence.
+Mobile workflows that scan QR codes, confirm physical work, capture photos,
+and show image evidence.
 
 ## App Setup
 
@@ -31,11 +31,31 @@ Mobile scanner apps need:
 
 See [Progressive Web Apps](./progressive_web_apps.md) for manifest details.
 
+## Signature capture
+
+Use `SignaturePad` from `components/signature_pad` for shipping signoff,
+acknowledgements, or training evidence. It loads the signature browser module,
+owns its canvas and cleanup, and passes an image data URL to `onSigned`.
+The caller owns persistence, authorization, and any attestation requirement.
+
+```tsx
+<SignaturePad
+  label="Sign here"
+  submitLabel="Confirm signature"
+  hideGuideInOutput
+  onSigned={(s, image) => s.setScalar("signature_image", image)}
+  onClear={(s) => s.setScalar("signature_image", sql.lit``)}
+/>
+```
+
+`submitDisabled` adds an application-specific condition to the empty-signature
+guard. `hideGuideInOutput` removes the signing guide from the exported image;
+the default retains it. Each component generates its own unique handle.
+
 ## QrScanner
 
-Import `QrScanner` from `components/qr_scanner`. Use `mode="explicit"` when a
-scan must be resolved and confirmed before changing workflow state. Typical
-state is local `Data`:
+`QrScanner` (`components/qr_scanner`) renders a full-screen camera overlay and
+loads the `qr_scanner` JS module itself. Keep scanner state in local `Data`:
 
 ```tsx
 <Data local procedure={(s) => {
@@ -50,73 +70,46 @@ state is local `Data`:
       scanPhase={sql`scan_phase`}
       candidateValue={sql`scan_candidate_value`}
       errorMessage={sql`scan_error`}
-      onClose={(s) => s.setScalar("scanner_open", sql.false)}
       onDetect={(s, scannedValue) => {
         s.setScalar("scan_candidate_value", scannedValue);
         s.setScalar("scan_phase", sql.lit`candidate`);
       }}
-      onConfirm={(s) => {
-        s.setScalar("scan_phase", sql.lit`confirmed`);
-      }}
       onScan={(s, scannedValue) => {
-        s.tryServer({ body: (s) => {/* update workflow */} });
+        s.server((s) => {/* validate and update workflow */});
+        s.refetch();
       }}
+      captureEndpoint={sql`'/api/confirm-scan?item_id=' || scan_candidate_value`}
+      onUploadComplete={(s) => {
+        s.setScalar("scanner_open", sql.false);
+        s.refetch();
+      }}
+      onUploadFailed={(s) => s.setScalar("scan_error", sql.lit`Upload failed`)}
+      onClose={(s) => s.setScalar("scanner_open", sql.false)}
     />
   </Show>
 </Data>
 ```
 
-Use `mode="automatic"` when a recognized code can call `onScan` immediately.
-Set `enableAudio={false}` or `enableVibration={false}` for quiet environments.
+Non-obvious props (see `QrScannerProps` in `components/qr_scanner`):
 
-Key `QrScanner` props:
+| Prop | Notes |
+|------|-------|
+| `mode` | `"explicit"`: each detection goes to `onDetect` and waits for confirmation. `"automatic"`: a recognized code goes straight to `onScan`. |
+| `onScan(s, scannedValue)` / `onClose` | Required DOM handlers. Validate and update the workflow in `onScan` (or after explicit confirmation). This is a raw handler; see [raw event handlers](./data_vs_form.md#raw-event-handlers). |
+| `onDetect(s, scannedValue, isCameraScan)` | Explicit mode only. Resolve display info for the candidate here. |
+| `scanPhase`, `candidateValue` | SQL scalars for the confirm flow (for example scanning, candidate, confirmed). `onConfirm` / `onReject` react to the user's choice. |
+| `detectMessage` / `confirmMessage` | SQL message on the confirmation panel. `detectMessage` applies to explicit mode only; `confirmMessage` to automatic mode only. |
+| `scanning`, `errorMessage` / `onClearError`, `itemCount` | SQL in-progress flag, error text and clear handler, and a count shown in the header. |
+| `onManualEntry(s, enteredValue)` | Camera-error fallback that receives a trimmed, manually entered value. Label it with `manualEntryLabel` / `manualEntryPlaceholder`. |
+| `captureEndpoint` | SQL URL. When set, confirming a scan opens a photo step and uploads the image bytes there. `onUploadComplete` and `onUploadFailed` report the result. |
+| `enableAudio` / `enableVibration` | Static booleans, both enabled by default. Disable them for quiet environments. |
 
-| Prop | Required | Description |
-|------|----------|-------------|
-| `mode` | Yes | `"explicit"` for confirm-first flows, `"automatic"` for immediate scan handling. |
-| `onScan` | Yes | DOM handler called with `(s, scannedValue)`. Do validation and server updates here, or after explicit confirmation. |
-| `onClose` | Yes | DOM handler for closing the full-screen scanner. |
-| `onDetect` | Explicit mode | DOM handler called with `(s, scannedValue, isCameraScan)` before confirmation; resolve display info here. |
-| `scanPhase` | No | SQL scalar for scanner phase such as scanning/candidate/confirmed. |
-| `candidateValue` | No | SQL scalar holding the current candidate code. |
-| `detectMessage` / `confirmMessage` | No | SQL message shown in explicit/automatic confirmation UI. |
-| `scanning` | No | SQL boolean for in-progress state. |
-| `errorMessage` / `onClearError` | No | Error text and clear handler. |
-| `onManualEntry` | No | Camera-error fallback called with a trimmed manually entered scan value. |
-| `manualEntryLabel` / `manualEntryPlaceholder` | No | Text for the optional manual-entry fallback. |
-| `captureEndpoint` | No | SQL URL for uploading a captured image as bytes after confirmation. |
-| `onUploadComplete` / `onUploadFailed` | No | DOM handlers for photo upload result. |
-| `itemCount` | No | SQL count displayed in the scanner UI. |
-| `enableAudio` / `enableVibration` | No | Static booleans; both default to enabled. |
-
-## Scan-To-Photo Confirmation
-
-For photo proof, pass `captureEndpoint`; the scanner uploads image bytes there
-and calls the upload callbacks.
-
-```tsx
-<QrScanner
-  mode="explicit"
-  scanPhase={sql`scan_phase`}
-  candidateValue={sql`scan_candidate_value`}
-  captureEndpoint={sql`'/api/confirm-scan?item_id=' || scan_candidate_value`}
-  onUploadComplete={(s) => {
-    s.setScalar("scanner_open", sql.false);
-    s.refetch();
-  }}
-  onUploadFailed={(s) => {
-    s.setScalar("scan_error", sql.lit`Upload failed`);
-  }}
-  onScan={(s, scannedValue) => {
-    s.setScalar("scan_candidate_value", scannedValue);
-  }}
-  onClose={(s) => s.setScalar("scanner_open", sql.false)}
-/>
-```
-
-The endpoint should use `bytesBodyScalar`, `s.createBlob`, store the blob hash
-and content type, then return success/error. Review pages can show images with
-`ImageGallery`; serve URLs through an endpoint that calls `s.returnBlob(...)`.
+The capture endpoint reads the upload with `bytesBodyScalar`, stores it with
+`s.createBlob`, persists the blob hash and content type with the scan event,
+and returns success or an error. Review pages can show the stored photos with
+`ImageGallery` (below), served by an endpoint that calls `s.returnBlob(...)`.
+See [Files, blobs, and exports](../api/files_blobs_exports.md) for both
+endpoint shapes.
 
 ## Photo Capture Dialogs
 
@@ -148,15 +141,17 @@ content type.
 </ImageGallery>
 ```
 
-Serve image URLs through an API endpoint that sets `Content-Type`,
-`Cache-Control`, and calls `s.returnBlob(...)`.
+Serve image URLs through an API endpoint that sets `Content-Type` and
+`Cache-Control` and calls `s.returnBlob(...)`.
 
 ## QR Workflow Rules
 
 - Store QR version or validity state when stickers can be reprinted or revoked.
-- Treat every scan as a workflow event: validate current state, write an
-  activity/tracking row, and update lifecycle status in one transaction.
+- Treat every scan as a workflow event: validate current state and update
+  lifecycle status in one transaction. Write a scan record only when the UI or
+  logic reads scan history; transaction queries cover forensics.
 - Return `409` for stale, duplicate, or invalid state transitions.
-- Keep user-facing scan messages in `ui.*` or local `Data` state.
-- Add tests for duplicate scans, stale codes, missing records, and successful
-  state transitions.
+- Keep scan messages and phases in the scanner's local `Data` state, which only
+  that subtree can see; see [UI state scope](./overview.md#ui-state-scope).
+- Verify duplicate scans, stale codes, missing records, and successful state
+  transitions; commit tests for the business rules nothing else covers.

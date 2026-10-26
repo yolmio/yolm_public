@@ -11,6 +11,12 @@ tags:
 
 Aggregate functions compute a single result from a set of input rows.
 
+> **Warning:** `distinct` inside an aggregate is honored only by
+> `count(distinct ...)`. Every other aggregate, including `sum`, `avg`,
+> `string_agg`, `json_array_agg`, and `json_object_agg`, silently ignores
+> `distinct` and aggregates every row. See
+> [DISTINCT in Aggregates](#distinct-in-aggregates).
+
 ## Function Reference
 
 | Aggregate | Aliases | Arguments |
@@ -284,10 +290,16 @@ group by department;
 select count(distinct category) from products;  -- number of distinct categories
 ```
 
-**Important:** other aggregates currently **ignore** `DISTINCT` — `sum`, `avg`,
-`string_agg`, `json_array_agg`, and `json_object_agg` aggregate every row even
-when `distinct` is written. To aggregate unique values with these, deduplicate
-the input in a subquery first:
+> **Warning:** every other aggregate silently **ignores** `distinct`. `sum`,
+> `avg`, `min`, `max`, `bool_and`, `bool_or`, `count_if`, `string_agg`,
+> `json_array_agg`, `json_object_agg`, `value_for_min`, `value_for_max`,
+> `first`, `last`, and `hash_agg` aggregate every row even when `distinct` is
+> written, with no error. The statistical and percentile aggregates (`stddev`,
+> `variance`, `percentile_cont`, `percentile_disc`, and their variants) reject
+> `distinct` with a compile error.
+
+To aggregate unique values with these, deduplicate the input in a subquery
+first:
 
 ```sql
 select sum(price) from (select distinct price from products) p;

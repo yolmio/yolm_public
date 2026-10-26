@@ -4,11 +4,16 @@ export const driveText = createTranslator({
   defaultLanguage: "en",
   languages: {
     en: {
+      copyLink: "Copy link",
+      copyFolderLink: "Copy folder link",
+      folderActions: "Folder actions",
+      copyVersionLink: "Copy version link",
       policyLibrary: "Policy library",
       policyLibraryDescription:
         "Current approved policies and controlled documents.",
       searchPolicies: "Search policies and tags",
       noPublishedPolicies: "No published policies yet",
+      noPublishedPoliciesInFolder: "No published policies found in this folder",
       publishedPoliciesAppear:
         "Approved documents appear here as soon as they are published.",
       current: "Current",
@@ -34,6 +39,7 @@ export const driveText = createTranslator({
       cancel: "Cancel",
       parentFolder: "Parent folder",
       searchSpace: "Search this space",
+      search: "Search",
       newFolderName: "New folder name",
       create: "Create",
       name: "Name",
@@ -91,11 +97,17 @@ export const driveText = createTranslator({
       dateTimeFormat: "%m/%d/%Y %-I:%M %p",
     },
     es: {
+      copyLink: "Copiar enlace",
+      copyFolderLink: "Copiar enlace de carpeta",
+      folderActions: "Acciones de carpeta",
+      copyVersionLink: "Copiar enlace de versión",
       policyLibrary: "Biblioteca de políticas",
       policyLibraryDescription:
         "Políticas vigentes y documentos controlados aprobados.",
       searchPolicies: "Buscar políticas y etiquetas",
       noPublishedPolicies: "Aún no hay políticas publicadas",
+      noPublishedPoliciesInFolder:
+        "No se encontraron políticas publicadas en esta carpeta",
       publishedPoliciesAppear:
         "Los documentos aprobados aparecerán aquí cuando se publiquen.",
       current: "Vigente",
@@ -121,6 +133,7 @@ export const driveText = createTranslator({
       cancel: "Cancelar",
       parentFolder: "Carpeta superior",
       searchSpace: "Buscar en este espacio",
+      search: "Buscar",
       newFolderName: "Nombre de la nueva carpeta",
       create: "Crear",
       name: "Nombre",

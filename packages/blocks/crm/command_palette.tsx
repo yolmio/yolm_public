@@ -253,6 +253,8 @@ function PaletteIcon(props: { resultType: Sql }) {
  * @category UI Component
  */
 export function CrmCommandPalette(props: CrmCommandPaletteProps) {
+  const resultsStale =
+    sql`palette_status <> 'received' or palette_query is distinct from query`;
   return (
     <Data
       local
@@ -269,7 +271,10 @@ export function CrmCommandPalette(props: CrmCommandPaletteProps) {
       >
         <Data
           watch={[sql`query`]}
+          debounce={{ wait: 300, noWaitOnFirst: true }}
+          statusScalar="palette_status"
           procedure={(s) => {
+            s.defScalar("palette_query", sql`query`);
             s.defTable("palette_result_raw", { fields: resultFields() });
             s.defTable("palette_result", {
               fields: [
@@ -305,6 +310,9 @@ export function CrmCommandPalette(props: CrmCommandPaletteProps) {
                 onKeyDown={(s) => {
                   s.if(sql`event.key = 'Escape'`, (s) =>
                     closePalette(s, props.openScalar));
+                  s.returnIf(
+                    sql`event.is_composing or event.shift_key or event.meta_key or event.alt_key or event.ctrl_key or ${resultsStale}`,
+                  );
                   s.if(sql`event.key = 'Enter'`, (s) =>
                     chooseActiveResult(s, props.openScalar));
                   s.if(sql`event.key = 'ArrowDown'`, (s) =>
@@ -339,7 +347,8 @@ export function CrmCommandPalette(props: CrmCommandPaletteProps) {
                   eachKey={sql`result.result_key`}
                 >
                   <a
-                    href={sql`result.href`}
+                    href={sql`case when not (${resultsStale}) then result.href end`}
+                    aria-disabled={resultsStale}
                     className="flex items-start gap-3 rounded-md px-3 py-2.5 hover:bg-level1"
                     dynamicClassNames={[
                       {
@@ -347,9 +356,17 @@ export function CrmCommandPalette(props: CrmCommandPaletteProps) {
                         classNames: "bg-level1",
                       },
                     ]}
-                    onClick={(s) =>
-                      closePalette(s, props.openScalar)}
-                    onMouseEnter={makeActiveResult}
+                    onClick={(s) => {
+                      s.if(resultsStale, (s) => {
+                        s.event.preventDefault();
+                        s.return();
+                      });
+                      closePalette(s, props.openScalar);
+                    }}
+                    onMouseEnter={(s) => {
+                      s.returnIf(resultsStale);
+                      makeActiveResult(s);
+                    }}
                   >
                     <PaletteIcon resultType={sql`result.result_type`} />
                     <div className="min-w-0 flex-1">

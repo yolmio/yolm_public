@@ -1,15 +1,34 @@
+const CRON_MACROS: Record<string, string> = {
+  "@yearly": "0 0 0 1 1 *",
+  "@annually": "0 0 0 1 1 *",
+  "@monthly": "0 0 0 1 * *",
+  "@weekly": "0 0 0 * * 0",
+  "@daily": "0 0 0 * * *",
+  "@midnight": "0 0 0 * * *",
+  "@hourly": "0 0 * * * *",
+};
+
+/**
+ * Describes a standard cron schedule: 5 fields (`minute hour day month
+ * weekday`), 6 or 7 fields (seconds first, optional year), or a macro such as
+ * `@daily`. Weekday 0 and 7 are Sunday.
+ */
 export function cronToHumanReadable(cronExpression: string): string {
-  // Split the cron expression into its components
-  const parts = cronExpression.trim().split(/\s+/);
+  const trimmed = cronExpression.trim();
+  const expanded = CRON_MACROS[trimmed] ?? trimmed;
+  const parts = expanded.split(/\s+/);
+  if (parts.length === 5) {
+    parts.unshift("0");
+  }
 
   // Ensure we have the correct number of parts
-  if (parts.length !== 6) {
+  if (parts.length !== 6 && parts.length !== 7) {
     throw new Error(
-      "Invalid cron expression format. Expected 6 parts: seconds minutes hours dayOfMonth month dayOfWeek",
+      "Invalid cron expression format. Expected 5 parts (minutes hours dayOfMonth month dayOfWeek), 6 parts (seconds first), or 7 parts (seconds first, year last)",
     );
   }
 
-  const [seconds, minutes, hours, dayOfMonth, month, dayOfWeek] = parts;
+  const [seconds, minutes, hours, dayOfMonth, month, dayOfWeek, year] = parts;
 
   // Maps for translating numeric values to names
   const monthNames: Record<string, string> = {
@@ -47,6 +66,7 @@ export function cronToHumanReadable(cronExpression: string): string {
     "4": "Thursday",
     "5": "Friday",
     "6": "Saturday",
+    "7": "Sunday",
     SUN: "Sunday",
     MON: "Monday",
     TUE: "Tuesday",
@@ -112,6 +132,12 @@ export function cronToHumanReadable(cronExpression: string): string {
         frequencyStr = `every ${days.join(", ")} and ${lastDay}`;
       }
     }
+    // Standard cron fires on either day field when both are restricted.
+    if (!dayOfMonth.startsWith("*") && !dayOfMonth.startsWith("?")) {
+      frequencyStr += ` and on the ${
+        getDayWithSuffix(dayOfMonth)
+      } of every month`;
+    }
   } // Check for specific month
   else if (month !== "*") {
     const months = month.split(",").map((sql) =>
@@ -152,6 +178,9 @@ export function cronToHumanReadable(cronExpression: string): string {
   }
 
   description = `At ${timeStr} ${frequencyStr}`;
+  if (year !== undefined && year !== "*") {
+    description += ` in ${year}`;
+  }
 
   return description.trim();
 }

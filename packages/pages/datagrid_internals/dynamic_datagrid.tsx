@@ -1,3 +1,4 @@
+import { Alert } from "components/alert";
 import {
   CurrentRefetchICtxKey,
   CurrentTableICtxKey,
@@ -36,11 +37,12 @@ import {
   type UiServerStatements,
 } from "std/statements";
 import { createStyles } from "std/style_utils";
-import { system } from "std/system";
+import { system, useGlobalState } from "std/system";
 import type { BoolEnumLikeConfig, Table } from "std/system";
 import {
   addCtx,
   Datagrid,
+  Effect,
   EventHandlers,
   Route,
   Routes,
@@ -75,6 +77,10 @@ import {
 } from "./record_navigation";
 import { buildQuickSearchSqlFragments } from "std/search_utils";
 import type { ResolvedQuickSearch } from "std/search_utils";
+import { hashSha256 } from "std/yolm_gen_api";
+
+const INVALID_DATE_FILTER_MESSAGE =
+  "Invalid date filter. Choose a valid date or relative date.";
 
 export interface DefaultView {
   columnOrder?: string[];
@@ -107,6 +113,11 @@ export interface RelationStringFilter {
   value: AnyExpr;
   /** Correlates and restricts related rows; the datagrid row alias is `record`. */
   where: BooleanExpr;
+  /**
+   * Scalar requires at most one related row and preserves scalar SQL NULL
+   * semantics for negative comparisons. Many (the default) compares sets.
+   */
+  semantics?: "scalar" | "many";
 }
 
 const stringFilterOps: StringFilterOp[] = [
@@ -164,6 +175,7 @@ export class DynamicDatagridContext extends DatagridBaseContext
     private readonly filterExprProcedureName: string | undefined,
     public readonly quickSearch: ResolvedQuickSearch | undefined,
     public readonly stableOrder: boolean,
+    private readonly resetKeyScalar: string,
   ) {
     super();
     this.currentTable = table;
@@ -208,6 +220,11 @@ export class DynamicDatagridContext extends DatagridBaseContext
   clearChangesInToolbar = (s: DomStatements) => {
     s.setScalar("has_unsaved_view_changes", false);
     s.increment("has_changes_refresh_key");
+  };
+
+  resetView = (s: DomStatements) => {
+    s.increment(this.resetKeyScalar);
+    this.clearChangesInToolbar(s);
   };
 
   viewStateHash = (s: StateStatements) => {
@@ -473,11 +490,14 @@ export class DynamicDatagridContext extends DatagridBaseContext
       from ui.column
     )`,
       " from (select ",
+      // Keep the result slots above in ID order, but lower active sort
+      // expressions first. This lets TopK delay unrelated scalar display
+      // lookups while preserving every col_N alias.
       sql`(select string_agg(
         case
           when not has_query_generation then null
           when ${shouldGenerateColumn} then fn.${this.fns.idToSqlExpr}(id) || ' as col_' || id
-        end, ',' order by id)
+        end, ',' order by sort_index nulls last, id)
       from ui.column
     )`,
       s ? this.buildFromAndWherePart(s) : this.inlineFromAndWherePart(),
@@ -918,6 +938,7 @@ export interface DynamicDatagridProps {
   datagridName: string;
   tableModel: Table;
   toolbar: Node;
+  emptyState?: Node;
   enableViews: boolean;
   enableFiltering: boolean;
   columns: Column[];
@@ -1225,9 +1246,14 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     additionalWhere,
     quickSearch,
   } = props;
-  const fns = defineDynamicDatagridFns(datagridName, columns);
+  // Saved views may be shared across apps with different column definitions.
+  // Only generated helpers are app-scoped; keep their storage key unchanged.
+  const helperNamespace = `dg_${
+    hashSha256(JSON.stringify([useApp().domain, datagridName]))
+  }`;
+  const fns = defineDynamicDatagridFns(helperNamespace, columns);
   const filterExprProcedureName = enableFiltering
-    ? defineFilterExprProcedure(datagridName, fns)
+    ? defineFilterExprProcedure(helperNamespace, fns)
     : undefined;
 
   if (props.standaloneRecordNavigation) {
@@ -1262,6 +1288,20 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
   if (queryParams.length > 0) {
     useQueryParams(queryParams);
   }
+  const retainGridState = Boolean(
+    props.recordPage || props.standaloneRecordNavigation,
+  );
+  const resetKeyScalar = retainGridState
+    ? `datagrid_${datagridName}_reset_key`
+    : "reset_key";
+  const selectedView = retainGridState ? sql`datagrid_view` : sql`view`;
+  if (enableViews && retainGridState) {
+    // The generation must outlive record routes without restoring stale snapshots.
+    useGlobalState({
+      key: resetKeyScalar,
+      procedure: (s) => s.defScalar(resetKeyScalar, 0),
+    });
+  }
   const ctx = new DynamicDatagridContext(
     datagridName,
     enableViews,
@@ -1272,7 +1312,8 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     fns,
     filterExprProcedureName,
     quickSearch,
-    Boolean(props.recordPage || props.standaloneRecordNavigation),
+    retainGridState,
+    resetKeyScalar,
   );
   ctx.selectable = props.selectable;
   addCtx(ctx);
@@ -1527,10 +1568,10 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     }
     metaProc.block((s) => {
       s.defScalar("using_view", false);
-      s.if(sql`view is not null`, (s) => {
+      s.if(sql`${selectedView} is not null`, (s) => {
         s.defRecord(
           "view_record",
-          sql`select * from db.datagrid_views where id = view`,
+          sql`select * from db.datagrid_views where id = ${selectedView}`,
         );
         s.if(sql`view_record.id is not null`, (s) => {
           s.setScalar("using_view", true);
@@ -1600,6 +1641,16 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     });
   }
   applyUrlDatagridState(metaProc, columns, fns, enableFiltering);
+  if (enableFiltering) {
+    // Repair only the unambiguous legacy exact-date pair, after either a saved
+    // view or URL has initialized the filters. Persisted views remain untouched.
+    metaProc.modify(sql`update filter_terms
+      set value_2 = value_1, value_1 = 'exact date'
+      where (fn.is_date_filter_op(op) or fn.is_timestamp_filter_op(op))
+        and value_2 = 'exact date'
+        and regex.is_match(value_1, '^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        and try_cast(value_1 as date) is not null`);
+  }
   metaProc.statements(extraState);
   metaProc.defScalar("last_saved_state_hash", {
     expr: ctx.viewStateHash(metaProc),
@@ -1610,7 +1661,7 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
   const app = useApp();
   const watchKeys: Sql[] = [sql`dg_refresh_key`];
   if (enableViews) {
-    watchKeys.push(sql`view`, sql`reset_key`);
+    watchKeys.push(selectedView, sql.ref(resetKeyScalar));
   }
   if (quickSearch) {
     watchKeys.push(sql`q`);
@@ -1893,10 +1944,28 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     <>
       <SourceMap source="datagrid toolbar">{toolbar}</SourceMap>
       <ErrorDisplay />
+      <Show
+        when={sql`status = 'failed' and dg_error.message = ${
+          sql.lit(INVALID_DATE_FILTER_MESSAGE)
+        }`}
+      >
+        <Alert startIcon="Report" size="sm" color="danger" variant="solid">
+          {sql`dg_error.message`}
+        </Alert>
+      </Show>
       <div sx={styles.drawerGridWrapper}>
         <Show
           when={sql`(status = 'requested' or status = 'fallback_triggered') and dg_refresh_key = 0 and not dg_has_data`}
-          fallback={dg}
+          fallback={props.emptyState
+            ? (
+              <Show
+                when={sql`status = 'received' and not exists (select 1 from dg_table)`}
+                fallback={dg}
+              >
+                <div role="status" className="w-full">{props.emptyState}</div>
+              </Show>
+            )
+            : dg}
         >
           <div sx={sharedStyles.emptyGrid} />
         </Show>
@@ -1976,7 +2045,7 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
     )
     : gridData;
   const datagridStateWatch = enableViews
-    ? [sql`view`, sql`reset_key`, ...urlStateWatch]
+    ? [selectedView, sql.ref(resetKeyScalar), ...urlStateWatch]
     : urlStateWatch;
   const refreshedContent = (
     <Data
@@ -2003,9 +2072,17 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
   const content = (
     <Data
       watch={datagridStateWatch}
-      hoistKey={props.recordPage || props.standaloneRecordNavigation
+      hoistKey={retainGridState
         ? [
           sql.lit(datagridName),
+          // Hoist keys must be non-null; keep Default View distinct from ID 0.
+          ...(enableViews
+            ? [
+              sql`${selectedView} is null`,
+              sql`coalesce(${selectedView}, 0)`,
+              sql.ref(resetKeyScalar),
+            ]
+            : []),
           ...urlStateWatch.map((value) => sql`coalesce(${value}, '')`),
         ]
         : enableViews
@@ -2019,6 +2096,23 @@ export function DynamicDatagrid(props: DynamicDatagridProps) {
       {routeStateContent}
     </Data>
   );
+  if (enableViews && retainGridState) {
+    return (
+      <Data
+        local
+        // Apply view and generation together so switching issues only one fetch.
+        autoWatch={false}
+        watch={sql.ref(resetKeyScalar)}
+        procedure={(s) => s.defScalar("datagrid_view", sql`view`)}
+      >
+        <Effect
+          watch={sql`view`}
+          onChange={(s) => s.increment(resetKeyScalar)}
+        />
+        {content}
+      </Data>
+    );
+  }
   if (enableViews) {
     return (
       <Data
@@ -2186,6 +2280,13 @@ export type FilterType =
     type: "enum";
     enum: string;
     notNull: boolean;
+    /**
+     * A single related enum value. This preserves scalar NULL semantics for
+     * `is not` and lets the filter reduce the related relation directly.
+     */
+    relation?: Omit<RelationStringFilter, "semantics"> & {
+      semantics: "scalar";
+    };
     /** Query-backed filter options with `value` and `label` columns. */
     optionsQuery?: Sql;
   }
@@ -2205,6 +2306,7 @@ export interface DynamicDatagridFns {
   idToRelationFilterFrom?: Sql;
   idToRelationFilterValue?: Sql;
   idToRelationFilterWhere?: Sql;
+  idToRelationFilterSemantics?: Sql;
   idToSqlExpr: Sql;
   idToExportExpr?: Sql;
   idToExportName?: Sql;
@@ -2247,7 +2349,7 @@ function relationStringFilterExpr(
     : op === "empty"
     ? "not_empty"
     : op;
-  const relationValue = sql.lit(sql.exprToString(relation.value));
+  const relationValue = sql.lit(sql.exprToString(sql`(${relation.value})`));
   let encodedComparison: Sql;
   switch (positiveOp) {
     case "str_eq":
@@ -2313,6 +2415,7 @@ function defineDynamicDatagridFns(
   const relationFilterFromExprs: AnyExpr[][] = [];
   const relationFilterValueExprs: AnyExpr[][] = [];
   const relationFilterWhereExprs: AnyExpr[][] = [];
+  const relationFilterSemantics: AnyExpr[][] = [];
   for (let i = 0; i < columns.length; i++) {
     const col = columns[i];
     if (col.queryGeneration) {
@@ -2322,18 +2425,26 @@ function defineDynamicDatagridFns(
       storageNamesToIds.push([sql.lit(col.viewStorageName), i]);
       idsToStorageNames.push([i, sql.lit(col.viewStorageName)]);
     }
-    if (col.filter?.type === "string" && col.filter.relation) {
+    const relation = (col.filter?.type === "string" ||
+        col.filter?.type === "enum")
+      ? col.filter.relation
+      : undefined;
+    if (relation) {
       relationFilterFromExprs.push([
         i,
-        sql.lit(col.filter.relation.from.toSQL()),
+        sql.lit(relation.from.toSQL()),
       ]);
       relationFilterValueExprs.push([
         i,
-        sql.lit(sql.exprToString(col.filter.relation.value)),
+        sql.lit(sql.exprToString(sql`(${relation.value})`)),
       ]);
       relationFilterWhereExprs.push([
         i,
-        sql.lit(sql.exprToString(col.filter.relation.where)),
+        sql.lit(sql.exprToString(relation.where)),
+      ]);
+      relationFilterSemantics.push([
+        i,
+        sql.lit(relation.semantics ?? "many"),
       ]);
     } else if (col.filterExpr) {
       idsToFilterExpr.push([
@@ -2454,6 +2565,10 @@ function defineDynamicDatagridFns(
     "where",
     relationFilterWhereExprs,
   );
+  const idToRelationFilterSemantics = defineRelationFilterMapping(
+    "semantics",
+    relationFilterSemantics,
+  );
   let idToLegacyCustomOp: string | undefined;
   if (legacyCustomOps.length > 0) {
     idToLegacyCustomOp = `${datagridName}_dg_col_id_to_legacy_custom_op`;
@@ -2514,6 +2629,9 @@ function defineDynamicDatagridFns(
     idToRelationFilterWhere: idToRelationFilterWhere
       ? sql.ref(idToRelationFilterWhere)
       : undefined,
+    idToRelationFilterSemantics: idToRelationFilterSemantics
+      ? sql.ref(idToRelationFilterSemantics)
+      : undefined,
     idToInitialWidth: (id) => mappedDatagridValue(id, idsToInitialWidth),
     idToExportName: idToExportName ? sql.ref(idToExportName) : undefined,
     idToExportExpr: idToExportExpr ? sql.ref(idToExportExpr) : undefined,
@@ -2522,6 +2640,21 @@ function defineDynamicDatagridFns(
     idToFilterDisplayName: (id) => mappedDatagridValue(id, filterDisplayName),
     idToIsString: sql.ref(idToIsStringName),
   };
+}
+
+function hasInvalidDateFilter(filterTerms: Sql) {
+  return sql`exists (
+    select 1 from ${filterTerms}
+    where (fn.is_date_filter_op(op) or fn.is_timestamp_filter_op(op))
+      and case
+        when coalesce(value_1, '') = '' then coalesce(value_2, '') <> ''
+        when value_1 = 'exact date' then
+          coalesce(value_2, '') <> '' and try_cast(value_2 as date) is null
+        when value_1 in ('number of days ago', 'number of days from now') then
+          coalesce(value_2, '') <> '' and try_cast(value_2 as int) is null
+        else fn.encode_date_dg_filter_param(value_1, value_2) is null
+      end
+  )`;
 }
 
 function defineFilterExprProcedure(
@@ -2542,6 +2675,11 @@ function defineFilterExprProcedure(
       { name: "p_filter_expr", type: "String", notNull: true },
     ],
     procedure: (s) => {
+      // Empty editor values remain inactive. A supplied but invalid date must
+      // never become SQL TRUE, including count/export/navigation callers.
+      s.if(hasInvalidDateFilter(sql.ref("p_filter_terms")), (s) => {
+        s.throwError(sql.lit(INVALID_DATE_FILTER_MESSAGE));
+      });
       s.setScalar(
         "p_filter_expr",
         sql`coalesce(${
@@ -2585,7 +2723,7 @@ function filterExpr(
     }
     if (
       dts.idToRelationFilterFrom && dts.idToRelationFilterValue &&
-      dts.idToRelationFilterWhere
+      dts.idToRelationFilterWhere && dts.idToRelationFilterSemantics
     ) {
       const relationValue =
         sql`fn.${dts.idToRelationFilterValue}(${filter}.column_id)`;
@@ -2601,6 +2739,8 @@ function filterExpr(
           from_expr => fn.${dts.idToRelationFilterFrom}(${filter}.column_id),
           value_expr => ${relationValue},
           where_expr => fn.${dts.idToRelationFilterWhere}(${filter}.column_id),
+          is_scalar => coalesce(fn.${dts.idToRelationFilterSemantics}(${filter}.column_id) = 'scalar', false),
+          is_string => coalesce(fn.${dts.idToIsString}(${filter}.column_id), false),
           value_1 => ${filter}.value_1
         )
         else ${scalarFilterExpr}
@@ -2608,14 +2748,17 @@ function filterExpr(
     }
     return scalarFilterExpr;
   }
-  return sql`
+  // Inline consumers (including export and bulk-selection IDs) cannot throw a
+  // procedure error. Fail the whole filter closed, including OR groups; the
+  // grid's procedure displays the validation error above.
+  return sql`case when ${hasInvalidDateFilter(filterTerms)} then 'false' else
 (select
   string_agg(
     case
       when is_any is null then ${serializeFilter(sql.ref("root"))}
       else (
         select
-          string_agg(
+          '(' || string_agg(
             case
               when is_any is null then ${serializeFilter(sql.ref("subroot"))}
               else (select
@@ -2628,14 +2771,14 @@ function filterExpr(
               )
             end,
             case when root.is_any then ' or ' else ' and ' end
-          )
+          ) || ')'
         from ${filterTerms} as subroot where subroot.group_id = root.id
       )
     end,
     case when ${rootFilterIsAny} then ' or ' else ' and ' end
   )
   from ${filterTerms} as root
-  where group_id is null)`;
+  where group_id is null) end`;
 }
 const configuredResultOrder = sql`(select
   string_agg('col_' || id || (case when sort_asc then ' nulls last' else ' desc nulls last' end), ',')

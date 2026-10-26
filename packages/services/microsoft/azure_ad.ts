@@ -222,7 +222,13 @@ export class MicrosoftAzureEventsAD {
             sql`events_response->>'@odata.nextLink'`,
           );
         },
-        oauthOpts: opts,
+        oauthOpts: {
+          ...opts,
+          onReauthRequired: (s) => {
+            opts.onReauthRequired?.(s);
+            s.throwError(sql.lit`Outlook calendar requires reauthorization`);
+          },
+        },
       });
       s.while(sql`next_page_link is not null`, (s) => {
         s.breakIf(sql`trim(next_page_link) = ''`);
@@ -262,7 +268,13 @@ export class MicrosoftAzureEventsAD {
               sql`events_response->>'@odata.nextLink'`,
             );
           },
-          oauthOpts: opts,
+          oauthOpts: {
+            ...opts,
+            onReauthRequired: (s) => {
+              opts.onReauthRequired?.(s);
+              s.throwError(sql.lit`Outlook calendar requires reauthorization`);
+            },
+          },
         });
       });
     });
@@ -292,6 +304,7 @@ export class MicrosoftAzureEventsAD {
       calendarId: Sql;
       responseRecord?: string;
       notificationUrl: Sql;
+      clientState: Sql;
       /** Renew this subscription; create a replacement only if Graph returns 404. */
       subscriptionId?: Sql;
       /** Capture a newly created ID before response validation so callers can clean up on failure. */
@@ -360,8 +373,8 @@ export class MicrosoftAzureEventsAD {
             s.modify(
               sql`insert into ${
                 sql.ref(responseRecord)
-              } (id, resource_id, expiration)
-              values (renew_subscription_json->>'id', renew_subscription_json->>'resource', renew_subscription_json->>'expirationDateTime')`,
+              } (id, resource_id, expiration, token)
+              values (renew_subscription_json->>'id', renew_subscription_json->>'resource', renew_subscription_json->>'expirationDateTime', ${opts.clientState})`,
             );
           });
         },
@@ -386,7 +399,7 @@ export class MicrosoftAzureEventsAD {
           'auto',
           false
         )`,
-            clientState: "secretClientValue",
+            clientState: opts.clientState,
           },
           receiveText: "notification_channel_response_text",
           responseRecord: "response",
@@ -396,47 +409,150 @@ export class MicrosoftAzureEventsAD {
             "notification_channel_response",
             sql`try_cast(notification_channel_response_text as json)`,
           );
-          s.if(sql`response.status != 201`, (s) => {
-            s.throwError(
-              sql.concat(
-                "Failed to watch outlook events: ",
-                sql`response.status`,
-                " code=",
-                sql`coalesce(notification_channel_response->'error'->>'code', 'NULL')`,
-                " message=",
-                sql`left(coalesce(notification_channel_response->'error'->>'message', 'NULL'), 700)`,
-                " body=",
-                sql`left(coalesce(notification_channel_response_text, ''), 700)`,
-              ),
-            );
-          });
-          if (opts.createdSubscriptionRecord) {
-            s.modify(
-              sql`insert into ${sql.ref(opts.createdSubscriptionRecord)} (id)
-              values (nullif(notification_channel_response->>'id', ''))`,
-            );
-          }
-          s.if(
-            sql`coalesce(json_typeof(notification_channel_response), 'null') != 'object'
-            or nullif(notification_channel_response->>'id', '') is null
-            or nullif(notification_channel_response->>'expirationDateTime', '') is null`,
-            (s) => {
+          s.if(sql`response.status = 409`, (s) => {
+            // A previous POST may have committed even though its response was
+            // lost. Return its actual secret so the block can check the durable
+            // reservation before adoption or retirement.
+            this.recoverSubscription(s, { ...opts, responseRecord });
+          }, (s) => {
+            s.if(sql`response.status != 201`, (s) => {
               s.throwError(
                 sql.concat(
-                  "Outlook watch returned an invalid subscription response: ",
-                  sql`left(coalesce(notification_channel_response_text, ''), 700)`,
+                  "Failed to watch outlook events: ",
+                  sql`response.status`,
+                  " code=",
+                  sql`replace(coalesce(notification_channel_response->'error'->>'code', 'NULL'), ${opts.clientState}, '[redacted]')`,
+                  " message=",
+                  sql`left(replace(coalesce(notification_channel_response->'error'->>'message', 'NULL'), ${opts.clientState}, '[redacted]'), 700)`,
                 ),
               );
+            });
+            if (opts.createdSubscriptionRecord) {
+              s.modify(
+                sql`insert into ${sql.ref(opts.createdSubscriptionRecord)} (id)
+              values (nullif(notification_channel_response->>'id', ''))`,
+              );
+            }
+            s.if(
+              sql`coalesce(json_typeof(notification_channel_response), 'null') != 'object'
+            or nullif(notification_channel_response->>'id', '') is null
+            or nullif(notification_channel_response->>'expirationDateTime', '') is null`,
+              (s) => {
+                s.throwError(
+                  sql
+                    .lit`Outlook watch returned an invalid subscription response`,
+                );
+              },
+            );
+            s.modify(
+              sql`insert into ${
+                sql.ref(responseRecord)
+              }  (id, resource_id, expiration, token)
+      values (notification_channel_response->>'id', notification_channel_response->>'resource', (notification_channel_response->>'expirationDateTime'), ${opts.clientState})`,
+            );
+          });
+        },
+        oauthOpts: opts,
+      });
+    });
+  }
+
+  private recoverSubscription<T extends IServerBaseStatements>(
+    s: T,
+    opts:
+      & {
+        calendarId: Sql;
+        notificationUrl: Sql;
+        responseRecord: string;
+      }
+      & Oauth2TokenOpts,
+  ) {
+    s.block((s) => {
+      const matches = (value: Sql) =>
+        sql`((${value}->>'resource') collate binary = concat('/me/calendars/', ${opts.calendarId}, '/events')
+        or (${value}->>'resource') collate binary = concat('me/calendars/', ${opts.calendarId}, '/events'))
+        and (${value}->>'notificationUrl') collate binary = ${opts.notificationUrl}
+        and ${value}->>'changeType' = 'created,updated,deleted'`;
+      const oauthOpts = {
+        ...opts,
+        onReauthRequired: (s: IServerBaseStatements) => {
+          opts.onReauthRequired?.(s);
+          s.throwError(
+            sql.lit`Outlook subscription recovery requires reauthorization`,
+          );
+        },
+      };
+      s.defScalar(
+        "subscription_lookup_url",
+        sql.lit`https://graph.microsoft.com/v1.0/subscriptions`,
+      );
+      s.defScalar("matching_subscription_id", { type: "String" });
+      s.while(
+        sql`subscription_lookup_url is not null and matching_subscription_id is null`,
+        (s) => {
+          this.auth.requestWithOauth(s, {
+            requestOpts: {
+              uri: sql`subscription_lookup_url`,
+              method: "GET",
+              receiveJson: "subscription_list",
+              responseRecord: "subscription_list_status",
             },
+            afterRequest: (s) => {
+              s.throwErrorIf(
+                sql`subscription_list_status.status != 200
+              or coalesce(json_typeof(subscription_list->'value'), '') != 'array'`,
+                sql.lit`Failed to list Outlook subscriptions for recovery`,
+              );
+              s.setScalar(
+                "matching_subscription_id",
+                sql`(select nullif(value->>'id', '')
+              from json.array_each(subscription_list->'value') where ${
+                  matches(sql`value`)
+                } limit 1)`,
+              );
+              s.setScalar(
+                "subscription_lookup_url",
+                sql`nullif(subscription_list->>'@odata.nextLink', '')`,
+              );
+            },
+            oauthOpts,
+          });
+        },
+      );
+      s.throwErrorIf(
+        sql`matching_subscription_id is null`,
+        sql.lit`No matching Outlook subscription found after 409`,
+      );
+      // List omits clientState. GET the individual subscription and revalidate
+      // its identity before accepting its secret. Legacy fixed secrets fail closed.
+      this.auth.requestWithOauth(s, {
+        requestOpts: {
+          uri:
+            sql`concat('https://graph.microsoft.com/v1.0/subscriptions/', uri.encode_component(matching_subscription_id))`,
+          method: "GET",
+          receiveJson: "recovered_subscription",
+          responseRecord: "recovered_subscription_status",
+        },
+        afterRequest: (s) => {
+          s.throwErrorIf(
+            sql`recovered_subscription_status.status != 200
+            or ((recovered_subscription->>'id') collate binary is distinct from matching_subscription_id)
+            or not coalesce(${matches(sql`recovered_subscription`)}, false)
+            or coalesce(length(recovered_subscription->>'clientState'), 0) != 64
+            or regex.replace_all(recovered_subscription->>'clientState', '[0-9a-fA-F]', '') != ''
+            or not coalesce(try_cast(recovered_subscription->>'expirationDateTime' as timestamptz) > now(), false)`,
+            sql
+              .lit`Outlook subscription recovery returned an invalid subscription`,
           );
           s.modify(
             sql`insert into ${
-              sql.ref(responseRecord)
-            }  (id, resource_id, expiration)
-      values (notification_channel_response->>'id', notification_channel_response->>'resource', (notification_channel_response->>'expirationDateTime'))`,
+              sql.ref(opts.responseRecord)
+            } (id, resource_id, expiration, token)
+            values (recovered_subscription->>'id', recovered_subscription->>'resource',
+              recovered_subscription->>'expirationDateTime', recovered_subscription->>'clientState')`,
           );
         },
-        oauthOpts: opts,
+        oauthOpts,
       });
     });
   }
@@ -644,7 +760,10 @@ export class MicrosoftAzureEventsAD {
     s: T,
     opts: {
       eventId: Sql;
+      calendarId?: Sql;
       eventResponseScalar?: string;
+      /** Handle a missing event (404/410); other unsuccessful responses still throw. */
+      onNotFound?: (s: T) => void;
     } & Oauth2TokenOpts,
   ) {
     s.defScalar(opts.eventResponseScalar ?? "event_response", {
@@ -653,8 +772,10 @@ export class MicrosoftAzureEventsAD {
     this.auth.requestWithOauth(s, {
       requestOpts: {
         uri: sql.concat(
-          sql.lit`https://graph.microsoft.com/v1.0/me/events/`,
-          opts.eventId,
+          opts.calendarId
+            ? sql`'https://graph.microsoft.com/v1.0/me/calendars/' || uri.encode_component(${opts.calendarId}) || '/events/'`
+            : sql.lit`https://graph.microsoft.com/v1.0/me/events/`,
+          sql`uri.encode_component(${opts.eventId})`,
           sql.lit`?`,
           queryParamsString({
             $expand: sql.lit`extensions($filter=Id eq 'com.yolm.scheduling')`,
@@ -664,15 +785,23 @@ export class MicrosoftAzureEventsAD {
         responseRecord: "response",
       },
       afterRequest: (s) => {
-        s.if(sql`response.status != 200`, (s) => {
-          s.throwError(
-            sql.concat("Failed to get outlook event: ", sql`response.status`),
+        s.if(sql`response.status = 200`, (s) => {
+          s.setScalar(
+            opts.eventResponseScalar ?? "event_response",
+            sql`event_response_json`,
           );
+        }, (s) => {
+          const fail = (s: T) => {
+            s.throwError(
+              sql.concat("Failed to get outlook event: ", sql`response.status`),
+            );
+          };
+          if (opts.onNotFound) {
+            s.if(sql`response.status in (404, 410)`, opts.onNotFound, fail);
+          } else {
+            fail(s);
+          }
         });
-        s.setScalar(
-          opts.eventResponseScalar ?? "event_response",
-          sql`event_response_json`,
-        );
       },
       oauthOpts: opts,
     });

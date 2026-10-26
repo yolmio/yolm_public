@@ -9,7 +9,11 @@ import { getUniqueUiId } from "components/utils";
 import { CurrentRefetchICtxKey, DynamicDatagridICtxKey } from "std/ictx";
 import { sql } from "../../std/sql_utils";
 import type { Sql } from "../../std/sql_utils";
-import type { DomStatementsOrFn, UiServerStatements } from "std/statements";
+import type {
+  DomStatementsOrFn,
+  StateStatements,
+  UiServerStatements,
+} from "std/statements";
 import type { Style } from "std/style_types";
 import { Show, useICtx, useState, wrapCurrentComponent } from "std/ui";
 import { Data } from "std/data";
@@ -58,7 +62,7 @@ export interface DatagridActionDialogProps {
 }
 
 // make this return a Sql for the table
-function useSelectedIds(s: UiServerStatements): Sql {
+export function useSelectedIds(s: StateStatements | UiServerStatements): Sql {
   const ct = useICtx(DynamicDatagridICtxKey);
   s.dynamicQuery({
     query: ct.buildIdsQuery(s),
@@ -71,12 +75,12 @@ function useSelectedIds(s: UiServerStatements): Sql {
   });
   s.conditional({
     condition: sql`selected_all or not exists (select 1 from selected_row)`,
-    then: (s) => {
+    then: (s: StateStatements | UiServerStatements) => {
       s.modify(
         sql`insert into datagrid_ids (id) select field_0::BigInt from selected_ids`,
       );
     },
-    else: (s) => {
+    else: (s: StateStatements | UiServerStatements) => {
       s.modify(sql`insert into datagrid_ids (id) select id from selected_row`);
     },
   });

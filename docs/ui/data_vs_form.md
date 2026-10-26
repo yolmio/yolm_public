@@ -41,8 +41,8 @@ Use Data for **reading** data and **UI state**:
 <Data procedure={(s) => {
   s.defTable("users", sql`select * from db.users`);
 }}>
-  <Each table="users" recordName="user">
-    <p>{sql`user.name`}</p>
+  <Each table="users" recordName="user_record">
+    <p>{sql`user_record.name`}</p>
   </Each>
 </Data>
 
@@ -83,11 +83,11 @@ A common pattern: Data loads context, Form handles editing.
 function UserPage({ userId }: { userId: NumericExpr }) {
   return (
     <Data procedure={(s) => {
-      s.defRecord("user", sql`select * from db.users where id = ${userId}`);
+      s.defRecord("user_record", sql`select * from db.users where id = ${userId}`);
     }}>
-      <h1>{sql`user.name`}</h1>
+      <h1>{sql`user_record.name`}</h1>
 
-      <Form afterSubmitClientSuccess={(s) => s.refetch()}>
+      <Form>
         <Form.Update table="users" where={sql`id = ${userId}`}>
           <Form.Field field="name" />
           <Form.Field field="email" />
@@ -99,53 +99,60 @@ function UserPage({ userId }: { userId: NumericExpr }) {
 }
 ```
 
-### Dashboard with action form
+## When to Use ActionButton
+
+Use `ActionButton` (or `ActionIconButton`, `ActionMenuItem`,
+`FileActionButton` from `std/action_button`) for server commands that are not
+field editing: delete, approve, archive, send, sync, recalculate. It owns the
+loading state, double-click protection, error display, optional `confirm`
+dialog and `successMessage`, and refetches enclosing `Data` on success.
 
 ```tsx
-function Dashboard() {
-  return (
-    <Data procedure={(s) => {
-      s.defTable("tasks", sql`select * from db.tasks where status = 'pending'`);
-      s.defScalar("task_count", sql`(select count(*) from tasks)`);
-    }}>
-      <h2>Pending Tasks ({sql`task_count`})</h2>
-
-      <Each table="tasks" recordName="task">
-        <p>{sql`task.title`}</p>
-      </Each>
-
-      {/* Quick add form */}
-      <Form afterSubmitClientSuccess={(s) => s.refetch()}>
-        <Form.Insert table="tasks">
-          <Form.Field field="title">
-            {(field) => (
-              <Input value={field.value} onInput={(s) => field.setValue(s, sql`target_value`)} placeholder="New task..." />
-            )}
-          </Form.Field>
-          <Form.SubmitButton size="sm">Add</Form.SubmitButton>
-        </Form.Insert>
-      </Form>
-    </Data>
-  );
-}
+<Each table="tasks" recordName="task">
+  <p>{sql`task.title`}</p>
+  <ActionButton
+    size="sm"
+    action={(s) => {
+      s.startTransaction();
+      s.modify(sql`update db.tasks set status = 'done' where id = task.id`);
+      s.commitTransaction();
+    }}
+    successMessage="Task completed"
+  >
+    Complete
+  </ActionButton>
+</Each>
 ```
+
+Do not use raw inputs plus `ActionButton` for ordinary inserts or updates; that
+loses `Form` validation and field errors. See [ActionButton](./action_button.md).
+
+## Raw Event Handlers
+
+Use a plain `Button` handler for UI-only work: toggling a modal, switching
+tabs, setting filters. Write a raw `s.tryServer` handler only when the flow is
+not represented by `Form` or `ActionButton`. In that case make pending state
+visible with `s.commitUiTreeChanges()`, handle the error path, and call
+`s.refetch()` when affected reads must refresh. Values the client continuation
+needs from the server (such as a new id) go through a procedure-local scalar
+declared before `tryServer`; see
+[DOM statements](../procedures/dom_statements.md#returning-values-from-server-blocks).
 
 ## Anti-Patterns
 
-### Do not manage form state manually
+Do not hand-roll form state with `Data` scalars and a save button:
 
 ```tsx
 // Don't do this
-<Data procedure={(s) => {
+<Data local procedure={(s) => {
   s.defScalar("name", sql.lit``);
-  s.defScalar("email", sql.lit``);
 }}>
   <Input value={sql`name`} onInput={(s) => s.setScalar("name", sql`target_value`)} />
   <Button onClick={(s) => {
     s.tryServer({
       body: (s) => {
         s.startTransaction();
-        s.modify(sql`insert into db.users (name, email) values (ui.name, ui.email)`);
+        s.modify(sql`insert into db.users (name) values (ui.name)`);
         s.commitTransaction();
       },
     });
@@ -156,29 +163,11 @@ function Dashboard() {
 <Form>
   <Form.Insert table="users">
     <Form.Field field="name" />
-    <Form.Field field="email" />
     <Form.SubmitButton>Save</Form.SubmitButton>
   </Form.Insert>
 </Form>
 ```
 
-Form gives you validation, error handling, touched state, undo/redo, and nested relations — all for free.
-
-### Do not use Data for mutations
-
-Data is for reading. Use Form for writing:
-
-```tsx
-// Don't use Data for form state
-<Data procedure={(s) => { s.defScalar("edit_name", sql.lit``); }}>
-  {/* manual save button with tryServer */}
-</Data>
-
-// Use Form instead
-<Form>
-  <Form.Update table="users" where={sql`id = ${userId}`}>
-    <Form.Field field="name" />
-    <Form.SubmitButton>Save</Form.SubmitButton>
-  </Form.Update>
-</Form>
-```
+`Form` provides validation, error handling, touched state, undo/redo, and
+nested relations. The same applies to a command button built from `Button` +
+`s.tryServer` + loading/error scalars: use `ActionButton`.

@@ -43,14 +43,13 @@ For concepts, see [Blocks](../concepts/blocks.md). For details, use
 | `GlossaryBlock` | `blocks/glossary` | Searchable terms, definitions, categories, examples, and glossary UI. |
 | `DevLogBlock` | `blocks/dev_log` | Structured diagnostic logs by category, not user-facing audit history. |
 | `OAuthCredentialsBlock` | `blocks/oauth_credentials` | Managed OAuth credential storage; not general app auth. |
-| `AccountingBlock` | `blocks/accounting` | Invoicing, billing/AP, expense and fee tracking, rate and commission management, and P&L / financial reporting. |
+| `AccountingBlock` | `blocks/accounting` | Deprecated research-services accounting module; new systems use `LedgerBlock` (`blocks/ledger`). See [Accounting Block](./accounting.md). |
 | `AiProvidersBlock` | `blocks/ai_providers` | Configurable LLM providers and models with server-side text generation and file uploads. |
 | `ApiKeyBlock` | `blocks/api_keys` | Issue, store, and validate API keys for authenticating inbound API requests. |
 | `DashboardBlock` | `blocks/dashboard` | Personal/shared dashboards with fixed widgets and Spark capability-scoped queries. See [Dashboards](dashboard.md). |
-| `ManualMeasurementsBlock` | `blocks/manual_measurements` | Independent manual definitions and dated observations. |
-| `ManualStatsBlock` | `blocks/manual_stats` | Legacy fixed manual metrics; new systems should use ManualMeasurementsBlock and DashboardBlock. |
+| `ManualMeasurementsBlock` | `blocks/manual_measurements` | Independent manual definitions and dated observations. Documented in [Dashboards](dashboard.md). |
 | `TimeTrackingBlock` | `blocks/time_tracking` | Clock-in/out time tracking across configurable dimensions with a sidebar widget. |
-| `SparkBlock` | `blocks/spark` | In-app conversational AI agent with per-role skills, human-approved write actions, and chat UI. |
+| `SparkBlock` | `blocks/spark` | In-app AI agent governed by developer-defined capabilities; reversible actions run immediately with undo; other actions (such as external or high-danger ones) require approval. See [block management tools](spark_management_tools.md). |
 | `DriveBlock` | `blocks/drive` | Governed file spaces, uploads, versioned files, lifecycle extensions, and authenticated file endpoints. |
 | `WorkforceBlock` | `blocks/workforce` | People, organizations, locations, memberships, and configurable authorization roles. |
 | `PrintersBlock` | `blocks/printers` | Queue PDF documents and printer-ready labels or receipts. |
@@ -58,10 +57,12 @@ For concepts, see [Blocks](../concepts/blocks.md). For details, use
 | `LocationsBlock` | `blocks/locations` | Hierarchical sites, areas, storage, service locations, and equipment positions. See [Locations Block](./locations.md). |
 | `EquipmentBlock` | `blocks/equipment` | Equipment definitions, serialized assets, identifiers, custody, restrictions, and status pages. See [Equipment Block](./equipment.md). |
 | `MaintenanceBlock` | `blocks/maintenance` | Maintenance issues, work execution, parts, inspections, and preventive-maintenance programs. See [Maintenance Block](./maintenance.md). |
+| `TrainingBlock` | `blocks/training` | Courses, governed-content assignments, assessments and compliance, composed with Drive. See [Training Block](./training.md). |
+| `StickersBlock` | `blocks/stickers` | Printed QR sticker codes for records, with late binding and supersede/void. See [Stickers Block](./stickers.md). |
 
-Each Core Block above has a dedicated reference page in this folder (for
-example [AuthBlock](./auth.md), [SparkBlock](./spark.md),
-[AccountingBlock](./accounting.md)).
+Each Core Block has a reference page in this folder named after its import
+(for example [AuthBlock](./auth.md), [SparkBlock](./spark.md));
+`ManualMeasurementsBlock` is covered in [Dashboards](./dashboard.md).
 
 ## Integration Blocks
 
@@ -116,15 +117,3 @@ module under the block:
   block, for example webhooks or availability helpers.
 - Do not re-create block tables manually in a system. If a block almost fits,
   configure or extend it before adding parallel schema.
-
-## Dev Log
-
-- 2026-05-30: Documented table-block companion components (address and
-  notes-list cards) and noted that admin CRUD/detail pages live in
-  [page templates](../ui/page_templates.md), not in the block listing.
-- 2026-06-26: Added dedicated reference pages for every remaining block —
-  `accounting`, `ai_providers`, `api_keys`, `dev_log`, `edge`, `printers`,
-  `manual_stats`, `postmark_campaign`, `spark`, `time_tracking` — and a
-  `table_blocks/` subfolder documenting all six table blocks. Audited and
-  corrected the 18 pre-existing block docs against current source. Every doc
-  was authored from a full source read and adversarially verified claim-by-claim.

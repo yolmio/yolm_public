@@ -1,16 +1,21 @@
+import { locationPaths } from "blocks/locations/queries";
 import { Alert } from "components/alert";
 import { Button } from "components/button";
 import { Card } from "components/card";
 import { Checkbox } from "components/checkbox";
 import { Chip } from "components/chip";
-import { EachSelect } from "components/each_select";
+import { Select } from "components/select";
 import { FormControl } from "components/form_control";
 import { FormLabel } from "components/form_label";
 import { IconButton } from "components/icon_button";
 import { MaterialIcon } from "components/material_icon";
 import { ModalDialog } from "components/modal";
+import { Radio } from "components/radio";
+import { RadioGroup } from "components/radio_group";
 import { Table as TableComponent } from "components/table";
+import { TableRecordSelect } from "components/table_record_select";
 import { Typography } from "components/typography";
+import { Data } from "std/data";
 import {
   insertValueColumns,
   selectColumn,
@@ -28,7 +33,7 @@ import type { DomStatements, UiServerStatements } from "std/statements";
 import { createStyles, visuallyHiddenStyles } from "std/style_utils";
 import { system } from "std/system";
 import type { Field } from "std/system";
-import { Each, Match, Show, Switch, useState } from "std/ui";
+import { Each, Match, Show, Switch, useState, useUniqueId } from "std/ui";
 
 interface WorkforceImportEnumValue {
   name: string;
@@ -37,7 +42,9 @@ interface WorkforceImportEnumValue {
 
 interface WorkforceImportBlock {
   peopleTable: string;
-  organizationsTable: string;
+  organizationsTable?: string;
+  singleOrganization?: string;
+  organizationMode: "single" | "multiple";
   workerRelationshipsTable: string;
   jobProfilesTable: string;
   assignmentsTable: string;
@@ -55,6 +62,7 @@ interface WorkforceImportBlock {
   sysUserLink: "person_field" | "sys_user_field";
   assertManagementSession(s: UiServerStatements): void;
   syncPersonLoginState(s: UiServerStatements, personId: Sql): void;
+  validatePersonIntervals(s: UiServerStatements, personId: Sql): void;
 }
 
 export interface WorkforcePeopleImportActionProps {
@@ -62,7 +70,6 @@ export interface WorkforcePeopleImportActionProps {
   defaultLanguage?: Sql | string;
   defaultOrganization?: Sql | string;
   defaultHostOrganization?: Sql | string;
-  defaultJobProfile?: Sql | string;
   afterImport?: (s: UiServerStatements) => void;
 }
 
@@ -129,7 +136,8 @@ const styles = createStyles({
   },
   mappingGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gridTemplateColumns: "minmax(0, 1fr)",
+    sm: { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
     gap: 2,
   },
   previewStats: {
@@ -138,9 +146,10 @@ const styles = createStyles({
     flexWrap: "wrap",
   },
   statCard: {
-    minWidth: 140,
-    flex: "1 1 140px",
+    minWidth: 120,
+    flex: "1 1 120px",
     p: 2,
+    boxShadow: "none",
   },
   previewTableWrap: {
     overflowX: "auto",
@@ -218,16 +227,23 @@ function propToSql(value: Sql | string | undefined) {
 interface WorkforceImportDefaultValues {
   organization?: Sql;
   hostOrganization?: Sql;
-  jobProfile?: Sql;
+  jobProfile: Sql;
 }
 
 function importDefaultValues(
   props: WorkforcePeopleImportActionProps,
 ): WorkforceImportDefaultValues {
   return {
-    organization: propToSql(props.defaultOrganization),
-    hostOrganization: propToSql(props.defaultHostOrganization),
-    jobProfile: propToSql(props.defaultJobProfile),
+    organization: props.workforce.organizationMode === "single"
+      ? undefined
+      : propToSql(props.defaultOrganization),
+    hostOrganization: props.workforce.organizationMode === "single"
+      ? undefined
+      : propToSql(props.defaultHostOrganization),
+    jobProfile: sql`(
+      select name from db.${sql.ref(props.workforce.jobProfilesTable)}
+      where id = ui.workforce_import_default_job_profile_id
+    )`,
   };
 }
 
@@ -482,8 +498,8 @@ function getWorkforceImportFields(
       referenceTable: workforce.jobProfilesTable,
       resolvedIdField: "job_profile_id",
       headerVariations: workforce.positionsTable
-        ? ["job", "job profile", "job code"]
-        : ["job", "job profile", "job position", "position", "job code"],
+        ? ["job", "job profile"]
+        : ["job", "job profile", "job position", "position"],
     },
     {
       name: "assignment_status",
@@ -533,7 +549,7 @@ function getWorkforceImportFields(
       dbFieldName: "workforce_position_id",
       referenceTable: workforce.positionsTable,
       resolvedIdField: "position_id",
-      headerVariations: ["job position", "job_position", "position code"],
+      headerVariations: ["job position", "job_position"],
     });
   }
 
@@ -597,6 +613,25 @@ function insertHeaderFromBody(
       ','
     )
   `);
+  s.throwErrorIf(
+    sql`exists (
+      select 1 from workforce_import_header
+      where lower(trim(both ' "' from value)) in ('job code', 'job_code', 'jobcode')
+    )`,
+    sql
+      .lit`Job code is no longer supported. Replace this column with Job profile and use job profile names.`,
+  );
+  s.throwErrorIf(
+    sql`exists (
+      select 1 from workforce_import_header
+      where lower(trim(both ' "' from value)) in (
+        'org unit code', 'org_unit_code', 'orgunitcode',
+        'position code', 'position_code', 'positioncode'
+      )
+    )`,
+    sql
+      .lit`Org unit and position codes are no longer supported. Use Org unit and Position columns with names.`,
+  );
   for (const field of fields) {
     s.setScalar(fieldOrdinalScalar(field), fieldHeaderOrdinalExpr(field));
   }
@@ -650,11 +685,28 @@ function parseCsvIntoPreview(
   `);
 }
 
-function referenceMatch(tableAlias: Sql, value: Sql) {
-  return sql`(
-    lower(${tableAlias}.name) = lower(trim(${value}))
-    or lower(coalesce(${tableAlias}.code, '')) = lower(trim(${value}))
-  )`;
+function nameMatch(tableAlias: Sql, value: Sql) {
+  return sql`lower(${tableAlias}.name) = lower(trim(${value}))`;
+}
+
+function locationReferenceMatch(record: Sql, value: Sql) {
+  return sql`(${nameMatch(record, value)} or exists (
+    select 1 from (${locationPaths()}) path
+    where path.id = ${record}.id and lower(path.path) = lower(trim(${value}))
+  ))`;
+}
+
+function jobProfileMatch(tableAlias: Sql, workforce: WorkforceImportBlock) {
+  const value = trimmedNamedFieldValue("job_profile");
+  return sql`case
+    when ${value} is not null then ${nameMatch(tableAlias, value)}
+    when ${
+    workforce.positionsTable
+      ? sql`${trimmedNamedFieldValue("position")} is null`
+      : sql.true
+  } then ${tableAlias}.id = ui.workforce_import_default_job_profile_id
+    else false
+  end`;
 }
 
 function referenceMatchCount(
@@ -664,15 +716,22 @@ function referenceMatchCount(
 ) {
   const tableName = field.referenceTable!;
   const value = effectiveFieldValue(field, defaults, { workforce });
-  let where = referenceMatch(sql`reference_record`, value);
-  if (field.name === "org_unit" || field.name === "location") {
+  let where = field.name === "job_profile"
+    ? jobProfileMatch(sql`reference_record`, workforce)
+    : field.name === "location"
+    ? locationReferenceMatch(sql`reference_record`, value)
+    : nameMatch(sql`reference_record`, value);
+  if (workforce.organizationsTable && field.name === "org_unit") {
     where = sql`${where}
       and (
         import_row.organization_id is null
         or reference_record.workforce_organization_id = import_row.organization_id
       )`;
   }
-  if (field.name === "position") {
+  if (
+    workforce.organizationsTable &&
+    field.name === "position"
+  ) {
     where = sql`${where}
       and (
         import_row.organization_id is null
@@ -702,11 +761,6 @@ function resolveReferences(
     label: "",
     target: "assignment",
   };
-  const jobProfileField: WorkforceImportField = {
-    name: "job_profile",
-    label: "",
-    target: "assignment",
-  };
   const organizationValue = effectiveFieldValue(organizationField, defaults, {
     workforce,
   });
@@ -715,9 +769,6 @@ function resolveReferences(
     defaults,
     { workforce },
   );
-  const jobProfileValue = effectiveFieldValue(jobProfileField, defaults, {
-    workforce,
-  });
   s.modify(sql`
     update workforce_import_preview import_row
     set person_id = (
@@ -732,38 +783,39 @@ function resolveReferences(
     update workforce_import_preview
     set is_new_person = person_id is null
   `);
-  s.modify(sql`
+  if (workforce.organizationsTable) {
+    s.modify(sql`
     update workforce_import_preview import_row
     set organization_id = (
       select org.id
       from db.${sql.ref(workforce.organizationsTable)} org
-      where ${referenceMatch(sql`org`, organizationValue)}
+      where ${nameMatch(sql`org`, organizationValue)}
       order by org.id
       limit 1
     )
     where ${organizationValue} is not null
   `);
-  s.modify(sql`
+    s.modify(sql`
     update workforce_import_preview import_row
     set host_organization_id = (
       select org.id
       from db.${sql.ref(workforce.organizationsTable)} org
-      where ${referenceMatch(sql`org`, hostOrganizationValue)}
+      where ${nameMatch(sql`org`, hostOrganizationValue)}
       order by org.id
       limit 1
     )
     where ${hostOrganizationValue} is not null
   `);
+  }
   s.modify(sql`
     update workforce_import_preview import_row
     set job_profile_id = (
       select job.id
       from db.${sql.ref(workforce.jobProfilesTable)} job
-      where ${referenceMatch(sql`job`, jobProfileValue)}
+      where ${jobProfileMatch(sql`job`, workforce)}
       order by job.id
       limit 1
     )
-    where ${jobProfileValue} is not null
   `);
   s.modify(sql`
     update workforce_import_preview import_row
@@ -780,7 +832,8 @@ function resolveReferences(
     )
     where import_row.person_id is not null
   `);
-  s.modify(sql`
+  if (workforce.organizationsTable) {
+    s.modify(sql`
     update workforce_import_preview import_row
     set organization_id = (
       select relationship.workforce_organization_id
@@ -791,17 +844,22 @@ function resolveReferences(
       and import_row.organization_id is null
       and import_row.worker_relationship_id is not null
   `);
+  }
   if (workforce.orgUnitsTable) {
     s.modify(sql`
       update workforce_import_preview import_row
       set org_unit_id = (
         select unit.id
         from db.${sql.ref(workforce.orgUnitsTable)} unit
-        where ${referenceMatch(sql`unit`, sql`import_row.org_unit`)}
-          and (
+        where ${nameMatch(sql`unit`, sql`import_row.org_unit`)}
+          ${
+      workforce.organizationsTable
+        ? sql`and (
             import_row.organization_id is null
             or unit.workforce_organization_id = import_row.organization_id
-          )
+          )`
+        : sql``
+    }
         order by unit.id
         limit 1
       )
@@ -814,11 +872,7 @@ function resolveReferences(
       set location_id = (
         select location.id
         from db.${sql.ref(workforce.locationsTable)} location
-        where ${referenceMatch(sql`location`, sql`import_row.location`)}
-          and (
-            import_row.organization_id is null
-            or location.workforce_organization_id = import_row.organization_id
-          )
+        where ${locationReferenceMatch(sql`location`, sql`import_row.location`)}
         order by location.id
         limit 1
       )
@@ -831,12 +885,16 @@ function resolveReferences(
       set position_id = (
         select position.id
         from db.${sql.ref(workforce.positionsTable)} position
-        where ${referenceMatch(sql`position`, sql`import_row.position`)}
-          and (
+        where ${nameMatch(sql`position`, sql`import_row.position`)}
+          ${
+      workforce.organizationsTable
+        ? sql`and (
             import_row.organization_id is null
             or position.workforce_organization_id is null
             or position.workforce_organization_id = import_row.organization_id
-          )
+          )`
+        : sql``
+    }
         order by position.id
         limit 1
       )
@@ -955,7 +1013,7 @@ function validateReference(
       s,
       "invalid_reference",
       field.name,
-      `${field.label} does not match an existing record by name or code.`,
+      `${field.label} does not match an existing record by name.`,
     );
   });
   s.if(sql`${value} is not null and ${matchCount} > 1`, (s) => {
@@ -963,7 +1021,9 @@ function validateReference(
       s,
       "invalid_reference",
       field.name,
-      `${field.label} matches more than one record. Use a unique name or code.`,
+      field.name === "location"
+        ? "Location matches more than one record. Use a unique full location path."
+        : `${field.label} matches more than one record. Use a unique name.`,
     );
   });
 }
@@ -1038,20 +1098,44 @@ function validateImportPreview(
         );
       },
     );
-    s.if(
-      sql`(import_row.is_new_person or import_row.worker_relationship_id is null)
+    if (workforce.organizationsTable) {
+      s.if(
+        sql`(import_row.is_new_person or import_row.worker_relationship_id is null)
         and ${
-        effectiveFieldValue(organizationField, defaults, { workforce })
-      } is null`,
-      (s) => {
-        insertValidationError(
-          s,
-          "missing_required_field",
-          "organization",
-          "Employer organization is required when creating a worker relationship.",
+          effectiveFieldValue(organizationField, defaults, { workforce })
+        } is null`,
+        (s) => {
+          insertValidationError(
+            s,
+            "missing_required_field",
+            "organization",
+            "Employer organization is required when creating a worker relationship.",
+          );
+        },
+      );
+    } else if (workforce.singleOrganization !== undefined) {
+      for (
+        const [field, label] of [["organization", "Employer organization"], [
+          "host_organization",
+          "Host organization",
+        ]]
+      ) {
+        s.if(
+          sql`nullif(trim(import_row.${sql.ref(field)}), '') is not null
+          and lower(trim(import_row.${sql.ref(field)})) <> lower(${
+            sql.lit(workforce.singleOrganization)
+          })`,
+          (s) => {
+            insertValidationError(
+              s,
+              "invalid_reference",
+              field,
+              `${label} does not match the configured organization.`,
+            );
+          },
         );
-      },
-    );
+      }
+    }
     if (workforce.positionsTable) {
       s.if(
         sql`(import_row.is_new_person or import_row.assignment_id is null)
@@ -1174,8 +1258,8 @@ function buildInsertColumnsAndValues(
 
 function insertSysUser(s: UiServerStatements) {
   s.modify(sql`
-    insert into db.sys_users (created_at)
-    values (current_timestamp())
+    insert into db.sys_users (created_at, disabled)
+    values (current_timestamp(), not ui.workforce_import_enable_login)
     returning id into workforce_import_sys_user_id
   `);
 }
@@ -1282,7 +1366,9 @@ function insertRelationship(
     insert into db.${sql.ref(workforce.workerRelationshipsTable)}
       (
         person_id,
-        workforce_organization_id,
+        ${
+    workforce.organizationsTable ? sql`workforce_organization_id,` : sql``
+  }
         worker_type,
         status,
         effective_from,
@@ -1290,7 +1376,7 @@ function insertRelationship(
       )
     values (
       import_row.person_id,
-      import_row.organization_id,
+      ${workforce.organizationsTable ? sql`import_row.organization_id,` : sql``}
       coalesce(
         ${
     enumValueExpr(
@@ -1334,11 +1420,15 @@ function updateRelationship(
 ) {
   s.modify(sql`
     update db.${sql.ref(workforce.workerRelationshipsTable)} relationship_target
-    set workforce_organization_id = case
+    set ${
+    workforce.organizationsTable
+      ? sql`workforce_organization_id = case
           when nullif(trim(import_row.organization), '') is null
             then relationship_target.workforce_organization_id
           else import_row.organization_id
-        end,
+        end,`
+      : sql``
+  }
         worker_type = case
           when nullif(trim(import_row.worker_type), '') is null
             then relationship_target.worker_type
@@ -1381,14 +1471,18 @@ function insertAssignment(
 ) {
   let columns = sql`
     worker_relationship_id,
-    host_workforce_organization_id,
+    ${
+    workforce.organizationsTable ? sql`host_workforce_organization_id,` : sql``
+  }
     workforce_job_profile_id,
     is_primary,
     status,
     effective_from`;
   let values = sql`
     import_row.worker_relationship_id,
-    import_row.host_organization_id,
+    ${
+    workforce.organizationsTable ? sql`import_row.host_organization_id,` : sql``
+  }
     coalesce(import_row.job_profile_id, ${positionJobProfileExpr(workforce)}),
     true,
     coalesce(
@@ -1428,11 +1522,15 @@ function updateAssignmentRecord(
   workforce: WorkforceImportBlock,
 ) {
   let assignments = sql`
-    host_workforce_organization_id = case
+    ${
+    workforce.organizationsTable
+      ? sql`host_workforce_organization_id = case
       when nullif(trim(import_row.host_organization), '') is null
         then assignment_target.host_workforce_organization_id
       else import_row.host_organization_id
-    end,
+    end,`
+      : sql``
+  }
     workforce_job_profile_id = case
       when nullif(trim(import_row.job_profile), '') is not null
         then import_row.job_profile_id
@@ -1528,6 +1626,10 @@ function importRows(
   );
   s.startTransaction();
   workforce.assertManagementSession(s);
+  s.throwErrorIf(
+    sql`ui.workforce_import_enable_login is null`,
+    sql.lit`Choose portal access for new accounts before importing.`,
+  );
   s.forEachTable("workforce_import_preview", "import_row", (s) => {
     s.continueIf(sql`import_row.csv_ignore_import`);
     s.continueIf(sql`exists (
@@ -1556,6 +1658,7 @@ function importRows(
         updateAssignmentRecord(s, workforce);
       });
     });
+    workforce.validatePersonIntervals(s, sql`import_row.person_id`);
     workforce.syncPersonLoginState(s, sql`import_row.person_id`);
   });
   props.afterImport?.(s);
@@ -1572,6 +1675,8 @@ function resetImportState(
   s.setScalar("workforce_import_file_name", sql.lit``);
   s.setScalar("workforce_import_add_count", 0);
   s.setScalar("workforce_import_update_count", 0);
+  s.setScalar("workforce_import_enable_login", sql.null);
+  s.setScalar("workforce_import_default_job_profile_id", sql.null);
   s.modify(sql`delete from workforce_import_header`);
   s.modify(sql`delete from workforce_import_file`);
   s.modify(sql`delete from workforce_import_preview`);
@@ -1582,24 +1687,53 @@ function resetImportState(
 }
 
 function MappingControl({ field }: { field: WorkforceImportField }) {
+  const id = useUniqueId();
   return (
     <FormControl>
-      <FormLabel>{field.label}</FormLabel>
-      <EachSelect
-        size="sm"
-        value={sql.ref(fieldOrdinalScalar(field))}
-        table="workforce_import_header"
-        findOnValue="value"
-        optionLabel="value"
-        optionValue="ordinal"
+      <FormLabel htmlFor={id}>{field.label}</FormLabel>
+      <Select
+        id={id}
+        fullWidth
+        aria-label={field.label}
+        value={sql`coalesce(cast(${
+          sql.ref(fieldOrdinalScalar(field))
+        } as string), '')`}
         onChange={(s) => {
           s.setScalar(
             fieldOrdinalScalar(field),
-            sql`try_cast(target_value as int)`,
+            sql`try_cast(nullif(target_value, '') as int)`,
           );
         }}
-      />
+      >
+        <Select.Option value="">Not mapped</Select.Option>
+        <Each
+          table="workforce_import_header"
+          recordName="csv_column"
+          orderBy={sql`ordinal`}
+        >
+          <Select.Option value={sql`cast(csv_column.ordinal as string)`}>
+            {sql`csv_column.value`}
+          </Select.Option>
+        </Each>
+      </Select>
     </FormControl>
+  );
+}
+
+function PreviewRowToggle() {
+  return (
+    <Checkbox
+      aria-label={sql`'Import row ' || import_row.csv_row_index::string || ', ' || coalesce(nullif(import_row.display_name, ''), import_row.email, 'unnamed person')`}
+      checked={sql`not import_row.csv_ignore_import`}
+      disabled={sql`workforce_import_waiting`}
+      onCheckboxChange={(s) => {
+        s.modify(sql`
+          update workforce_import_preview
+          set csv_ignore_import = not target_checked
+          where csv_row_index = import_row.csv_row_index
+        `);
+      }}
+    />
   );
 }
 
@@ -1639,7 +1773,7 @@ function PreviewStatusChip() {
   );
 }
 
-function PreviewErrors() {
+function PreviewErrors(props: { fields: WorkforceImportField[] }) {
   return (
     <Each
       table="workforce_import_validation_error"
@@ -1648,7 +1782,13 @@ function PreviewErrors() {
     >
       <div>
         <Typography level="body-xs" className="font-semibold">
-          {sql`error.field || ': ' || error.type`}
+          {sql.caseWhen({
+            conditions: props.fields.map((field) => ({
+              condition: sql`error.field = ${sql.lit(field.name)}`,
+              expr: sql.lit(field.label),
+            })),
+            default: sql.lit`Row`,
+          })}
         </Typography>
         <Typography level="body-xs" className="text-neutral-600">
           {sql`error.message`}
@@ -1705,8 +1845,6 @@ function SelectFileStep(
                   "workforce_import_error",
                   sql.concat(
                     "Unable to read CSV: ",
-                    sql`service_error.type`,
-                    " ",
                     sql`coalesce(service_error.message, '')`,
                   ),
                 );
@@ -1724,21 +1862,35 @@ function MappingStep(
   props: {
     fields: WorkforceImportField[];
     importProps: WorkforcePeopleImportActionProps;
+    dialogId: Sql;
   },
 ) {
   const requiredColumns = ["Email", "Display name"];
-  if (!configuredDefault(props.importProps.defaultOrganization)) {
+  if (
+    props.importProps.workforce.organizationMode === "multiple" &&
+    !configuredDefault(props.importProps.defaultOrganization)
+  ) {
     requiredColumns.push("Employer organization");
   }
-  if (!configuredDefault(props.importProps.defaultJobProfile)) {
-    requiredColumns.push(
-      props.importProps.workforce.positionsTable
-        ? "Job profile or Position"
-        : "Job profile",
-    );
-  }
+  const primaryNames = new Set([
+    "display_name",
+    "email",
+    "job_profile",
+    "position",
+    ...(props.importProps.workforce.organizationMode === "multiple"
+      ? ["organization"]
+      : []),
+  ]);
+  const groups: { title: string; target: WorkforceImportTarget }[] = [
+    { title: "Person details", target: "person" },
+    { title: "Employment details", target: "relationship" },
+    { title: "Assignment details", target: "assignment" },
+  ];
   return (
-    <div sx={styles.modalBody}>
+    <div
+      sx={styles.modalBody}
+      onMount={(s) => s.element(props.dialogId).scrollTo({ top: 0, left: 0 })}
+    >
       <Typography level="title-md">
         {sql.concat("Map columns from ", sql`workforce_import_file_name`)}
       </Typography>
@@ -1746,15 +1898,74 @@ function MappingStep(
         {`Map at least ${
           requiredColumns.join(", ")
         } for new people. Blank mapped cells do not overwrite existing people.`}
+        {props.importProps.workforce.positionsTable
+          ? " Map Job profile or Position, or select a default job profile."
+          : " Map Job profile, or select a default job profile."}
       </Alert>
       <div sx={styles.mappingGrid}>
-        {props.fields.map((field) => <MappingControl field={field} />)}
+        {props.fields.filter((field) => primaryNames.has(field.name)).map((
+          field,
+        ) => <MappingControl field={field} />)}
+      </div>
+      <FormControl>
+        <FormLabel>Default job profile</FormLabel>
+        <TableRecordSelect
+          tableName={props.importProps.workforce.jobProfilesTable}
+          value={sql`workforce_import_default_job_profile_id`}
+          placeholder="Choose a default for blank job cells"
+          disableDialogInsert
+          onSelectValue={(s, id) =>
+            s.setScalar("workforce_import_default_job_profile_id", id)}
+        />
+        <Typography level="body-sm">
+          Used when creating an assignment without a job profile or position.
+        </Typography>
+      </FormControl>
+      {props.importProps.workforce.organizationMode === "single" && (
+        <Typography level="body-sm" className="text-secondary">
+          Employer:{" "}
+          {props.importProps.workforce.singleOrganization}. Organization
+          columns, when supplied, must match this employer.
+        </Typography>
+      )}
+      <Typography level="body-sm" className="text-secondary">
+        {sql.concat(
+          props.fields.reduce((count, field) =>
+            sql`${count} + case when ${
+              sql.ref(fieldOrdinalScalar(field))
+            } is not null then 1 else 0 end`, sql`0`),
+          ` of ${props.fields.length} fields mapped. Optional mappings are grouped below.`,
+        )}
+      </Typography>
+      <div className="flex flex-col gap-2">
+        {groups.map((group) => {
+          const fields = props.fields.filter((field) =>
+            field.target === group.target && !primaryNames.has(field.name)
+          );
+          if (!fields.length) {
+            return null;
+          }
+          return (
+            <details className="rounded border border-divider">
+              <summary className="cursor-pointer select-none rounded bg-neutral-soft px-4 py-3 text-sm font-semibold hover:bg-neutral-soft-hover">
+                {group.title}
+              </summary>
+              <div
+                sx={styles.mappingGrid}
+                className="border-t border-divider p-4"
+              >
+                {fields.map((field) => <MappingControl field={field} />)}
+              </div>
+            </details>
+          );
+        })}
       </div>
       <div className="flex justify-end gap-2">
         <Button
           variant="plain"
           color="neutral"
-          onClick={(s) => resetImportState(s, props.fields)}
+          onClick={(s) =>
+            resetImportState(s, props.fields)}
         >
           Cancel
         </Button>
@@ -1784,8 +1995,6 @@ function MappingStep(
                   "workforce_import_error",
                   sql.concat(
                     "Unable to preview CSV: ",
-                    sql`service_error.type`,
-                    " ",
                     sql`coalesce(service_error.message, '')`,
                   ),
                 );
@@ -1808,6 +2017,7 @@ function PreviewStep(
     fields: WorkforceImportField[];
     importProps: WorkforcePeopleImportActionProps;
     defaultLanguage: Sql;
+    dialogId: Sql;
   },
 ) {
   const defaults = importDefaultValues(props.importProps);
@@ -1824,7 +2034,7 @@ function PreviewStep(
   );
   const jobProfileValue = effectiveFieldValue(
     jobProfileField,
-    defaults,
+    { ...defaults, jobProfile: sql`workforce_import_default_job_profile_name` },
     { workforce: props.importProps.workforce },
   );
   const jobOrPosition = props.importProps.workforce.positionsTable
@@ -1835,7 +2045,10 @@ function PreviewStep(
     )`
     : sql`coalesce(${jobProfileValue}, '')`;
   return (
-    <div sx={styles.modalBody}>
+    <div
+      sx={styles.modalBody}
+      onMount={(s) => s.element(props.dialogId).scrollTo({ top: 0, left: 0 })}
+    >
       <Typography level="title-md">
         {sql.concat("Preview import from ", sql`workforce_import_file_name`)}
       </Typography>
@@ -1866,6 +2079,39 @@ function PreviewStep(
           ))`}
         />
       </div>
+      <div className="rounded border border-divider p-4 flex flex-col gap-3">
+        <Typography level="title-sm">Portal access for new accounts</Typography>
+        <Typography level="body-sm" className="text-secondary">
+          Choose whether new accounts created by this import can sign in.
+          Existing accounts keep their current login settings.
+        </Typography>
+        <RadioGroup aria-label="Portal access for new accounts">
+          <Radio
+            name={sql.lit`workforce_import_portal_access`}
+            label="Enable portal access"
+            aria-label="Enable portal access"
+            checked={sql`coalesce(workforce_import_enable_login, false)`}
+            disabled={sql`workforce_import_waiting`}
+            onChange={(s) => s.setScalar("workforce_import_enable_login", true)}
+          />
+          <Radio
+            name={sql.lit`workforce_import_portal_access`}
+            label="No portal access"
+            aria-label="No portal access"
+            checked={sql`coalesce(not workforce_import_enable_login, false)`}
+            disabled={sql`workforce_import_waiting`}
+            onChange={(s) =>
+              s.setScalar("workforce_import_enable_login", false)}
+          />
+        </RadioGroup>
+        <Show when={sql`workforce_import_enable_login`}>
+          <Typography level="body-sm" className="text-secondary">
+            People can set their password from the sign-in page where email
+            password setup is available. Access still follows workforce and
+            permission rules. No invitation email is sent.
+          </Typography>
+        </Show>
+      </div>
       <Show
         when={sql`exists (select 1 from workforce_import_validation_error)`}
       >
@@ -1879,24 +2125,52 @@ function PreviewStep(
       </Show>
       <div sx={styles.previewTableWrap}>
         <TableComponent
+          role="table"
+          sx={{
+            display: "block",
+            sm: { display: "table", minWidth: 900 },
+            "& thead": {
+              display: "none",
+              sm: { display: "table-header-group" },
+            },
+            "& tbody": { display: "block", sm: { display: "table-row-group" } },
+            "& tbody tr": {
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) auto",
+              gap: 2,
+              py: 4,
+              borderBottom: "1px solid",
+              borderColor: "divider",
+              sm: { display: "table-row", py: 0 },
+            },
+            "& td": {
+              display: "block",
+              padding: 0,
+              borderBottom: "none",
+              overflowWrap: "anywhere",
+              sm: { display: "table-cell", padding: 1 },
+            },
+          }}
           stickyHeader
           hoverRow
-          borderAxis="bothBetween"
+          borderAxis="xBetween"
           size="sm"
         >
           <thead>
-            <tr>
+            <tr role="row">
               <th>Row</th>
               <th>Status</th>
               <th>Name</th>
               <th>Email</th>
-              <th>Organization</th>
+              {props.importProps.workforce.organizationMode === "multiple" && (
+                <th>Organization</th>
+              )}
               <th>Job / Position</th>
               <th>Errors</th>
               <th>Import</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             <Each
               table="workforce_import_preview"
               recordName="import_row"
@@ -1907,30 +2181,37 @@ function PreviewStep(
                 where error.row = import_row.csv_row_index
               )`}
             >
-              <tr>
-                <td>{sql`import_row.csv_row_index`}</td>
-                <td>
+              <tr role="row">
+                <td role="cell" className="col-start-1 row-start-1">
+                  <span className="sm:hidden mr-1">Row</span>
+                  {sql`import_row.csv_row_index`}
+                </td>
+                <td role="cell" className="col-start-2 row-start-1">
                   <PreviewStatusChip />
                 </td>
-                <td>{sql`coalesce(import_row.display_name, '')`}</td>
-                <td>{sql`coalesce(import_row.email, '')`}</td>
-                <td>{sql`coalesce(${organizationValue}, '')`}</td>
-                <td>{jobOrPosition}</td>
-                <td>
-                  <PreviewErrors />
+                <td role="cell" className="col-start-1 row-start-2 font-medium">
+                  {sql`coalesce(import_row.display_name, '')`}
                 </td>
-                <td>
+                <td role="cell" className="col-start-1 row-start-3">
+                  {sql`coalesce(import_row.email, '')`}
+                </td>
+                {props.importProps.workforce.organizationMode === "multiple" &&
+                  (
+                    <td role="cell" className="col-span-2 row-start-4">
+                      <span className="sm:hidden mr-1">Organization:</span>
+                      {sql`coalesce(${organizationValue}, '')`}
+                    </td>
+                  )}
+                <td role="cell" className="col-span-2 row-start-5">
+                  <span className="sm:hidden mr-1">Job / Position:</span>
+                  {jobOrPosition}
+                </td>
+                <td role="cell" className="col-span-2 row-start-6">
+                  <PreviewErrors fields={props.fields} />
+                </td>
+                <td role="cell" className="col-start-2 row-start-2 row-span-2">
                   <div sx={styles.rowActions}>
-                    <Checkbox
-                      checked={sql`not import_row.csv_ignore_import`}
-                      onChange={(s) => {
-                        s.modify(sql`
-                          update workforce_import_preview
-                          set csv_ignore_import = not csv_ignore_import
-                          where csv_row_index = import_row.csv_row_index
-                        `);
-                      }}
-                    />
+                    <PreviewRowToggle />
                   </div>
                 </td>
               </tr>
@@ -1943,8 +2224,14 @@ function PreviewStep(
           Showing the first 100 rows plus any row with errors.
         </Typography>
       </Show>
+      <Show when={sql`workforce_import_enable_login is null`}>
+        <Typography level="body-sm">
+          Choose portal access above to continue.
+        </Typography>
+      </Show>
       <div className="flex justify-end gap-2">
         <Button
+          disabled={sql`workforce_import_waiting`}
           variant="soft"
           color="neutral"
           onClick={(s) => {
@@ -1955,6 +2242,7 @@ function PreviewStep(
         </Button>
         <Button
           loading={sql`workforce_import_waiting`}
+          disabled={sql`workforce_import_enable_login is null`}
           onClick={(s) => {
             s.if(
               sql`exists (
@@ -1993,8 +2281,6 @@ function PreviewStep(
                   "workforce_import_error",
                   sql.concat(
                     "Unable to import CSV: ",
-                    sql`service_error.type`,
-                    " ",
                     sql`coalesce(service_error.message, '')`,
                   ),
                 );
@@ -2031,13 +2317,23 @@ function SuccessStep(props: { fields: WorkforceImportField[] }) {
           " people",
         )}
       </Typography>
-      <Button
-        variant="soft"
-        color="success"
-        onClick={(s) => resetImportState(s, props.fields)}
-      >
-        Import another CSV
-      </Button>
+      <div sx={styles.actionRow}>
+        <Button
+          variant="outlined"
+          color="neutral"
+          onClick={(s) => resetImportState(s, props.fields)}
+        >
+          Import another CSV
+        </Button>
+        <Button
+          onClick={(s) => {
+            resetImportState(s, props.fields);
+            s.setScalar("workforce_import_open", false);
+          }}
+        >
+          Done
+        </Button>
+      </div>
     </div>
   );
 }
@@ -2045,6 +2341,7 @@ function SuccessStep(props: { fields: WorkforceImportField[] }) {
 export function WorkforcePeopleImportAction(
   props: WorkforcePeopleImportActionProps,
 ) {
+  const dialogId = useUniqueId();
   const fields = getWorkforceImportFields(props.workforce);
   const defaultLanguage = typeof props.defaultLanguage === "string"
     ? sql.lit(props.defaultLanguage)
@@ -2060,6 +2357,8 @@ export function WorkforcePeopleImportAction(
     });
     s.defScalar("workforce_import_add_count", 0);
     s.defScalar("workforce_import_update_count", 0);
+    s.defScalar("workforce_import_enable_login", { type: "Bool" });
+    s.defScalar("workforce_import_default_job_profile_id", { type: "BigInt" });
     s.fileRefTable("workforce_import_file");
     s.defTable("workforce_import_header", {
       fields: [
@@ -2112,7 +2411,20 @@ export function WorkforcePeopleImportAction(
       >
         Import people
       </Button>
-      <ModalDialog bindScalar="workforce_import_open" maxWidth="xl">
+      <ModalDialog
+        bindScalar="workforce_import_open"
+        id={dialogId}
+        layout="center"
+        aria-label="Import people"
+        maxWidth="xl"
+        sx={{
+          width: "min(1040px, calc(100vw - 32px))",
+          maxHeight: "calc(100dvh - 32px)",
+          overflowY: "auto",
+          padding: 4,
+          sm: { padding: 6 },
+        }}
+      >
         <div sx={styles.header} className="mb-4">
           <div sx={styles.headerText}>
             <Typography level="title-lg" startIcon="UploadFile">
@@ -2120,7 +2432,8 @@ export function WorkforcePeopleImportAction(
             </Typography>
             <Typography level="body-sm" className="text-neutral-600 mt-1">
               Create or update workforce people, users, relationships, and
-              primary assignments from a CSV.
+              primary assignments from a CSV. Choose portal access for new
+              accounts before importing.
             </Typography>
           </div>
           <IconButton
@@ -2141,14 +2454,27 @@ export function WorkforcePeopleImportAction(
             <SelectFileStep fields={fields} />
           </Match>
           <Match when={sql`workforce_import_step = 'mapping'`}>
-            <MappingStep fields={fields} importProps={props} />
-          </Match>
-          <Match when={sql`workforce_import_step = 'preview'`}>
-            <PreviewStep
+            <MappingStep
               fields={fields}
               importProps={props}
-              defaultLanguage={defaultLanguage}
+              dialogId={dialogId}
             />
+          </Match>
+          <Match when={sql`workforce_import_step = 'preview'`}>
+            <Data
+              procedure={(s) =>
+                s.defScalar(
+                  "workforce_import_default_job_profile_name",
+                  importDefaultValues(props).jobProfile,
+                )}
+            >
+              <PreviewStep
+                fields={fields}
+                importProps={props}
+                defaultLanguage={defaultLanguage}
+                dialogId={dialogId}
+              />
+            </Data>
           </Match>
           <Match when={sql`workforce_import_step = 'import'`}>
             <SuccessStep fields={fields} />

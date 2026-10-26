@@ -10,7 +10,8 @@ tags:
 
 # Card
 
-The Card component displays content in a contained format with consistent padding, border radius, and optional styling variants.
+`Card` is a padded, rounded surface container. `CardHeader`, `CardContent`,
+and `CardOverflow` structure its content.
 
 ```tsx
 import { Card, CardContent, CardHeader, CardOverflow } from "components/card";
@@ -20,132 +21,42 @@ import { Card, CardContent, CardHeader, CardOverflow } from "components/card";
 
 ```tsx
 <Card variant="outlined">
-  <div className="p-6">
-    <Typography level="title-lg">Card Title</Typography>
-    <Typography level="body-md">Card content goes here</Typography>
-  </div>
-</Card>
-```
-
-## With CardHeader and CardContent
-
-```tsx
-<Card variant="outlined">
+  <CardOverflow>
+    <img src={sql`product.image_url`} className="w-full" />
+  </CardOverflow>
   <CardHeader>
-    <Typography level="title-lg" startIcon="Notes">
-      Notes
-    </Typography>
+    <Typography level="title-lg">Details</Typography>
   </CardHeader>
   <CardContent>
-    <Typography level="body-md">
-      Content with consistent padding
-    </Typography>
+    <Typography level="body-md">{sql`product.description`}</Typography>
   </CardContent>
 </Card>
 ```
 
-## Card Props
+## Card
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `variant` | `Variant` | `"plain"` | "plain", "outlined", "soft", "solid" |
-| `color` | `Color` | `"neutral"` | "primary", "neutral", "danger", "success", "warning" |
-| `size` | `Size` | `"md"` | "xs", "sm", "md", "lg" — controls padding and border radius |
-| `orientation` | `Orientation` | `"vertical"` | "vertical" or "horizontal" flex direction |
-| `harmonize` | `boolean` | `false` | Harmonize card's colors with child components |
-| `className` | `string` | - | Tailwind classes |
-| `component` | `string` | `"div"` | Override the HTML tag |
+- `size` (`xs` | `sm` | `md` default | `lg`) sets `--card-padding`
+  (0.375rem / 0.5rem / 1rem / 1.5rem) and `--card-radius`.
+- `orientation`: `"vertical"` (default) or `"horizontal"` flex direction.
+- `variant` (default `plain`) and `color` (default `neutral`) follow the shared
+  [styling props](./styling.md#color-variant-and-size). The card has a surface
+  background and small shadow unless the variant overrides it.
+- `harmonize`: with a `soft`/`solid` variant, recolors descendants that use the
+  default color to match the card background.
+- A `Divider` directly in a card bleeds to the card edges (`--divider-inset`).
 
-**Important**: `color` and `variant` are generation-time strings only, not SQL expressions.
+See `CardProps` in `components/card` for the full contract.
 
 ## Sub-Components
 
-### CardHeader
+- `CardOverflow` cancels the card padding so content (images, banners, accent
+  strips) reaches the card edges, with corner radii adjusted for the first and
+  last child. `row` bleeds vertically for horizontal cards. It accepts its own
+  `variant`, `color`, and `harmonize`.
+- `CardHeader` is a full-width `CardOverflow` with a bottom divider; pass
+  `noDivider` to remove it.
+- `CardContent` is a flex area (`orientation`, default vertical) that adds its
+  own `--card-padding`.
 
-Renders a section at the top of the card with a bottom divider by default.
-
-```tsx
-<Card variant="outlined">
-  <CardHeader>
-    <Typography level="title-lg">Header</Typography>
-  </CardHeader>
-  <CardContent>Body</CardContent>
-</Card>
-
-// Without divider
-<CardHeader noDivider>
-  <Typography level="title-lg">No Divider</Typography>
-</CardHeader>
-```
-
-### CardContent
-
-Provides consistent padding and flex layout for the main content area.
-
-```tsx
-<CardContent orientation="horizontal">
-  <div>Left</div>
-  <div>Right</div>
-</CardContent>
-```
-
-### CardOverflow
-
-Allows content to overflow the card's padding (useful for images, dividers).
-
-```tsx
-<Card variant="outlined">
-  <CardOverflow>
-    <img src={sql`image_url`} />
-  </CardOverflow>
-  <CardContent>
-    <Typography level="title-md">Title</Typography>
-  </CardContent>
-</Card>
-```
-
-## Common Patterns
-
-### Info Card
-
-```tsx
-<Card variant="outlined">
-  <CardHeader>
-    <Typography level="title-lg" startIcon="Info">
-      Details
-    </Typography>
-  </CardHeader>
-  <CardContent>
-    <Typography level="body-md">{sql`description`}</Typography>
-  </CardContent>
-</Card>
-```
-
-### Styled Card
-
-```tsx
-// Soft colored card
-<Card variant="soft" color="primary">
-  <CardContent>
-    <Typography level="title-md">Highlighted</Typography>
-    <Typography level="body-sm">Important information</Typography>
-  </CardContent>
-</Card>
-
-// Extra-small card
-<Card variant="outlined" size="xs">
-  <div className="p-2">Compact card</div>
-</Card>
-```
-
-### Horizontal Card
-
-```tsx
-<Card variant="outlined" orientation="horizontal">
-  <div className="w-16 h-16 bg-primary-100 rounded" />
-  <CardContent>
-    <Typography level="title-md">{sql`name`}</Typography>
-    <Typography level="body-sm">{sql`description`}</Typography>
-  </CardContent>
-</Card>
-```
+For read-only record display and data-backed cards, see the card helpers in
+[Solution Components](./solution_components.md).

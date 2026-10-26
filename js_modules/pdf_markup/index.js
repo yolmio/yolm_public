@@ -1,7 +1,9 @@
 // deno-lint-ignore-file no-undef
 
 import { degrees, PDFDocument, rgb, StandardFonts } from "pdf-lib";
-import pdfViewerCss from "pdfjs-dist/web/pdf_viewer.css" with { type: "text" };
+import pdfViewerCss from "pdfjs-dist/legacy/web/pdf_viewer.css" with {
+  type: "text",
+};
 
 const viewers = new Map();
 const DEFAULT_TOOL = "select";
@@ -52,9 +54,10 @@ function loadPdfJs(url, workerUrl) {
         }
         // The prebuilt PDF.js viewer resolves its API from this global. Load
         // it only after the configured API module so both halves are always
-        // the exact same version.
+        // the exact same version. Use legacy builds for the viewer and API/
+        // worker sidecars so older Safari gets the required built-in polyfills.
         globalThis.pdfjsLib = lib;
-        const viewer = await import("pdfjs-dist/web/pdf_viewer.mjs");
+        const viewer = await import("pdfjs-dist/legacy/web/pdf_viewer.mjs");
         return { lib, viewer };
       }),
     );
@@ -95,6 +98,14 @@ function moduleResult(handle, json) {
 function getViewer(args) {
   const handle = args?.handle || parseArgs(args).handle;
   return viewers.get(handle);
+}
+
+function formatMegabytes(bytes) {
+  return `${(bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0)} MB`;
+}
+
+function setDatasetValue(element, key, value) {
+  if (element.dataset[key] !== value) element.dataset[key] = value;
 }
 
 function clamp(value, min, max) {
@@ -471,6 +482,10 @@ class PdfMarkupViewer {
     this.redoStack = [];
     this.pageCount = 0;
     this.pageViews = new Map();
+    this.orderedPageViews = [];
+    // Pages whose overlay surface is mounted. Scroll updates revisit only
+    // these and the pages near the viewport, not every page of the document.
+    this.surfacePages = new Set();
     this.mount = null;
     this.viewerElement = null;
     this.pdfViewer = null;
@@ -678,6 +693,14 @@ class PdfMarkupViewer {
       // (via synchronous XHR) and change color output of existing PDFs.
       wasmUrl: this.pdfJsWasmUrl,
     });
+    const loadingLabel = loadingElement.textContent;
+    this.loadingTask.onProgress = ({ loaded, total }) => {
+      loadingElement.textContent = total > 0
+        ? `${loadingLabel} ${formatMegabytes(loaded)} of ${
+          formatMegabytes(total)
+        }`
+        : `${loadingLabel} ${formatMegabytes(loaded)}`;
+    };
     this.pdf = await this.loadingTask.promise;
     if (this.destroyed) return;
     this.pageCount = this.pdf.numPages;
@@ -877,6 +900,8 @@ class PdfMarkupViewer {
 
   async closeDocument() {
     this.pageViews.clear();
+    this.orderedPageViews = [];
+    this.surfacePages.clear();
     this.documentHeader?.remove();
     this.documentFooter?.remove();
     this.documentHeader = null;
@@ -1278,6 +1303,7 @@ class PdfMarkupViewer {
 
   createPageViews() {
     this.pageViews.clear();
+    this.surfacePages.clear();
     for (let pageNumber = 1; pageNumber <= this.pageCount; pageNumber += 1) {
       const pdfPageView = this.pdfViewer.getPageView(pageNumber - 1);
       const stage = pdfPageView.div;
@@ -1295,6 +1321,7 @@ class PdfMarkupViewer {
         viewport: pdfPageView.viewport,
       });
     }
+    this.orderedPageViews = [...this.pageViews.values()];
     this.syncPageSurfaces();
   }
 
@@ -1339,6 +1366,7 @@ class PdfMarkupViewer {
     if (pageView.overlayCanvas.parentElement !== pageView.stage) {
       pageView.stage.append(pageView.overlayCanvas, pageView.textLayer);
     }
+    this.surfacePages.add(pageView.pageNumber);
     this.updateCursors();
   }
 
@@ -1374,6 +1402,7 @@ class PdfMarkupViewer {
         pageView.overlayCanvas.remove();
         pageView.textLayer.remove();
         pageView.dpr = 1;
+        this.surfacePages.delete(pageView.pageNumber);
       }
       return;
     }
@@ -1456,8 +1485,14 @@ class PdfMarkupViewer {
   updateCursors() {
     if (!this.container) return;
     const panning = Boolean(this.pan || this.pinch);
-    this.container.dataset.panning = panning ? "true" : "false";
-    this.container.dataset.spacePan = this.spacePan ? "true" : "false";
+    // Rewriting an unchanged root attribute still restyles every page of a
+    // long document, so only write values that changed.
+    setDatasetValue(this.container, "panning", panning ? "true" : "false");
+    setDatasetValue(
+      this.container,
+      "spacePan",
+      this.spacePan ? "true" : "false",
+    );
     const overlayCursor = panning
       ? "grabbing"
       : this.spacePan || this.tool === "hand"
@@ -1467,16 +1502,20 @@ class PdfMarkupViewer {
       : this.tool === "text"
       ? "text"
       : "crosshair";
-    for (const pageView of this.pageViews.values()) {
-      if (pageView.overlayCanvas) {
-        pageView.overlayCanvas.style.cursor = overlayCursor;
+    for (const pageNumber of this.surfacePages) {
+      const overlayCanvas = this.pageViews.get(pageNumber)?.overlayCanvas;
+      if (overlayCanvas && overlayCanvas.style.cursor !== overlayCursor) {
+        overlayCanvas.style.cursor = overlayCursor;
       }
     }
-    this.container.style.cursor = panning
+    const containerCursor = panning
       ? "grabbing"
       : this.spacePan || this.tool === "hand"
       ? "grab"
       : "";
+    if (this.container.style.cursor !== containerCursor) {
+      this.container.style.cursor = containerCursor;
+    }
   }
 
   isScrollbarPointerDown(event) {
@@ -2033,6 +2072,31 @@ class PdfMarkupViewer {
     const stageRect = pageView.stage.getBoundingClientRect();
     return stageRect.bottom >= rect.top - rect.height &&
       stageRect.top <= rect.bottom + rect.height;
+  }
+
+  nearViewportPageNumbers() {
+    // Pages stack vertically in document order, so binary-search the first
+    // stage that reaches the expanded viewport instead of measuring them all.
+    const pageViews = this.orderedPageViews;
+    const rect = this.container.getBoundingClientRect();
+    const top = rect.top - rect.height;
+    const bottom = rect.bottom + rect.height;
+    let low = 0;
+    let high = pageViews.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (pageViews[middle].stage.getBoundingClientRect().bottom < top) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    const pageNumbers = [];
+    for (let index = low; index < pageViews.length; index += 1) {
+      if (pageViews[index].stage.getBoundingClientRect().top > bottom) break;
+      pageNumbers.push(pageViews[index].pageNumber);
+    }
+    return pageNumbers;
   }
 
   renderAnnotations(pageNumber = this.currentPage) {
@@ -2839,11 +2903,17 @@ class PdfMarkupViewer {
     this.scrollRaf = requestAnimationFrame(() => {
       this.scrollRaf = null;
       this.pdfViewer?.update();
-      for (const pageView of this.pageViews.values()) {
-        this.syncPageSurface(pageView.pageNumber);
+      const pageNumbers = new Set(this.surfacePages);
+      for (const pageNumber of this.nearViewportPageNumbers()) {
+        pageNumbers.add(pageNumber);
+      }
+      for (const pageNumber of pageNumbers) {
+        const pageView = this.pageViews.get(pageNumber);
+        if (!pageView) continue;
+        this.syncPageSurface(pageNumber);
         if (this.stageNearViewport(pageView)) {
-          this.renderAnnotations(pageView.pageNumber);
-          this.renderTextLayer(pageView.pageNumber);
+          this.renderAnnotations(pageNumber);
+          this.renderTextLayer(pageNumber);
         }
       }
     });

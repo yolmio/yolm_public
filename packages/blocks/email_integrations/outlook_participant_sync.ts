@@ -9,6 +9,37 @@ export interface OutlookParticipantSyncConfig {
   defaultSince: Sql;
 }
 
+export const outlookParticipantSyncReadyJobsQuery = sql`
+  select job.id
+  from db.outlook_contact_email_sync_jobs job
+  join db.user_outlook_emails_accounts account
+    on account.id = job.user_outlook_emails_account_id
+  where (
+      (
+        cast(job.status as string) in ('pending', 'failed')
+        and job.attempt_count < 5
+      )
+      or (
+        cast(job.status as string) = 'running'
+        and job.attempt_count <= 5
+        and (
+          job.started_at is null
+          or job.started_at <= date.add(hour, -1, now())
+        )
+      )
+    )
+    and job.next_attempt_at <= now()
+    and account.status = 'active'
+    and account.credential_id is not null
+    and not exists (
+      select 1
+      from db.outlook_contact_email_sync_jobs recent
+      where recent.started_at > date.add(second, -2, now())
+    )
+  order by job.enqueued_at, job.id
+  limit 1
+`;
+
 interface OutlookParticipantSyncHandlers {
   syncPage<T extends IServerBaseStatements>(
     s: T,
@@ -58,9 +89,64 @@ export function defineOutlookParticipantSyncSchema() {
     table.string("last_error", 5000);
     table.string("claim_id", 100);
     table.timestampUtc("enqueued_at").notNull().default(sql`now()`);
+    // Retain the last claim time after completion/requeue to pace all jobs.
     table.timestampUtc("started_at");
     table.unique(["user_outlook_emails_account_id", "contact_email"]);
   });
+}
+
+/** Gate a page claim on retained recent-job timestamps without sleeping a worker. */
+export function claimOutlookParticipantSyncPage<
+  T extends IServerBaseStatements,
+>(
+  s: T,
+  opts: {
+    jobId: Sql;
+    credentialId: Sql;
+    claimId: Sql;
+    claimedJobIdScalar: string;
+  },
+) {
+  s.defScalar(opts.claimedJobIdScalar, { type: "BigInt" });
+  s.startTransaction();
+  s.modify(sql`
+    update db.outlook_contact_email_sync_jobs
+    set status = 'running'::enums.outlook_contact_email_sync_status,
+        attempt_count = attempt_count + 1,
+        claim_id = ${opts.claimId},
+        started_at = now(),
+        last_error = null
+    where id = ${opts.jobId}
+      and next_attempt_at <= now()
+      and not exists (
+        select 1
+        from db.outlook_contact_email_sync_jobs recent
+        where recent.started_at > date.add(second, -2, now())
+      )
+      and exists (
+        select 1
+        from db.user_outlook_emails_accounts account
+        where account.id = user_outlook_emails_account_id
+          and account.status = 'active'
+          and account.credential_id = ${opts.credentialId}
+      )
+      and (
+        (
+          cast(status as string) in ('pending', 'failed')
+          and attempt_count < 5
+        )
+        or (
+          cast(status as string) = 'running'
+          and attempt_count <= 5
+          and (
+            started_at is null
+            or started_at <= date.add(hour, -1, now())
+          )
+        )
+      )
+    returning id into ${sql.ref(opts.claimedJobIdScalar)}
+  `);
+  s.commitTransaction();
 }
 
 export function enqueueOutlookParticipantSync<
@@ -87,7 +173,6 @@ export function enqueueOutlookParticipantSync<
         provider_result_count = 0,
         attempt_count = 0,
         claim_id = null,
-        started_at = null,
         next_attempt_at = now(),
         enqueued_at = now(),
         last_error = null
@@ -166,7 +251,6 @@ export function resetOutlookParticipantSyncForAccount<
         next_attempt_at = now(),
         last_error = null,
         claim_id = null,
-        started_at = null,
         enqueued_at = now()
     where user_outlook_emails_account_id = ${accountId}`);
   s.commitTransaction();
@@ -246,34 +330,14 @@ export function registerOutlookParticipantSync(
     },
   });
 
-  system.addReactor({
-    name: "outlook_contact_email_sync_job",
-    query: sql`
-      select job.id
-      from db.outlook_contact_email_sync_jobs job
-      join db.user_outlook_emails_accounts account
-        on account.id = job.user_outlook_emails_account_id
-      where (
-          (
-            cast(job.status as string) in ('pending', 'failed')
-            and job.attempt_count < 5
-          )
-          or (
-            cast(job.status as string) = 'running'
-            and job.attempt_count <= 5
-            and (
-              job.started_at is null
-              or job.started_at <= date.add(hour, -1, now())
-            )
-          )
-        )
-        and job.next_attempt_at <= now()
-        and account.status = 'active'
-        and account.credential_id is not null
-      order by job.enqueued_at, job.id
-    `,
-    recordName: "contact_sync_job",
-    maxConcurrent: 1,
+  // The handler body compiles as a stored procedure, keeping the reactor small.
+  system.storedProcedure({
+    name: "outlook_contact_email_sync_job_run",
+    transaction: "standalone",
+    inputRecords: [{
+      name: "contact_sync_job",
+      fields: [{ name: "id", type: "Int", notNull: true }],
+    }],
     procedure: (s) => {
       s.defRecord(
         "current_contact_sync_job",
@@ -319,49 +383,23 @@ export function registerOutlookParticipantSync(
                 "contact_sync_claim_id",
                 sql`cast(random.uuid() as string)`,
               );
-              s.startTransaction();
-              s.modify(sql`
-                update db.outlook_contact_email_sync_jobs
-                set status = 'running'::enums.outlook_contact_email_sync_status,
-                    attempt_count = attempt_count + 1,
-                    claim_id = contact_sync_claim_id,
-                    started_at = now(),
-                    last_error = null
-                where id = current_contact_sync_job.id
-                  and next_attempt_at <= now()
-                  and exists (
-                    select 1
-                    from db.user_outlook_emails_accounts account
-                    where account.id =
-                      current_contact_sync_job.user_outlook_emails_account_id
-                      and account.status = 'active'
-                      and account.credential_id =
-                        current_contact_sync_job.account_credential_id
-                  )
-                  and (
-                    (
-                      cast(status as string) in ('pending', 'failed')
-                      and attempt_count < 5
-                    )
-                    or (
-                      cast(status as string) = 'running'
-                      and attempt_count <= 5
-                      and (
-                        started_at is null
-                        or started_at <= date.add(hour, -1, now())
-                      )
-                    )
-                  )
-              `);
-              s.commitTransaction();
+              claimOutlookParticipantSyncPage(s, {
+                jobId: sql`current_contact_sync_job.id`,
+                credentialId:
+                  sql`current_contact_sync_job.account_credential_id`,
+                claimId: sql`contact_sync_claim_id`,
+                claimedJobIdScalar: "contact_sync_claimed_job_id",
+              });
               s.if(
-                sql`not exists (
-                  select 1
-                  from db.outlook_contact_email_sync_jobs
-                  where id = current_contact_sync_job.id
-                    and status = 'running'::enums.outlook_contact_email_sync_status
-                    and claim_id = contact_sync_claim_id
-                )`,
+                sql`contact_sync_claimed_job_id is null
+                  or not exists (
+                    select 1
+                    from db.outlook_contact_email_sync_jobs
+                    where id = current_contact_sync_job.id
+                      and status =
+                        'running'::enums.outlook_contact_email_sync_status
+                      and claim_id = contact_sync_claim_id
+                  )`,
                 (s) => s.return(),
               );
               s.defScalar("contact_sync_next_page_link", {
@@ -460,8 +498,7 @@ export function registerOutlookParticipantSync(
                               then 'Outlook returned at least 1000 messages for one contact in one day; choose a later start date.'
                               else null
                             end,
-                            claim_id = null,
-                            started_at = null
+                            claim_id = null
                         where id = current_contact_sync_job.id
                           and status =
                             'running'::enums.outlook_contact_email_sync_status
@@ -517,8 +554,7 @@ export function registerOutlookParticipantSync(
                           contact_sync_page_result_count
                       end,
                       last_error = null,
-                      claim_id = null,
-                      started_at = null
+                      claim_id = null
                     where id = current_contact_sync_job.id
                       and status =
                         'running'::enums.outlook_contact_email_sync_status
@@ -574,6 +610,17 @@ export function registerOutlookParticipantSync(
           );
         },
       );
+    },
+  });
+  system.addReactor({
+    name: "outlook_contact_email_sync_job",
+    query: outlookParticipantSyncReadyJobsQuery,
+    recordName: "contact_sync_job",
+    maxConcurrent: 1,
+    procedure: (s) => {
+      s.callStoredProcedure("outlook_contact_email_sync_job_run", {
+        inputRecords: { contact_sync_job: "contact_sync_job" },
+      });
     },
   });
 }

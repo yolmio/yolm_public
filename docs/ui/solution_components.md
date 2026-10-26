@@ -1,6 +1,6 @@
 ---
 title: Solution UI Helper Components
-description: "Solution-facing reference for reusable UI helpers: dialogs, comboboxes, enum selects, inputs, headers, cards, icons, queues, and image helpers."
+description: "Catalog of reusable UI helper components by import and use case: fields, selectors, CRUD dialogs, headers, display, queues, images, and icons."
 tags:
   - ui
   - components
@@ -8,56 +8,62 @@ tags:
   - solution-development
 related:
   - ui/overview.md
-  - ui/form_control.md
-  - ui/autocomplete.md
-  - ui/modal.md
-  - ui/progress.md
   - ui/operational_ui.md
+  - ui/reusable_helpers.md
+  - ui/page_templates.md
   - ui/mobile_capture_scanning.md
 ---
 
 # Solution UI Helper Components
 
-Common helper components by import and use case. For `Button`, `Card`, `Chip`,
-`Input`, `Select`, `Checkbox`, `Tabs`, `Sidebar`, `ModalDialog`, `DataTable`,
-and `Typography`, use their dedicated `docs/ui/` pages. Where a row below links
-to a dedicated page, open that page for full prop tables.
+Catalog of helper components, one row each. Linked rows have a dedicated page;
+otherwise the exported TypeScript props in the listed module are the contract.
+Base components (`Button`, `Card`, `Input`, `Select`, `Tabs`, `ModalDialog`,
+`DataTable`, `Typography`, ...) have their own `docs/ui/` pages. Routed pages
+are in [Page Templates](./page_templates.md); guidance for dense screens is in
+[Operational UI](./operational_ui.md).
+
+Use a helper when it fits directly; otherwise compose `Data`, `Form`,
+`ModalDialog`, and base components.
 
 ## Form And Field Helpers
 
+Use these inside [Form](./form.md); they do not replace `Form` state or
+validation.
+
 | Component | Import | Use when |
 | --- | --- | --- |
-| [`FieldFormControl` and typed variants](./field_form_control.md) | `components/field_form_control` | Render the correct form control for a table field or field type. |
-| `LabelOnTopFormField` | `components/label_on_top_form_field` | `Form.Field` with label above the control. |
-| `LabelOnLeftFormField` / `LabelOnLeftFormFieldWrapper` | `components/label_on_left_form_field` | Compact label-left field layout. |
+| [`FieldFormControl` + typed variants](./field_form_control.md) | `components/field_form_control` | Control chosen from a table field or field type. |
+| `LabelOnTopFormField` | `components/label_on_top_form_field` | `Form.Field` with label above. |
+| `LabelOnLeftFormField` / `LabelOnLeftFormFieldWrapper` | `components/label_on_left_form_field` | Compact label-left layout. |
 | `FormCards` | `components/form_cards` | Repeated form relation as cards. |
-| `FormLabel` / `FormHelperText` | `components/form_label`, `components/form_helper_text` | Standard labels and helper text for custom controls. |
-| [`Slider`](./slider.md) | `components/slider` | Pick a numeric value from a range with a draggable track. |
-| [`DurationInput` / `SplitDurationInput`](./duration_input.md) | `components/duration_input`, `components/split_duration_input` | Enter a time duration as one field or split unit fields. |
-| [`OneTimePasswordInput`](./one_time_password.md) | `components/one_time_password_input` | Segmented one-time-password / verification code entry. |
-
-Use these inside [Form](./form.md) flows. Do not use them as a substitute for
-`Form` state or validation.
+| `FormLabel` / `FormHelperText` | `components/form_label`, `components/form_helper_text` | Labels/helper text for custom controls. |
+| [`Slider`](./slider.md) | `components/slider` | Numeric range. |
+| [`DurationInput` / `SplitDurationInput`](./duration_input.md) | `components/duration_input`, `components/split_duration_input` | Duration as one field or split units. |
+| [`OneTimePasswordInput`](./one_time_password.md) | `components/one_time_password_input` | Segmented verification code. |
 
 ## Selection Helpers
 
+Static options: [Select](./select.md). Search-backed inputs:
+[Autocomplete](./autocomplete.md).
+
 | Component | Import | Use when |
 | --- | --- | --- |
-| `QueryCombobox` | `components/query_combobox` | Searchable SQL-backed options. |
-| `TableRecordSelect` | `components/table_record_select` | Select one record from a table. |
-| `EnumSelect` / `EnumLikeSelect` | `components/enum_select` | Select an enum or enum-like value. |
-| `EachSelect` | `components/each_select` | Options are rendered from a table with `<Each>`-style iteration. |
-| [`MultiSelectDropdown`](./multi_select_dropdown.md) | `components/multi_select_dropdown` | Pick zero-or-more items from a dropdown driven by selected/available SQL queries. |
-| [`Radio` / `RadioGroup`](./radio.md) | `components/radio`, `components/radio_group` | Single-choice option as radio buttons, grouped with shared form state. |
-| [`CountrySelect`](./country_select.md) | `components/country_select` | Searchable country picker backed by the country enum. |
-| [`SelectTimeZone`](./select_timezone.md) | `components/select_timezone` | Searchable IANA timezone picker. |
-| [`DateRangeFilter` / `DateRangeCalendars`](./date_range.md) | `components/date_range` | Start/end date range filters. |
-| `ChipButton` | `components/chip_button` | Toggle/selectable chip bound to a scalar or record field. |
+| `QueryCombobox` | `components/query_combobox` | Searchable SQL-backed options or lookups. |
+| `TableRecordSelect` | `components/table_record_select` | Pick one record from a table (default foreign-key control). |
+| `EnumSelect` / `EnumLikeSelect` | `components/enum_select` | Enum variants with labels/colors from `system.enum_`. |
+| `EachSelect` | `components/each_select` | Options iterated from a table, `<Each>`-style. |
+| [`MultiSelectDropdown`](./multi_select_dropdown.md) | `components/multi_select_dropdown` | Zero-or-more items from selected/available SQL queries. |
+| [`Radio` / `RadioGroup`](./radio.md) | `components/radio`, `components/radio_group` | Single choice as radio buttons. |
+| [`CountrySelect`](./country_select.md) | `components/country_select` | Country enum picker. |
+| [`SelectTimeZone`](./select_timezone.md) | `components/select_timezone` | IANA timezone picker. |
+| [`DateRangeFilter` / `DateRangeCalendars`](./date_range.md) | `components/date_range` | Start/end date filters. |
+| `ChipButton` | `components/chip_button` | Toggle chip bound to a scalar or record field. |
 
-For simple static options, prefer [Select](./select.md). For search-backed
-inputs, see [Autocomplete](./autocomplete.md).
+## CRUD Dialogs And Downloads
 
-## Action Dialogs
+For bespoke multi-step mutations, write a [Form](./form.md) or use
+[ActionButton](./action_button.md).
 
 | Component | Import | Use when |
 | --- | --- | --- |
@@ -65,115 +71,86 @@ inputs, see [Autocomplete](./autocomplete.md).
 | [`AutoUpdateDialog`](./auto_dialogs.md), `AutoUpdateButton`, `AutoUpdateIconButton`, `AutoUpdateMenuItem` | `components/auto_update_dialog` | Generated edit dialog for one record. |
 | `DeleteRecordDialog`, `DeleteRecordButton`, `DeleteRecordIconButton`, `DeleteRecordMenuItem` | `components/delete_record_dialog` | Standard delete confirmation. |
 | `ConfirmDangerDialog` | `components/confirm_danger_dialog` | Confirmation for destructive actions. |
-| `DownloadButton` | `components/download_button` | CSV or generated-content downloads from a SQL query. |
+| `DownloadButton` | `components/download_button` | CSV or generated-content download from a SQL query. |
 
-Use these helpers for standard CRUD actions. For bespoke multi-step mutations,
-write a normal [Form](./form.md) or event handler procedure.
+Insert, update, and delete helpers resolve the current table/record context;
+pass `table`, `recordId`, or parent fields explicitly outside a record context.
 
-## Layout, Navigation, And Display Helpers
+## Headers, Navigation, And Layout
 
 | Component | Import | Use when |
 | --- | --- | --- |
-| [`Navbar` / `TransparentNavbar`](./navbar.md) | `components/navbar`, `components/transparent_navbar` | Top navigation (solid or transparent over a hero). |
+| [`Navbar` / `TransparentNavbar`](./navbar.md) | `components/navbar`, `components/transparent_navbar` | Top navigation (in-app / landing page). |
+| [`Sidebar`](./sidebar.md) | `components/sidebar` | Multi-section app shell. |
 | `Menu` | `components/menu` | Dropdown/action menu. |
-| `ButtonGroup` | `components/button_group` | Group related buttons (or segmented toggle-style actions) as one unit. |
-| `Link` | `components/link` | Styled navigation link. |
-| [`PageHeader`](./page_header.md) | `components/page_header` | Title, chips, actions, and header layout. |
-| [`PageTitleHeader`](./page_header.md) | `components/page_header` | Standard title/action header for custom pages. |
-| `SuperSimpleHeader` | `components/super_simple_header` | Record-page title with optional Edit/Delete buttons (uses current table/record context). |
-| `DashboardHeader` | `components/dashboard_header` | Dashboard title/subheader with an optional logo. |
-| `TimeGreeting` / `CurrentUserName` / `CurrentUserFirstName` | `components/greeting` | Time-of-day greeting and current user name display. |
-| `Stat` / `StatRow` | `components/stat_row` | Compact dashboard metrics. |
-| `InlineRecordDisplay` / `InlineFieldDisplay` | `components/inline_record_display`, `components/inline_field_display` | Inline field/record display from table metadata. |
-| `BooleanIcon`, `FieldRow`, `BoolFieldRow` | `components/field_display` | Compact boolean icons and label/value rows for custom detail panels. |
-| `StatusChip` | `components/status_chip` | App-defined status labels and chip variants driven by SQL conditions. |
-| `MarkdownDisplay` | `components/markdown_display` | Render a markdown SQL string as styled HTML. |
-| `NotesCard` | `components/notes_card` | Inline view/edit card for a record's notes (or chosen) field. |
-| `SimpleLinkRelationCard` | `components/simple_link_relation_card` | Card listing related records from another table with links. |
-| `XmlPayloadModal` | `components/xml_payload_viewer` | Modal for inspecting XML payloads from a SQL expression. |
+| `ButtonGroup` | `components/button_group` | Related or segmented buttons. |
+| [`Link`](./breadcrumbs.md#link) | `components/link` | Styled anchor; `backLink` returns to a list with its filters. |
+| [`PageHeader`](./page_header.md) | `components/page_header` | Title, chips, actions header layout. |
+| [`PageTitleHeader`](./page_header.md#pagetitleheader) | `components/page_header` | Title + actions header for custom pages. |
+| `SuperSimpleHeader` | `components/super_simple_header` | Record title with optional Edit/Delete (current record context). |
+| `DashboardHeader` | `components/dashboard_header` | Dashboard title/subheader with optional logo. |
+| `AccountMenu` | `components/account_menu` | User/app switcher menu, optional compact mode. |
+| `SplitView` | `components/split_view` | Main content plus collapsible, optionally resizable inspector. |
 | `TwoColumnDisplayCard` / `TwoColumnFormLayout` | `components/two_column_display_card`, `components/two_column_form_layout` | Two-column detail pages or forms. |
-| `Report` / `ReportParameters` | `components/report` | A single named report panel (with optional parameters) composed inside a report page. |
-| [`SimplePivotTable`](./simple_pivot_table.md) | `components/simple_pivot_table` | Pivot / cross-tab table built from a query. |
-| `SingleColumnFixedRowsTable` | `components/single_column_fixed_rows_table` | Fixed set of labeled rows in one column (key/value style detail table). |
-| `StateStatusSwitch` | `components/state_status_switch` | Switch UI between loading/error/success states for an async/pending flow. |
-| [`AddToCalendarButton`](./add_to_calendar.md) | `components/add_to_calendar` | Menu button to add an event to Google Calendar, Outlook, or download an `.ics`. |
-| `Confetti` | `components/confetti` | Celebratory confetti animation on a success milestone. |
-| `TextReveal` | `components/text_reveal` | Scroll-driven letter-by-letter text reveal animation for landing pages. |
-| `Params` | `components/params` | Display/debug route or query parameters. |
-| `AccountMenu` | `components/account_menu` | User/app switcher menu with optional compact mode and app links. |
-| `SplitView` | `components/split_view` | Main content with a collapsible, optionally resizable inspector pane. |
-| `DocumentComparison` | `components/document_comparison` | Show a Lexical document comparison with previous/current labels. |
-| `FileTypeIcon` / `fileTypeIconKindSql` | `components/file_type_icon` | Render a file-kind icon from content type, filename, or drive item kind. |
-| `VirtualizedChatTimeline` / `defineVirtualizedChatTimelineState` | `components/virtualized_chat_timeline` | Render a large chat/event history with virtualized scrolling, search, and minimap state. |
+| `CollapseControl` | `components/collapse_component` | Expand/collapse a section without route state. |
+| `PageKeyboardShortcuts` | `components/keyboard_shortcuts` | Page-scoped keyboard shortcuts. |
 
-## Operational Helpers
+## Display Helpers
 
 | Component | Import | Use when |
 | --- | --- | --- |
-| `WorkQueue` | `components/work_queue` | Queue-like columns, rows, headers, and footers. |
-| `QrScanner` | `components/qr_scanner` | Camera QR scanning. |
-| [`ExpandableImage`](./images.md) | `components/expandable_image` | Thumbnail-to-large-image view. |
-| [`EditableImageThumbnail`](./images.md) | `components/editable_image_thumbnail` | Thumbnail for an `image_set` field group with upload/replace controls. |
-| [`ImageDialog`](./images.md) | `components/image_dialog` | Dialog to view, replace, or remove a record's `image_set` image. |
-| [`ImageGallery`](./images.md) | `components/image_gallery` | Image/photo gallery. |
-| [`PdfMarkupViewer` / `PdfMarkupEditor`](./pdf_markup.md) | `components/pdf_markup` | View or annotate PDF documents (pen, highlight, text). |
-| `PageKeyboardShortcuts` | `components/keyboard_shortcuts` | Register page-scoped keyboard shortcuts for actions on a page. |
-| `DownloadButton` | `components/download_button` | Download generated content. |
-| `Skeleton` | `components/skeleton` | Loading placeholder. |
-| [`CircularProgress`](./progress.md) | `components/circular_progress` | Circular loading/progress indicator. |
-| `CollapseControl` | `components/collapse_component` | Expand/collapse section control. |
+| `Stat` / `StatRow` | `components/stat_row` | Compact KPI metrics (see [Reporting](./reporting.md)). |
+| `InlineRecordDisplay` / `InlineFieldDisplay` | `components/inline_record_display`, `components/inline_field_display` | Inline record references / typed field values. |
+| [`BooleanIcon`, `FieldRow`, `BoolFieldRow`](./reusable_helpers.md#boolean-and-field-display) | `components/field_display` | Boolean icons and label/value rows for custom detail panels. |
+| [`StatusChip`](./reusable_helpers.md#statuschip) | `components/status_chip` | Chip label/variant/color chosen by SQL conditions. |
+| [`XmlPayloadModal`](./reusable_helpers.md#xmlpayloadmodal) | `components/xml_payload_viewer` | Inspect an XML payload from a SQL expression. |
+| `MarkdownDisplay` | `components/markdown_display` | Render a markdown SQL string. |
+| `NotesCard` | `components/notes_card` | Inline view/edit of a record's notes field. |
+| `SimpleLinkRelationCard` | `components/simple_link_relation_card` | Related records with links. |
+| `Report` / `ReportParameters` | `components/report` | One named report panel with optional parameters. |
+| [`SimplePivotTable`](./simple_pivot_table.md) | `components/simple_pivot_table` | Pivot / cross-tab from a query. |
+| `SingleColumnFixedRowsTable` | `components/single_column_fixed_rows_table` | Fixed labeled key/value rows. |
+| `StateStatusSwitch` | `components/state_status_switch` | Switch between loading/error/success UI for a pending flow. |
+| `TimeGreeting` / `CurrentUserName` / `CurrentUserFirstName` | `components/greeting` | Greeting and current user name. |
+| `DocumentComparison` | `components/document_comparison` | Lexical document comparison with previous/current labels. |
+| [`DocumentEditorWorkspace`](./document_editor_workspace.md) | `components/document_editor_workspace` | Document editor with live PDF preview and info tabs. |
+| `VirtualizedChatTimeline` / `defineVirtualizedChatTimelineState` | `components/virtualized_chat_timeline` | Large chat/event history with virtualized scrolling, search, minimap. |
+| `FileTypeIcon` / `fileTypeIconKindSql` | `components/file_type_icon` | File-kind icon from content type, filename, or drive item kind. |
+| [`AddToCalendarButton`](./add_to_calendar.md) | `components/add_to_calendar` | Add event to Google/Outlook or download `.ics`. |
+| `Confetti` / `TextReveal` | `components/confetti`, `components/text_reveal` | Success celebration / scroll-driven landing-page text reveal. |
+| `Params` | `components/params` | Display/debug route or query parameters. |
+
+## Queues, Capture, Images, And Loading
+
+| Component | Import | Use when |
+| --- | --- | --- |
+| [`WorkQueue`](./operational_ui.md#workqueue) | `components/work_queue` | Keyboard-driven queue with selected-row footer. |
+| [`QrScanner`](./mobile_capture_scanning.md) | `components/qr_scanner` | Camera QR scanning. |
+| [`ExpandableImage`, `EditableImageThumbnail`, `ImageDialog`, `ImageGallery`](./images.md) | `components/expandable_image`, `components/editable_image_thumbnail`, `components/image_dialog`, `components/image_gallery` | Image thumbnails, `image_set` upload/replace, galleries. |
+| [`PdfMarkupViewer` / `PdfMarkupEditor`](./pdf_markup.md) | `components/pdf_markup` | View or annotate PDFs. |
+| `Skeleton` | `components/skeleton` | Loading placeholder; see [loading states](./operational_ui.md#loading-and-progressive-disclosure). |
+| [`CircularProgress`](./progress.md) | `components/circular_progress` | Spinner (the default `Data` pending fallback). |
 
 ## Icons
 
-`SvgIcon` (`components/svg_icon`) is the base wrapper for rendering custom SVG
-icons with palette color and font-size sizing. The `components/icons/*` set is a
-collection of brand icons built on `SvgIcon`; import each from its own module
-(`components/icons/<name>`).
-
-| Component | Import |
-| --- | --- |
-| `ClaudeIcon` | `components/icons/claude` |
-| `DeepSeekIcon` | `components/icons/deepseek` |
-| `DiscordIcon` | `components/icons/discord` |
-| `EmailIcon` | `components/icons/email` |
-| `FacebookIcon` | `components/icons/facebook` |
-| `GeminiIcon` | `components/icons/gemini` |
-| `GithubIcon` | `components/icons/github` |
-| `GmailIcon` | `components/icons/gmail` |
-| `GoogleIcon` | `components/icons/google` |
-| `GoogleCalendarIcon` | `components/icons/google_calendar` |
-| `InstagramIcon` | `components/icons/instagram` |
-| `LinkedInIcon` | `components/icons/linkedin` |
-| `MetaIcon` | `components/icons/meta` |
-| `OpenAIIcon` | `components/icons/openai` |
-| `OutlookCalendarIcon` | `components/icons/outlook_calendar` |
-| `OutlookEmailIcon` | `components/icons/outlook_email` |
-| `PostmarkIcon` | `components/icons/postmark` |
-| `SidebarIcon` | `components/icons/sidebar` |
-| `TelegramIcon` | `components/icons/telegram` |
-| `TetherIcon` | `components/icons/tether` |
-| `XIcon` | `components/icons/x` |
-| `YolmIcon` | `components/icons/yolm` |
-| `YouTubeIcon` | `components/icons/youtube` |
-| `ZoomIcon` | `components/icons/zoom` |
+`SvgIcon` (`components/svg_icon`) renders custom SVG icons with palette color
+and font-size sizing. Brand icons built on it are imported one per module from
+`components/icons/<name>`: `ClaudeIcon` (`claude`), `DeepSeekIcon`,
+`DiscordIcon`, `EmailIcon`, `FacebookIcon`, `GeminiIcon`, `GithubIcon`,
+`GmailIcon`, `GoogleIcon`, `GoogleCalendarIcon` (`google_calendar`),
+`InstagramIcon`, `LinkedInIcon`, `MetaIcon`, `OpenAIIcon`,
+`OutlookCalendarIcon` (`outlook_calendar`), `OutlookEmailIcon`
+(`outlook_email`), `PostmarkIcon`, `SidebarIcon`, `TelegramIcon`, `TetherIcon`,
+`XIcon`, `YolmIcon`, `YouTubeIcon`, `ZoomIcon`. Module names are the
+lowercase brand name unless shown. Material icons: see [Icons](./icons.md).
 
 ## Enums And Field Groups
 
-These are generation-time helpers, not UI components, but solution code reaches
-for them alongside the components above.
+Generation-time helpers often used alongside these components:
 
 | Helper | Import | Use when |
 | --- | --- | --- |
-| `countryEnum()` (also `countries`, `countryMap`) | `enums/country` | Add a country enum to a table, or look up country metadata. |
-| `usStateEnum()` | `enums/us_state` | Add a US state enum to a table. |
-| `imageSetFieldGroup()` / `simpleImageSetFieldGroup()` | `field_groups/image_set` | Add a multi-variant image field group (with upload/variant URL helpers) to a table. |
-| `formatPhoneNumberStringValue()` | `components/phone_number_string` | Build an `Sql` expression that formats a phone-number string (handles extensions and country-aware formatting). |
-
-## Rule Of Thumb
-
-Use helpers when they fit directly. Otherwise use `Data`, `Form`, event
-handlers, `ModalDialog`, and base components.
-
-For queue screens, mobile scan/capture flows, and image evidence workflows, see
-[Operational UI Components](./operational_ui.md) and
-[Mobile Capture And Scanning](./mobile_capture_scanning.md).
+| `countryEnum()` (also `countries`, `countryMap`) | `enums/country` | Country enum on a table, or country metadata. |
+| `usStateEnum()` | `enums/us_state` | US state enum on a table. |
+| `imageSetFieldGroup()` / `simpleImageSetFieldGroup()` | `field_groups/image_set` | Multi-variant image field group with upload/variant URL helpers. |
+| `formatPhoneNumberStringValue()` | `components/phone_number_string` | `Sql` that formats a phone string (extensions, country-aware). |

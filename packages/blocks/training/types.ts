@@ -22,7 +22,8 @@ export interface TrainingPersonnelDocumentTypeOpts {
 
 export type TrainingFeatureName =
   | "inviteAccess"
-  | "compliance";
+  | "compliance"
+  | "courseIntroduction";
 
 export interface TrainingInviteAccessFeatureOpts {
   enabled?: boolean;
@@ -35,6 +36,8 @@ export interface TrainingComplianceFeatureOpts {
 export interface TrainingFeatureConfig {
   inviteAccess?: TrainingInviteAccessFeatureOpts;
   compliance?: TrainingComplianceFeatureOpts;
+  /** Optional course introduction editor and learner view. Defaults to disabled. */
+  courseIntroduction?: { enabled?: boolean };
 }
 
 export interface TrainingRouteOpts {
@@ -67,10 +70,10 @@ export interface TrainingBlockOpts {
    */
   accessDomain?: string;
   /**
-   * Optional feature switches for modules with separable backing tables.
-   * `enabled: false` removes the module's schema and related routes/jobs.
-   * Missing modules default to enabled, except compliance and invite access,
-   * which default to disabled unless configured.
+   * Optional features, all disabled unless explicitly enabled.
+   * Compliance and invite access control their backing schema and routes/jobs.
+   * Course introductions retain stored content when disabled, but hide their
+   * UI and disable editing and image access.
    */
   features?: TrainingFeatureConfig;
   labels?: {

@@ -10,7 +10,8 @@ tags:
 
 # Modal / ModalDialog
 
-The `ModalDialog` component renders a native `<dialog>` element with backdrop, animations, and close handling. It is the primary way to show modal content in Yolm.
+`ModalDialog` renders a native `<dialog>` with backdrop, open/close animation,
+and close handling. It is the primary way to show modal content.
 
 ```tsx
 import { ModalDialog } from "components/modal";
@@ -18,138 +19,109 @@ import { ModalDialog } from "components/modal";
 
 ## Basic Usage
 
-A `ModalDialog` requires an `open` expression and an `onClose` handler. The dialog renders when `open` is truthy and closes when the user clicks the backdrop or triggers `onClose`.
-
 ```tsx
-<Data procedure={(s) => {
-  s.defScalar("modal_open", sql.false);
-}}>
-
-<Button onClick={(s) => s.setScalar("modal_open", sql.true)}>
-  Open Modal
-</Button>
-
-<ModalDialog
-  open={sql`modal_open`}
-  onClose={(s) => s.setScalar("modal_open", sql.false)}
->
-  <Typography level="h4" className="mb-4">
-    Dialog Title
-  </Typography>
-  <Typography level="body-md">
-    Dialog content goes here.
-  </Typography>
-</ModalDialog>
+<Data procedure={(s) => s.defScalar("modal_open", sql.false)}>
+  <Button onClick={(s) => s.setScalar("modal_open", sql.true)}>Open</Button>
+  <ModalDialog bindScalar="modal_open">
+    <Typography level="h4" className="mb-4">Dialog Title</Typography>
+    <Typography level="body-md">Dialog content goes here.</Typography>
+  </ModalDialog>
+</Data>
 ```
 
-## Open / Close with UI Scalars
+The dialog content is wrapped in `Show`, so it is only rendered while open.
 
-The dialog's visibility is driven by a boolean UI scalar. Set it to `true` to open, `false` to close.
+## Open State
 
-### Manual open/onClose
+`ModalDialogProps` extends `DialogBinding` (`components/utils`). Pass exactly
+one of:
 
-```tsx
-<ModalDialog
-  open={sql`modal_open`}
-  onClose={(s) => s.setScalar("modal_open", sql.false)}
->
-  {/* content */}
-</ModalDialog>
-```
+- `bindScalar="modal_open"` - opens when the UI scalar is true; closing sets it
+  to `false`.
+- `bindRecordField="ui.settings.show_dialog"` - opens when the record field is
+  true; closing runs `update <record> set <field> = false`. The value must be
+  `record.field` or `ui.record.field`.
+- `open={sql`...`}` plus `onClose={(s) => ...}` - manual control, for cleanup
+  logic on close.
 
-### bindScalar shorthand
+Combining `bindScalar` with `bindRecordField`, or either with `onClose`, throws
+at generation time. Omitting all of them throws `open must be specified`.
 
-The `bindScalar` prop automatically binds `open` to the named scalar and generates an `onClose` that sets it to `false`. This is equivalent to the manual pattern above.
+## Close Behavior
 
-```tsx
-<ModalDialog bindScalar="modal_open">
-  {/* content */}
-</ModalDialog>
-```
+Backdrop click, the Escape key (native `cancel` event), and the dialog `close`
+event all call the same resolved `onClose`, so cleanup only needs to be defined
+once. Close programmatically by setting the bound scalar/field to `false` (or
+running your `onClose` logic) from a button.
 
-### bindRecordField
+## Layout And Sizing
 
-For dialogs whose open state lives on a record field:
+All three props are static generation-time values:
 
-```tsx
-<ModalDialog bindRecordField="ui.settings.show_dialog">
-  {/* content */}
-</ModalDialog>
-```
+- `layout`: `"fullscreenOnMobile"` (default; fullscreen below `md`, centered
+  above), `"center"` (always centered, good for small confirmations), or
+  `"fullscreen"` (whole viewport, for complex forms or detail views).
+- `size` (`xs` | `sm` | `md` | `lg`, default `md`) sets padding, radius, and font
+  size.
+- `maxWidth` (`xs` | `sm` | `md` | `lg` | `xl`) scales the centered max width to
+  0.5x / 0.75x / 1x / 1.25x / 1.5x of the current breakpoint width.
 
-You cannot combine `bindScalar`/`bindRecordField` with `onClose`.
+`variant` is accepted by the type but currently ignored. Inside a dialog,
+`Divider` bleeds to the dialog edges (`--divider-inset`). See `ModalDialogProps`
+in `components/modal` for the full contract.
 
-## Common Props
+## Form Dialog
 
-Use the exported TypeScript props for the full `ModalDialog` contract. Use one
-open state mode:
-
-- `bindScalar` for a boolean UI scalar.
-- `bindRecordField` for a boolean record field.
-- `open` plus `onClose` for custom handling.
-
-Use `layout`, `size`, and `maxWidth` for generation-time sizing.
-
-## Layout
-
-The `layout` prop controls how the dialog is positioned:
-
-- **`center`** - Always centered on screen with a max-width constraint. Good for small confirmation dialogs.
-- **`fullscreen`** - Takes up the entire viewport. Good for complex forms or detail views.
-- **`fullscreenOnMobile`** (default) - Fullscreen on small screens, centered on medium+ screens. The best default for most dialogs.
+Use `Form` for field editing inside a dialog. `Form` refetches enclosing `Data`
+on success by default (`refetchOnSuccess`), so `afterSubmitClientSuccess` only
+needs to close the dialog:
 
 ```tsx
-// Extra-small centered confirmation
-<ModalDialog open={sql`confirm_open`} onClose={onClose} layout="center" size="xs">
-  {/* ... */}
-</ModalDialog>
+import { Form } from "std/form";
 
-// Full-screen detail view
-<ModalDialog open={sql`detail_open`} onClose={onClose} layout="fullscreen">
-  {/* ... */}
-</ModalDialog>
-```
-
-## Structuring Dialog Content
-
-Since `ModalDialog` renders a plain container, structure your content using Typography, Divider, and layout elements:
-
-```tsx
-<ModalDialog bindScalar="modal_open">
-  <Typography level="h4" className="mb-4">
-    Edit Item
-  </Typography>
-
-  <div className="space-y-4">
-    {/* Form fields */}
-  </div>
-
-  <div className="flex gap-2 justify-end mt-4">
-    <Button
+<ModalDialog bindScalar="add_budget_open" layout="center" size="sm">
+  <div className="flex justify-between items-center mb-4">
+    <Typography level="h4">Add Budget</Typography>
+    <IconButton
       variant="plain"
       color="neutral"
-      onClick={(s) => s.setScalar("modal_open", sql.false)}
+      size="sm"
+      onClick={(s) => s.setScalar("add_budget_open", sql.false)}
     >
-      Cancel
-    </Button>
-    <Button
-      variant="solid"
-      color="primary"
-      onClick={(s) => {
-        // save logic
-      }}
-    >
-      Save
-    </Button>
+      <MaterialIcon icon="Close" />
+    </IconButton>
   </div>
+  <Form
+    afterSubmitClientSuccess={(s) => s.setScalar("add_budget_open", sql.false)}
+  >
+    <Form.Insert table="budgets">
+      <div className="space-y-4">
+        <Form.Field field="name" />
+        <Form.Field field="amount" />
+      </div>
+      <Form.ErrorAlert />
+      <div className="flex gap-2 justify-end mt-4">
+        <Button
+          variant="plain"
+          color="neutral"
+          onClick={(s) => s.setScalar("add_budget_open", sql.false)}
+        >
+          Cancel
+        </Button>
+        <Form.SubmitButton>Create</Form.SubmitButton>
+      </div>
+    </Form.Insert>
+  </Form>
 </ModalDialog>
 ```
 
-## Common Patterns
+For edits use `Form.Update` with a `where`; see [Form](./form.md).
 
-### Confirmation Dialog
+## Confirmation Dialog
 
-For simple yes/no confirmations, use the built-in `ConfirmDangerDialog` component:
+For destructive commands use `ConfirmDangerDialog`. With `action`, it runs an
+`ActionButton` that shows errors inline, refetches enclosing `Data`, and closes
+the dialog on success:
 
 ```tsx
 import { ConfirmDangerDialog } from "components/confirm_danger_dialog";
@@ -158,125 +130,13 @@ import { ConfirmDangerDialog } from "components/confirm_danger_dialog";
   bindScalar="confirm_delete"
   description={sql.lit`Are you sure you want to delete this item?`}
   confirmButtonText={sql.lit`Delete`}
-  onConfirm={(s, close) => {
-    s.setScalar("dialog_waiting", sql.true);
-    s.tryServer({
-      body: (s) => {
-        s.startTransaction();
-        s.modify(sql`delete from db.items where id = selected_id`);
-        s.commitTransaction();
-        s.increment("ui.refresh_key");
-      },
-      catch: (s) => s.setScalar("dialog_error", sql.lit`Failed to delete`),
-      finally: (s) => {
-        s.setScalar("dialog_waiting", sql.false);
-        s.statements(close);
-      },
-    });
+  action={(s) => {
+    s.startTransaction();
+    s.modify(sql`delete from db.items where id = ui.selected_id`);
+    s.commitTransaction();
   }}
 />
 ```
 
-### Form Dialog
-
-A modal containing a form with loading state and error handling:
-
-```tsx
-<ModalDialog
-  open={sql`modal_open`}
-  onClose={(s) => s.setScalar("modal_open", sql.false)}
->
-  <Typography level="h4" className="mb-4">
-    <Show when={sql`editing_id is null`} fallback="Edit Budget">
-      Add Budget
-    </Show>
-  </Typography>
-
-  <div className="space-y-4">
-    <FormControl>
-      <FormLabel>Name</FormLabel>
-      <Input
-        value={sql`form_name`}
-        onInput={(s) => s.setScalar("form_name", sql`target_value`)}
-      />
-    </FormControl>
-
-    <FormControl>
-      <FormLabel>Amount</FormLabel>
-      <Input
-        value={sql`form_amount`}
-        onInput={(s) => s.setScalar("form_amount", sql`target_value`)}
-      />
-    </FormControl>
-  </div>
-
-  <div className="flex gap-2 justify-end mt-4">
-    <Button
-      variant="plain"
-      color="neutral"
-      onClick={(s) => s.setScalar("modal_open", sql.false)}
-    >
-      Cancel
-    </Button>
-    <Button
-      variant="solid"
-      color="primary"
-      loading={sql`saving`}
-      onClick={(s) => {
-        s.setScalar("saving", sql.true);
-        s.commitUiTreeChanges();
-        s.tryServer({
-          body: (s) => {
-            s.startTransaction();
-            s.modify(
-              sql`insert into db.budgets (name, amount) values (ui.form_name, ui.form_amount)`,
-            );
-            s.commitTransaction();
-            s.increment("ui.refresh_key");
-          },
-          catch: (s) => s.setScalar("error", sql.lit`Failed to save`),
-          finally: (s) => {
-            s.setScalar("saving", sql.false);
-            s.setScalar("modal_open", sql.false);
-          },
-        });
-      }}
-    >
-      <Show when={sql`editing_id is null`} fallback="Update">
-        Create
-      </Show>
-    </Button>
-  </div>
-</ModalDialog>
-```
-
-### Close Button Inside Dialog
-
-Add an icon button in the top-right corner for an explicit close action:
-
-```tsx
-<ModalDialog bindScalar="modal_open">
-  <div className="flex justify-between items-center mb-4">
-    <Typography level="h4">Details</Typography>
-    <IconButton
-      variant="plain"
-      color="neutral"
-      size="sm"
-      onClick={(s) => s.setScalar("modal_open", sql.false)}
-    >
-      <MaterialIcon icon="Close" />
-    </IconButton>
-  </div>
-  {/* content */}
-</ModalDialog>
-```
-
-## Close Behavior
-
-The dialog closes in three ways:
-
-1. **Backdrop click** - Clicking outside the dialog triggers `onClose`.
-2. **Escape key** - The native `<dialog>` cancel event triggers `onClose`.
-3. **Programmatic** - Setting the bound scalar to `false` or calling `onClose` from a button.
-
-All three go through the same `onClose` handler, so cleanup logic only needs to be defined once.
+For a single button, `ActionButton`'s `confirm` prop is usually enough; see
+[ActionButton](./action_button.md).

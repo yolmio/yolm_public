@@ -5,16 +5,19 @@ import { MaterialIcon } from "components/material_icon";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
 import { sql } from "std/sql_utils";
+import { equipmentText } from "./i18n";
 import type { Sql } from "std/sql_utils";
 import { system } from "std/system";
 import type { Block } from "std/system";
 import { Each, Match, Show, Switch, useQueryParams } from "std/ui";
-import type { EventsBlock } from "blocks/events";
+import type { EventStore } from "blocks/events";
 import type { LocationsBlock } from "blocks/locations";
 
 export interface EquipmentBlockOptions {
-  events: EventsBlock;
+  events: EventStore;
   locations: LocationsBlock;
+  /** Keep only the equipment catalog and condition model for shop-floor deployments. */
+  shopFloor?: boolean;
 }
 
 /** Durable physical identities, independent from their current location. */
@@ -28,14 +31,14 @@ export class EquipmentBlock implements Block {
   constructor(readonly opts: EquipmentBlockOptions) {}
 
   initialize() {
-    for (
-      const aggregate of [
-        { name: "equipment_definition", displayName: "Equipment Definition" },
-        { name: "equipment", displayName: "Equipment" },
-      ]
-    ) {
-      this.opts.events.registerAggregateType(aggregate);
-    }
+    this.opts.events.registerAggregateType({
+      name: "equipment_definition",
+      displayName: "Equipment Definition",
+    });
+    this.opts.events.registerAggregateType({
+      name: "equipment",
+      displayName: "Equipment",
+    });
     for (
       const event of [
         { name: "equipment.created", displayName: "Equipment Created" },
@@ -73,72 +76,94 @@ export class EquipmentBlock implements Block {
         },
       ]
     ) {
+      if (
+        this.opts.shopFloor && event.name !== "equipment.created" &&
+        event.name !== "equipment.location_changed"
+      ) continue;
       this.opts.events.registerEventType(event);
     }
 
-    system.enum_({
-      name: "equipment_lifecycle",
-      values: [
-        { name: "planned", displayName: "Planned" },
-        { name: "commissioning", displayName: "Commissioning" },
-        { name: "in_service", displayName: "In Service" },
-        { name: "stored", displayName: "Stored" },
-        { name: "retired", displayName: "Retired" },
-      ],
-    });
-    system.enum_({
-      name: "equipment_operability",
-      values: [
-        { name: "unknown", displayName: "Unknown" },
-        { name: "operational", displayName: "Operational" },
-        { name: "degraded", displayName: "Degraded" },
-        { name: "unavailable", displayName: "Unavailable" },
-      ],
-    });
-    system.enum_({
-      name: "equipment_identifier_kind",
-      values: [
-        { name: "asset_tag", displayName: "Equipment Tag" },
-        { name: "serial_number", displayName: "Serial Number" },
-        { name: "qr", displayName: "QR Identifier" },
-        { name: "customer_tag", displayName: "Customer Tag" },
-        { name: "external", displayName: "External Identifier" },
-      ],
-    });
-    system.enum_({
-      name: "equipment_custody_type",
-      values: [
-        { name: "checkout", displayName: "Temporary Checkout" },
-        { name: "assignment", displayName: "Long-term Assignment" },
-        { name: "contractor_loan", displayName: "Contractor Loan" },
-        { name: "rental", displayName: "Rental" },
-      ],
-    });
-    system.enum_({
-      name: "equipment_restriction_kind",
-      values: [
-        { name: "safety", displayName: "Safety" },
-        { name: "calibration", displayName: "Calibration" },
-        { name: "lockout", displayName: "Lockout / Tagout" },
-        { name: "quality", displayName: "Quality" },
-        { name: "administrative", displayName: "Administrative" },
-      ],
-    });
+    if (!this.opts.shopFloor) {
+      system.enum_({
+        name: "equipment_lifecycle",
+        values: [
+          { name: "planned", displayName: "Planned" },
+          { name: "commissioning", displayName: "Commissioning" },
+          { name: "in_service", displayName: "In Service" },
+          { name: "stored", displayName: "Stored" },
+          { name: "retired", displayName: "Retired" },
+        ],
+      });
+    }
+    if (!this.opts.shopFloor) {
+      system.enum_({
+        name: "equipment_operability",
+        values: [
+          { name: "unknown", displayName: "Unknown" },
+          { name: "operational", displayName: "Operational" },
+          { name: "degraded", displayName: "Degraded" },
+          { name: "unavailable", displayName: "Unavailable" },
+        ],
+      });
+    }
+    if (!this.opts.shopFloor) {
+      system.enum_({
+        name: "equipment_identifier_kind",
+        values: [
+          { name: "asset_tag", displayName: "Equipment Tag" },
+          { name: "qr", displayName: "QR Identifier" },
+          { name: "customer_tag", displayName: "Customer Tag" },
+          { name: "external", displayName: "External Identifier" },
+        ],
+      });
+    }
+    if (!this.opts.shopFloor) {
+      system.enum_({
+        name: "equipment_custody_type",
+        values: [
+          { name: "checkout", displayName: "Temporary Checkout" },
+          { name: "assignment", displayName: "Long-term Assignment" },
+          { name: "contractor_loan", displayName: "Contractor Loan" },
+          { name: "rental", displayName: "Rental" },
+        ],
+      });
+    }
+    if (!this.opts.shopFloor) {
+      system.enum_({
+        name: "equipment_restriction_kind",
+        values: [
+          { name: "safety", displayName: "Safety" },
+          { name: "calibration", displayName: "Calibration" },
+          { name: "lockout", displayName: "Lockout / Tagout" },
+          { name: "quality", displayName: "Quality" },
+          { name: "administrative", displayName: "Administrative" },
+        ],
+      });
+    }
 
     system.db.table("equipment_definitions", (table) => {
       table.string("name", 240).notNull();
-      table.string("category", 120);
       table.string("manufacturer", 200);
       table.string("model_number", 160);
-      table.string("manufacturer_part_number", 160);
-      table.json("attributes").notNull().default(sql`json_build_object()`);
+      if (!this.opts.shopFloor) {
+        table.string("category", 120);
+        table.string("manufacturer_part_number", 160);
+        table.json("attributes").notNull().default(sql`json_build_object()`);
+      }
       table.bool("active").notNull().default(sql`true`);
-      table.timestampUtc("created_at").notNull().default(sql`now()`);
+      if (!this.opts.shopFloor) {
+        table.timestampUtc("created_at").notNull().default(sql`now()`);
+      }
       table.recordDisplayName(["name"], (name) => name);
       table.searchConfig({
         fieldGroups: [
           { fields: ["name", "model_number"], priority: 1 },
-          { fields: ["manufacturer", "manufacturer_part_number"], priority: 2 },
+          {
+            fields: this.opts.shopFloor
+              ? ["manufacturer"]
+              : ["manufacturer", "manufacturer_part_number"],
+            priority: 2,
+          },
         ],
       });
     });
@@ -147,102 +172,138 @@ export class EquipmentBlock implements Block {
       table.fk("equipment_definitions").notNull().onDelete("Restrict");
       table.fk("locations").onDelete("Restrict");
       table.string("display_name", 240).notNull();
-      table.enum("lifecycle", "equipment_lifecycle").notNull().default(
-        sql.lit`planned`,
+      if (this.opts.shopFloor) {
+        table.bool("active").notNull().default(sql`true`);
+      } else {
+        table.enum("lifecycle", "equipment_lifecycle").notNull().default(
+          sql.lit`planned`,
+        );
+      }
+      if (!this.opts.shopFloor) {
+        table.enum("operability", "equipment_operability").notNull().default(
+          sql.lit`unknown`,
+        );
+      }
+      table.tinyUint("criticality").notNull().default(
+        this.opts.shopFloor ? sql`2` : sql`0`,
       );
-      table.enum("operability", "equipment_operability").notNull().default(
-        sql.lit`unknown`,
-      );
-      table.tinyUint("criticality").notNull().default(sql`0`);
-      table.date("in_service_since");
-      table.date("warranty_until");
-      table.fk("current_custodian_user_id", "sys_users").onDelete("SetToNull");
-      table.enum("current_custody_type", "equipment_custody_type");
-      table.timestampUtc("custody_started_at");
-      table.timestampUtc("due_back_at");
-      table.string("external_system", 80);
-      table.string("external_ref", 160);
-      table.timestampUtc("created_at").notNull().default(sql`now()`);
+      if (!this.opts.shopFloor) {
+        // Manufacturer serial; unique within the unit's equipment definition.
+        table.string("serial_number", 240);
+        table.date("in_service_since");
+        table.date("warranty_until");
+        table.fk("current_custodian_user_id", "sys_users").onDelete(
+          "SetToNull",
+        );
+        table.enum("current_custody_type", "equipment_custody_type");
+        table.timestampUtc("custody_started_at");
+        table.timestampUtc("due_back_at");
+        table.string("external_system", 80);
+        table.string("external_ref", 160);
+        table.timestampUtc("created_at").notNull().default(sql`now()`);
+      }
       table.check({
         fields: ["criticality"],
-        check: ([criticality]) => sql`${criticality} <= 100`,
-        errorMessage: () => sql.lit`Criticality must be between 0 and 100.`,
-      });
-      table.check({
-        fields: [
-          "current_custodian_user_id",
-          "current_custody_type",
-          "custody_started_at",
-          "due_back_at",
-        ],
-        check: ([custodian, custodyType, startedAt, dueBackAt]) =>
-          sql`(${custodian} is null and ${custodyType} is null and ${startedAt} is null and ${dueBackAt} is null)
-            or (${custodian} is not null and ${custodyType} is not null and ${startedAt} is not null)`,
+        check: ([criticality]) =>
+          this.opts.shopFloor
+            ? sql`${criticality} between 1 and 3`
+            : sql`${criticality} <= 100`,
         errorMessage: () =>
-          sql.lit`Equipment custody projection is incomplete.`,
+          this.opts.shopFloor
+            ? sql.lit`Choose an equipment criticality level.`
+            : sql.lit`Criticality must be between 0 and 100.`,
       });
+      if (!this.opts.shopFloor) {
+        table.check({
+          fields: [
+            "current_custodian_user_id",
+            "current_custody_type",
+            "custody_started_at",
+            "due_back_at",
+          ],
+          check: ([custodian, custodyType, startedAt, dueBackAt]) =>
+            sql`(${custodian} is null and ${custodyType} is null and ${startedAt} is null and ${dueBackAt} is null)
+            or (${custodian} is not null and ${custodyType} is not null and ${startedAt} is not null)`,
+          errorMessage: () =>
+            sql.lit`Equipment custody projection is incomplete.`,
+        });
+      }
+      if (!this.opts.shopFloor) {
+        table.unique({
+          fields: ["equipment_definition_id", "serial_number"],
+          distinctNulls: true,
+        });
+      }
       table.recordDisplayName(["display_name"], (name) => name);
       table.searchConfig({
         fieldGroups: [
           { fields: ["display_name"], priority: 1 },
-          { fields: ["external_ref"], priority: 2 },
+          ...(this.opts.shopFloor
+            ? []
+            : [{ fields: ["external_ref"], priority: 2 as const }]),
         ],
       });
     });
 
-    system.db.table("equipment_identifiers", (table) => {
-      table.fk("equipment").notNull().onDelete("Cascade");
-      table.enum("kind", "equipment_identifier_kind").notNull();
-      table.string("value", 240).notNull();
-      table.bool("primary").notNull().default(sql`false`);
-      table.timestampUtc("valid_from").notNull().default(sql`now()`);
-      table.timestampUtc("valid_to");
-      table.unique(["kind", "value"]);
-      table.check({
-        fields: ["valid_from", "valid_to"],
-        check: ([validFrom, validTo]) =>
-          sql`${validTo} is null or ${validTo} >= ${validFrom}`,
-        errorMessage: () => sql.lit`Identifier validity range is invalid.`,
+    if (!this.opts.shopFloor) {
+      system.db.table("equipment_identifiers", (table) => {
+        table.fk("equipment").notNull().onDelete("Cascade");
+        table.enum("kind", "equipment_identifier_kind").notNull();
+        table.string("value", 240).notNull();
+        table.bool("primary").notNull().default(sql`false`);
+        table.timestampUtc("valid_from").notNull().default(sql`now()`);
+        table.timestampUtc("valid_to");
+        table.unique(["kind", "value"]);
+        table.check({
+          fields: ["valid_from", "valid_to"],
+          check: ([validFrom, validTo]) =>
+            sql`${validTo} is null or ${validTo} >= ${validFrom}`,
+          errorMessage: () => sql.lit`Identifier validity range is invalid.`,
+        });
       });
-    });
+    }
 
-    system.db.table("equipment_components", (table) => {
-      table.fk("parent_equipment_id", "equipment").notNull().onDelete(
-        "Restrict",
-      );
-      table.fk("child_equipment_id", "equipment").notNull().unique().onDelete(
-        "Restrict",
-      );
-      table.string("component_position", 160);
-      table.timestampUtc("installed_at").notNull();
-      table.check({
-        fields: ["parent_equipment_id", "child_equipment_id"],
-        check: ([parentId, childId]) => sql`${parentId} != ${childId}`,
-        errorMessage: () => sql.lit`Equipment cannot contain itself.`,
+    if (!this.opts.shopFloor) {
+      system.db.table("equipment_components", (table) => {
+        table.fk("parent_equipment_id", "equipment").notNull().onDelete(
+          "Restrict",
+        );
+        table.fk("child_equipment_id", "equipment").notNull().unique().onDelete(
+          "Restrict",
+        );
+        table.string("component_position", 160);
+        table.timestampUtc("installed_at").notNull();
+        table.check({
+          fields: ["parent_equipment_id", "child_equipment_id"],
+          check: ([parentId, childId]) => sql`${parentId} != ${childId}`,
+          errorMessage: () => sql.lit`Equipment cannot contain itself.`,
+        });
       });
-    });
+    }
 
-    system.db.table("equipment_restrictions", (table) => {
-      table.fk("equipment").notNull().onDelete("Cascade");
-      table.enum("kind", "equipment_restriction_kind").notNull();
-      table.string("reason", 1000).notNull().multiline();
-      table.timestampUtc("effective_at").notNull();
-      table.timestampUtc("cleared_at");
-      table.fk("created_by_user_id", "sys_users").onDelete("SetToNull");
-      table.fk("cleared_by_user_id", "sys_users").onDelete("SetToNull");
-      table.check({
-        fields: ["effective_at", "cleared_at"],
-        check: ([effectiveAt, clearedAt]) =>
-          sql`${clearedAt} is null or ${clearedAt} >= ${effectiveAt}`,
-        errorMessage: () => sql.lit`Restriction dates are invalid.`,
+    if (!this.opts.shopFloor) {
+      system.db.table("equipment_restrictions", (table) => {
+        table.fk("equipment").notNull().onDelete("Cascade");
+        table.enum("kind", "equipment_restriction_kind").notNull();
+        table.string("reason", 1000).notNull().multiline();
+        table.timestampUtc("effective_at").notNull();
+        table.timestampUtc("cleared_at");
+        table.fk("created_by_user_id", "sys_users").onDelete("SetToNull");
+        table.fk("cleared_by_user_id", "sys_users").onDelete("SetToNull");
+        table.check({
+          fields: ["effective_at", "cleared_at"],
+          check: ([effectiveAt, clearedAt]) =>
+            sql`${clearedAt} is null or ${clearedAt} >= ${effectiveAt}`,
+          errorMessage: () => sql.lit`Restriction dates are invalid.`,
+        });
       });
-    });
+    }
   }
 
   populate() {
     this.registerMoveProcedure();
-    this.registerOperabilityProcedure();
-    this.registerCustodyProcedures();
+    if (!this.opts.shopFloor) this.registerOperabilityProcedure();
+    if (!this.opts.shopFloor) this.registerCustodyProcedures();
   }
 
   private registerMoveProcedure() {
@@ -270,7 +331,9 @@ export class EquipmentBlock implements Block {
           sql.lit`Destination location was not found or is inactive.`,
         );
         s.if(
-          sql`not exists(select 1 from db.events where idempotency_key = p_idempotency_key)`,
+          this.opts.events.supportsIdempotency
+            ? this.opts.events.idempotencyKeyAvailable(sql`p_idempotency_key`)
+            : sql`true`,
           (s) => {
             s.modify(
               sql`update db.equipment set location_id = p_location_id where id = p_equipment_id`,
@@ -328,7 +391,9 @@ export class EquipmentBlock implements Block {
           sql.lit`Equipment was not found.`,
         );
         s.if(
-          sql`not exists(select 1 from db.events where idempotency_key = p_idempotency_key)`,
+          this.opts.events.supportsIdempotency
+            ? this.opts.events.idempotencyKeyAvailable(sql`p_idempotency_key`)
+            : sql`true`,
           (s) => {
             s.modify(
               sql`update db.equipment set operability = p_operability where id = p_equipment_id`,
@@ -341,7 +406,7 @@ export class EquipmentBlock implements Block {
               actorUserId: sql`p_actor_user_id`,
               idempotencyKey: sql`p_idempotency_key`,
               summary:
-                sql`operability_equipment.display_name || ' changed from ' || cast(operability_equipment.operability as string) || ' to ' || cast(p_operability as string)`,
+                sql`operability_equipment.display_name || ' changed from ' || case operability_equipment.operability when 'operational' then 'Running' when 'degraded' then 'Running with a problem' when 'unavailable' then 'Stopped' else 'Not assessed' end || ' to ' || case p_operability when 'operational' then 'Running' when 'degraded' then 'Running with a problem' when 'unavailable' then 'Stopped' else 'Not assessed' end`,
               payload:
                 sql`json_build_object('from', cast(operability_equipment.operability as string), 'to', cast(p_operability as string), 'reason', p_reason)`,
               intoEventId: "operability_event_id",
@@ -382,7 +447,9 @@ export class EquipmentBlock implements Block {
           sql.lit`This equipment is already checked out to someone else.`,
         );
         s.if(
-          sql`not exists(select 1 from db.events where idempotency_key = p_idempotency_key)`,
+          this.opts.events.supportsIdempotency
+            ? this.opts.events.idempotencyKeyAvailable(sql`p_idempotency_key`)
+            : sql`true`,
           (s) => {
             s.modify(sql`
               update db.equipment
@@ -449,7 +516,9 @@ export class EquipmentBlock implements Block {
           sql.lit`This equipment is not checked out.`,
         );
         s.if(
-          sql`not exists(select 1 from db.events where idempotency_key = p_idempotency_key)`,
+          this.opts.events.supportsIdempotency
+            ? this.opts.events.idempotencyKeyAvailable(sql`p_idempotency_key`)
+            : sql`true`,
           (s) => {
             s.modify(sql`
               update db.equipment
@@ -491,11 +560,15 @@ export class EquipmentBlock implements Block {
 export function equipmentStatusLabel(operability: Sql, lifecycle: Sql) {
   return sql`
     case
-      when ${lifecycle} != 'in_service' then initcap(replace(cast(${lifecycle} as string), '_', ' '))
-      when ${operability} = 'operational' then 'Operational'
-      when ${operability} = 'degraded' then 'Needs attention'
-      when ${operability} = 'unavailable' then 'Unavailable'
-      else 'Unknown'
+      when ${lifecycle} = 'planned' then ${equipmentText("planned")}
+      when ${lifecycle} = 'commissioning' then ${equipmentText("commissioning")}
+      when ${lifecycle} = 'stored' then ${equipmentText("stored")}
+      when ${lifecycle} = 'retired' then ${equipmentText("retired")}
+      when ${lifecycle} != 'in_service' then ${equipmentText("unknown")}
+      when ${operability} = 'operational' then ${equipmentText("operational")}
+      when ${operability} = 'degraded' then ${equipmentText("needsAttention")}
+      when ${operability} = 'unavailable' then ${equipmentText("unavailable")}
+      else ${equipmentText("unknown")}
     end
   `;
 }
@@ -509,7 +582,9 @@ export function EquipmentStatusChip(props: {
   return (
     <Switch>
       <Match when={sql`${restricted} or ${props.operability} = 'unavailable'`}>
-        <Chip size="sm" variant="soft" color="danger">Unavailable</Chip>
+        <Chip size="sm" variant="soft" color="danger">
+          {equipmentText("unavailable")}
+        </Chip>
       </Match>
       <Match when={sql`${props.lifecycle} != 'in_service'`}>
         <Chip size="sm" variant="soft" color="neutral">
@@ -517,13 +592,19 @@ export function EquipmentStatusChip(props: {
         </Chip>
       </Match>
       <Match when={sql`${props.operability} = 'degraded'`}>
-        <Chip size="sm" variant="soft" color="warning">Needs attention</Chip>
+        <Chip size="sm" variant="soft" color="warning">
+          {equipmentText("needsAttention")}
+        </Chip>
       </Match>
       <Match when={sql`${props.operability} = 'operational'`}>
-        <Chip size="sm" variant="soft" color="success">Operational</Chip>
+        <Chip size="sm" variant="soft" color="success">
+          {equipmentText("operational")}
+        </Chip>
       </Match>
       <Match when={sql`true`}>
-        <Chip size="sm" variant="soft" color="neutral">Unknown</Chip>
+        <Chip size="sm" variant="soft" color="neutral">
+          {equipmentText("unknown")}
+        </Chip>
       </Match>
     </Switch>
   );
@@ -600,6 +681,7 @@ export function EquipmentListPage() {
 }
 
 export function EquipmentDetailPage() {
+  const equipment = system.block(EquipmentBlock);
   useQueryParams([{ name: "equipment_id", type: { type: "BigInt" } }]);
   return (
     <Data
@@ -617,9 +699,6 @@ export function EquipmentDetailPage() {
               coalesce((select value from db.equipment_identifiers i
                 where i.equipment_id = e.id and i.kind = 'asset_tag' and i.valid_to is null
                 order by i.primary desc, i.id limit 1), '') as asset_tag,
-              coalesce((select value from db.equipment_identifiers i
-                where i.equipment_id = e.id and i.kind = 'serial_number' and i.valid_to is null
-                order by i.primary desc, i.id limit 1), '') as serial_number,
               exists(select 1 from db.equipment_restrictions r
                 where r.equipment_id = e.id and r.cleared_at is null) as has_restriction
             from db.equipment e
@@ -630,15 +709,7 @@ export function EquipmentDetailPage() {
         );
         s.defTable(
           "equipment_activity",
-          sql`
-            select ev.id, ev.event_type, ev.summary, ev.effective_at, ev.recorded_at
-            from db.events ev
-            join db.event_bindings binding on binding.event_id = ev.id
-            where binding.record_type = 'equipment'
-              and binding.record_id = equipment_id
-            order by ev.effective_at desc, ev.id desc
-            limit 25
-          `,
+          equipment.opts.events.activityQuery("equipment", sql`equipment_id`),
         );
       }}
     >

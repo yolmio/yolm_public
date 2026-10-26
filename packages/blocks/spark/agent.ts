@@ -1,16 +1,28 @@
 import { sparkDriveTransferTools } from "./transfers";
+import { sparkHelpTools, sparkShowHelpMediaTool } from "./help";
 import {
   downloadFileJs,
   generatedFileDownloadTool,
 } from "blocks/mcp/transfers";
 import { refreshSparkExecAccess, registerSparkExecutor } from "./exec";
 import { sparkActionUndoResult } from "./action_undo";
-import { executeSparkReversibleAction } from "./action_execution";
+import {
+  registerSparkActionDispatch,
+  sparkActionNameCondition,
+} from "./action_dispatch";
+import {
+  callSparkActionProcedure,
+  executeSparkReversibleAction,
+  registerSparkActionProcedures,
+  sparkActionProcedureName,
+  sparkActionUsesProcedure,
+} from "./action_execution";
 import { externalSparkArtifactTools } from "./mcp_artifacts";
 import { externalSparkMessageTools } from "./mcp_messages";
 
-import type { SparkFunctionContext } from "./function_context";
+import type { SparkFunction } from "./function_context";
 import {
+  capabilityFieldGrants,
   defQueryWhitelists,
   effectiveCapabilitiesJsonExpr,
 } from "./query_policy";
@@ -19,8 +31,9 @@ import type {
   GeneralServerStatements,
 } from "std/statements";
 import { sql } from "../../std/sql_utils";
-import type { Sql } from "../../std/sql_utils";
-import { system } from "std/system";
+import type { AnyExpr, Sql } from "../../std/sql_utils";
+import { system, type VirtualField } from "std/system";
+import { analyzeScalarTypeToSqlCast } from "std/ictx";
 import {
   canReadSparkKnowledgeForNullableOwner,
   type SparkDriveKnowledge,
@@ -77,17 +90,7 @@ export interface CapabilityAction {
   preflight?: (s: GeneralServerStatements) => void;
   procedure?: (s: GeneralServerStatements) => void;
   undo?: (s: GeneralServerStatements) => void;
-}
-
-interface CapabilityFunction {
-  name: string;
-  description: string;
-  inputType?: string;
-  timeoutMs?: number;
-  procedure: (
-    s: GeneralServerStatements,
-    context: SparkFunctionContext,
-  ) => void;
+  validateUndo?: (s: GeneralServerStatements, result: Sql) => void;
 }
 
 interface CapabilityOpts {
@@ -99,8 +102,9 @@ interface CapabilityOpts {
   views?: string[];
   tables?: string[];
   fieldWhitelist?: { table: string; fields: string[] }[];
+  fieldBlacklist?: { table: string; fields: string[] }[];
   actions?: CapabilityAction[];
-  functions?: CapabilityFunction[];
+  functions?: SparkFunction[];
   fileSources?: {
     name: string;
     table: string;
@@ -141,6 +145,8 @@ export interface RegisterReactorsOpts {
   knowledge?: SparkDriveKnowledge;
   /** Expose the native `render_ui` tool. */
   enableDynamicUi?: boolean;
+  /** Display-name resolver for a `sys_users` id (`SparkBlockOpts.userDisplayName`). */
+  userDisplayName?: (userIdExpr: Sql) => Sql;
   /**
    * Bundled JS modules (by id, e.g. `listbox_nav`) that rendered cards
    * may import + `jsCall` into — passed to the dynamic-UI preflight as the
@@ -164,6 +170,35 @@ export interface RegisterReactorsOpts {
 const DEFAULT_SPARK_ROOT =
   "You are Spark, an intelligent analysis and action assistant working inside a business system.";
 
+/** A user's display name, falling back to `User <id>`. */
+export function sparkUserLabelExpr(
+  userDisplayName: ((userIdExpr: Sql) => Sql) | undefined,
+  userIdExpr: Sql,
+): Sql {
+  const custom = userDisplayName?.(userIdExpr);
+  return custom
+    ? sql`coalesce(${custom}, 'User ' || ${userIdExpr}::string)`
+    : sql`'User ' || ${userIdExpr}::string`;
+}
+
+/** The user's display name plus their direct and source-granted auth roles. */
+export function sparkCurrentUserExpr(
+  opts: RegisterReactorsOpts,
+  userIdExpr: Sql,
+): Sql {
+  return sql`${sparkUserLabelExpr(opts.userDisplayName, userIdExpr)}
+    || coalesce((
+      select '; roles: ' || string_agg(role.name, ', ' order by role.name)
+      from db.auth_roles role
+      where exists(select 1 from db.auth_user_roles user_role
+          where user_role.auth_role_id = role.id
+            and user_role.sys_user_id = ${userIdExpr})
+        or exists(select 1 from db.auth_user_role_sources role_source
+          where role_source.auth_role_id = role.id
+            and role_source.sys_user_id = ${userIdExpr})
+    ), '')`;
+}
+
 export function buildNativeSystemPrompt(
   opts: RegisterReactorsOpts,
   external = false,
@@ -181,7 +216,17 @@ export function buildNativeSystemPrompt(
 
 Work directly with the user. Share brief commentary and a concise final.
 
+You can read this system's data, help, and capability documents, but not the
+source code of its applications. When a user reports that the application
+behaves incorrectly, collect the screen, record identifiers, and expected
+result, and tell them the system's developers need to investigate. Do not
+speculate about how the application is implemented.
+
 Tools:
+- Use \`tools.searchHelp({query,limit?})\` and \`tools.readHelpDocument({documentId})\`
+  for this system's product guides, calculation explanations, and workflows.
+  Documents contain ordered sections and media; read System/Help before
+  answering how-to questions from them.
 - \`exec\` runs JavaScript in a fresh V8 isolate without filesystem or network
   access. Application APIs are under
   \`tools.*\`; \`tools.query(sql)\` returns \`{ data: CSV }\`. Emit only compact
@@ -234,31 +279,83 @@ When the user asks to undo the latest reversible changes, call
 ${references}`;
 }
 
-function buildSchemaReference(
+function sqlText(value: AnyExpr | string): string {
+  return (typeof value === "object" ? value.toSQL() : String(value)).trim();
+}
+
+function virtualTypeName(type: NonNullable<VirtualField["type"]>): string {
+  if (type.type === "Decimal") {
+    return `decimal(${type.precision}, ${type.scale})`;
+  }
+  if (type.type === "Enum") return `enums.${type.enum}`;
+  if (type.type === "PhoneNumber") return "string";
+  return analyzeScalarTypeToSqlCast({ type: type.type });
+}
+
+// The capability document lists every readable column; a resource read adds
+// detail the agent requests only when a query depends on it.
+export function buildSchemaReference(
   skill: CapabilityOpts,
   resource?: string,
 ): string {
+  const detail = resource !== undefined;
   const sections: string[] = [];
   const enums = new Set<string>();
   const restricted = new Map<string, string[]>();
-  for (const entry of skill.fieldWhitelist ?? []) {
+  for (const entry of capabilityFieldGrants(skill)) {
     restricted.set(entry.table, [
       ...(restricted.get(entry.table) ?? []),
       ...entry.fields,
     ]);
   }
+  const readable = new Map<string, Set<string>>();
   for (const name of new Set([...(skill.tables ?? []), ...restricted.keys()])) {
-    if (resource && name !== resource) continue;
     const table = system.db.tables[name];
     if (!table) continue;
-    const fields = restricted.get(name) ?? [
-      table.primaryKeyFieldName,
-      ...Object.keys(table.fields),
-    ];
+    readable.set(
+      name,
+      new Set(
+        restricted.get(name) ?? [
+          table.primaryKeyFieldName,
+          ...Object.keys(table.fields),
+        ],
+      ),
+    );
+  }
+  // The query policy rejects a virtual field that reads, directly or through
+  // another virtual field, a relation not granted as a whole table. Any
+  // identifier naming a relation counts as a read, so matching errs toward
+  // hiding a field.
+  const queryable = new Map<VirtualField, boolean>();
+  const isQueryable = (table: string, virtual: VirtualField): boolean => {
+    const known = queryable.get(virtual);
+    if (known !== undefined) return known;
+    // Unresolved while its references are checked, which ends cycles.
+    queryable.set(virtual, false);
+    const identifiers = new Set<string>(
+      virtual.expr.toSQL().match(/[A-Za-z_]\w*/g) ?? [],
+    );
+    const relations = [...identifiers].filter((id) =>
+      system.db.tables[id] || system.db.views[id]
+    );
+    const result =
+      relations.every((r) => readable.has(r) && !restricted.has(r)) &&
+      [table, ...relations].every((r) =>
+        Object.values(system.db.tables[r]?.virtuals ?? {}).every((other) =>
+          other === virtual || !identifiers.has(other.name) ||
+          isQueryable(r, other)
+        )
+      );
+    queryable.set(virtual, result);
+    return result;
+  };
+  for (const [name, fields] of readable) {
+    if (resource && name !== resource) continue;
+    const table = system.db.tables[name];
     const lines = [
       `${name}${table.description ? ` — ${table.description}` : ""}`,
     ];
-    for (const name of new Set(fields)) {
+    for (const name of fields) {
       if (name === table.primaryKeyFieldName) {
         lines.push(`${name}: bigint PK`);
         continue;
@@ -279,20 +376,96 @@ function buildSchemaReference(
         `${name}: ${type}${field.description ? ` — ${field.description}` : ""}`,
       );
     }
+    const listed = new Set<string>();
+    // Column restrictions never expose virtual columns.
+    if (!restricted.has(name)) {
+      for (const virtual of Object.values(table.virtuals)) {
+        if (!isQueryable(name, virtual)) continue;
+        listed.add(virtual.name);
+        if (virtual.type?.type === "Enum") enums.add(virtual.type.enum);
+        const type = virtual.type ? ` ${virtualTypeName(virtual.type)}` : "";
+        lines.push(
+          `${virtual.name}:${type} virtual${
+            detail ? ` = ${sqlText(virtual.expr)}` : ""
+          }${virtual.description ? ` — ${virtual.description}` : ""}`,
+        );
+      }
+    }
+    if (detail) {
+      const visible = (names: string[]) => names.every((f) => fields.has(f));
+      for (const unique of table.uniqueConstraints) {
+        const names = unique.fields.map((f) =>
+          typeof f === "string" ? f : f.field
+        );
+        // A partial unique's filter may name columns a restriction hides.
+        if (!visible(names) || (unique.where && restricted.has(name))) {
+          continue;
+        }
+        lines.push(
+          `unique (${names.join(", ")})${
+            unique.where ? ` where ${sqlText(unique.where)}` : ""
+          }`,
+        );
+      }
+      for (const check of table.checks) {
+        if (!visible(check.fields)) continue;
+        lines.push(
+          `check ${sqlText(check.check(check.fields.map((f) => sql.ref(f))))}`,
+        );
+      }
+      for (const name of fields) {
+        for (const check of table.fields[name]?.checks ?? []) {
+          lines.push(`check ${sqlText(check.check(sql.ref(name)))}`);
+        }
+      }
+      const displayName = table.recordDisplayName;
+      if (
+        displayName &&
+        displayName.fields.every((f) => fields.has(f) || listed.has(f))
+      ) {
+        lines.push(
+          `display name = ${
+            sqlText(
+              displayName.expr(...displayName.fields.map((f) => sql.ref(f))),
+            )
+          }`,
+        );
+      }
+    }
     sections.push(lines.join("\n"));
   }
   for (const name of enums) {
     const definition = system.enums[name];
     // Built-in enums (for example sys_timezone) have no authored registry entry.
     if (!definition) continue;
+    const values = [...definition.valuesMap.values()];
+    const labeled = (value: (typeof values)[number]) =>
+      value.displayName !== system.displayNameConfig.enumValue(value.name);
+    if (
+      detail &&
+      (definition.description ||
+        values.some((value) => value.description || labeled(value)))
+    ) {
+      sections.push(
+        [
+          `enums.${name}${
+            definition.description ? ` — ${definition.description}` : ""
+          }`,
+          ...values.map((value) =>
+            `- ${value.name}${labeled(value) ? ` (${value.displayName})` : ""}${
+              value.description ? ` — ${value.description}` : ""
+            }`
+          ),
+        ].join("\n"),
+      );
+      continue;
+    }
     sections.push(
-      `enums.${name} = ${
-        Object.values(definition.values).map((value) => value.name).join(" | ")
-      }`,
+      `enums.${name} = ${values.map((value) => value.name).join(" | ")}`,
     );
   }
   let text = sections.length
-    ? `\n## Readable schema\n\nOnly listed columns are exposed here. ? = nullable; PK = primary key.\n\n${
+    ? `\n## Readable schema\n\nOnly listed columns are exposed here. ? = nullable; PK = primary key; virtual = computed on read, queryable like a column.\n\n${
       sections.join("\n\n")
     }\n`
     : "";
@@ -351,7 +524,7 @@ function buildCapabilityDocText(skill: CapabilityOpts): string {
     `\nUse the readable schema above for exact column names, keys, and units. ` +
     `\`tools.query(sql)\` or \`tools.query({ sql, maxRows?, file? })\` returns CSV in \`data\`; SQL placeholder bindings are not supported.\n`;
   text +=
-    `\nRe-read one resource schema with \`tools.readCapability({ name: "${skill.name}", section: "schema", resource: "<table or view>" })\`. ` +
+    `\nRe-read one table or view schema with \`tools.readCapability({ name: "${skill.name}", section: "schema", resource: "<table or view>" })\`; a table read adds virtual field SQL, constraints, display name, and enum value meanings. ` +
     `Read \`System/SQL\` for shared query syntax.\n`;
   text += `\n${skill.doc}\n`;
   return text;
@@ -461,7 +634,10 @@ function sparkWorkspaceIdExpr(workspace: SparkWorkspace) {
   )`;
 }
 
-export function sparkRootInstructionsExpr(workspace: SparkWorkspace) {
+export function sparkRootInstructionsExpr(
+  workspace: SparkWorkspace,
+  fallback: Sql = sql.lit(DEFAULT_SPARK_ROOT),
+) {
   const spaceId = sparkWorkspaceIdExpr(workspace);
   return sql`coalesce((
     select markdown.content
@@ -475,18 +651,24 @@ export function sparkRootInstructionsExpr(workspace: SparkWorkspace) {
       and item.name = 'AGENTS.md'
     order by item.id
     limit 1
-  ), ${sql.lit(DEFAULT_SPARK_ROOT)})`;
+  ), ${fallback})`;
 }
 
-export function sparkSkillIndexExpr(workspace: SparkWorkspace) {
+const NATIVE_SKILL_INDEX_PREAMBLE =
+  "Select skills only when their descriptions match the requested work." +
+  " A simple read-only lookup may need no skill." +
+  " Before acting, read each selected SKILL.md through tools.readFile" +
+  " and follow it. Skills are guidance; available capabilities are authoritative.";
+
+export function sparkSkillIndexExpr(
+  workspace: SparkWorkspace,
+  preamble = NATIVE_SKILL_INDEX_PREAMBLE,
+) {
   const spaceId = sparkWorkspaceIdExpr(workspace);
   return sql`(
     select case when count(*) = 0 then '' else
       chr(10) || chr(10) || '# Skills' || chr(10)
-      || 'Select skills only when their descriptions match the requested work.'
-      || ' A simple read-only lookup may need no skill.'
-      || ' Before acting, read each selected SKILL.md through tools.readFile'
-      || ' and follow it. Skills are guidance; available capabilities are authoritative.'
+      || ${sql.lit(preamble)}
       || chr(10)
       || string_agg(
         '- ' || skill.skill_name || ': ' || skill.skill_description
@@ -577,8 +759,7 @@ function defSparkSystemPrompt(
   // NOTE: an earlier version rendered a live "## Table columns" block here from
   // information_schema. It cannot work: inside a JIT-compiled procedure the
   // catalog scan returns rows only when it is the literal FIRST statement of
-  // the execution, which the prompt-assembly path can never be. See
-  // internal_docs/bugs/information_schema_scan_quirks_in_procedure.md. The
+  // the execution, which the prompt-assembly path can never be. The
   // agent instead reads exact columns via its own query() tool (each query is
   // its own procedure, so the scan is first there) guided by the skill doc.
   s.defScalar(
@@ -593,6 +774,9 @@ function defSparkSystemPrompt(
         || 'Today is ' || substr(cast(now() as string), 1, 10)
         || '. Treat this as "now" for recent, this-year, this-month, and '
         || 'lately reasoning.'
+      || chr(10) || chr(10) || '## Current user' || chr(10)
+        || 'You are talking with '
+        || ${sparkCurrentUserExpr(opts, sql`spark_conv_owner_id`)} || '.'
       || coalesce(
         (select chr(10) || chr(10) || '## Task context' || chr(10)
             || 'This run is bound to: ' || cast(c.context_json as string)
@@ -918,6 +1102,12 @@ function buildSparkAgentMessages(
   `);
 }
 
+/**
+ * Executions still running from before this time were interrupted (for
+ * example by a server restart) and will not finish.
+ */
+export const sparkInterruptedExecutionStart = sql`date.add(hour, -1, now())`;
+
 // ============================================================================
 // JS Context
 // ============================================================================
@@ -980,6 +1170,9 @@ export function sparkExecScriptExpr(
       ]
       : []),
     "readCapability",
+    "searchHelp",
+    "readHelpDocument",
+    "showHelpMedia",
     "query",
     "listFiles",
     "readFile",
@@ -1309,25 +1502,14 @@ function preflightSparkUi(
   // a user-facing error message here.
 }
 
-export function createSparkTools(
-  opts: RegisterReactorsOpts,
-  sharedExecutor = false,
-): SparkTool[] {
+export function createSparkTools(opts: RegisterReactorsOpts): SparkTool[] {
   const reversibleActionNames = opts.capabilities.flatMap((capability) =>
     (capability.actions ?? [])
       .filter((action) => action.mode === "reversible")
       .map((action) => `${capability.name}.${action.name}`)
   );
   const reversibleActionCondition = (actionName: Sql) =>
-    reversibleActionNames.length === 0
-      ? sql`false`
-      : sql`(${
-        reversibleActionNames.slice(1).reduce(
-          (condition, name) =>
-            sql`${condition} or ${actionName} = ${sql.lit(name)}`,
-          sql`${actionName} = ${sql.lit(reversibleActionNames[0])}`,
-        )
-      })`;
+    sparkActionNameCondition(reversibleActionNames, actionName);
   const allFileSources = opts.capabilities.flatMap((capability) =>
     (capability.fileSources ?? []).map((source) => ({
       capability: capability.name,
@@ -1405,7 +1587,7 @@ export function createSparkTools(
                 const resource of new Set([
                   ...(capability.tables ?? []),
                   ...(capability.views ?? []),
-                  ...(capability.fieldWhitelist ?? []).map((entry) =>
+                  ...capabilityFieldGrants(capability).map((entry) =>
                     entry.table
                   ),
                 ])
@@ -1824,10 +2006,11 @@ export function createSparkTools(
               });
               executeSparkReversibleAction(s, {
                 action: a,
+                storedProcedureName: sparkActionProcedureName(toolName),
                 receiptId: sql`act_action_id`,
                 cacheTransactionId: true,
                 beforeMutation: (s) => {
-                  if (sharedExecutor) refreshSparkExecAccess(s);
+                  refreshSparkExecAccess(s);
                   s.if(
                     sql`not (spark_js_conv_capabilities @> json_build_array(${
                       sql.lit(skill.name)
@@ -1877,78 +2060,16 @@ export function createSparkTools(
               `);
               s.commitTransaction();
             }
-            s.return(
-              a.mode === "reversible"
-                ? sql`json_build_object(
+            const actionToolResult = a.mode === "reversible"
+              ? sql`json_build_object(
                   'action_id', act_action_id,
                   'status', (select status from db.spark_action_log where id = act_action_id),
                   'result', coalesce(
                     try_cast(action_result as json), '{}'::json
                   )
                 )`
-                : sql`json_build_object('action_id', act_action_id, 'status', 'proposed')`,
-            );
-          });
-        },
-      });
-    }
-  }
-
-  // --- Function tools (skill-namespaced) ---
-  // Read-only domain computation that runs immediately inside the script.
-  // The function procedure reads the `function_input` JSON scalar and must
-  // call s.return(<json expr>) with its result.
-  const functionTools: SparkTool[] = [];
-  for (const skill of opts.capabilities) {
-    for (const f of skill.functions ?? []) {
-      const toolName = `${skill.name}.${f.name}`;
-      functionTools.push({
-        name: toolName,
-        timeoutMs: f.timeoutMs,
-        statements: (s) => {
-          s.defScalar(
-            "fn_skill_enabled",
-            sql`spark_js_conv_capabilities @> json_build_array(${
-              sql.lit(skill.name)
-            })`,
-          );
-          s.if(sql`not fn_skill_enabled`, (s) => {
-            s.throwError(
-              sql
-                .lit`Capability "${skill.name}" is not enabled for this conversation.`,
-            );
-          });
-          s.defScalar(
-            "function_input",
-            {
-              expr: sql`coalesce((tool_input->0)::json, '{}'::json)`,
-              allowNoRead: true,
-            },
-          );
-          s.if(sql`spark_js_execution_event_id is not null`, (s) => {
-            s.startTransaction();
-            s.modify(sql`
-            update db.spark_agent_events
-            set payload = coalesce(payload, '{}'::json) ||
-              json_build_object(
-                'function_calls',
-                coalesce(payload->'function_calls', '[]'::json) ||
-                  json_build_array(json_build_object(
-                    'function', ${sql.lit(toolName)},
-                    'input', function_input
-                  ))
-              )
-            where id = spark_js_execution_event_id
-              and spark_agent_id = spark_js_agent_id
-          `);
-            s.commitTransaction();
-          });
-          f.procedure(s, {
-            sysUserId: sql`spark_js_owner_id`,
-            nativeExecution: {
-              eventId: sql`spark_js_execution_event_id`,
-              agentId: sql`spark_js_agent_id`,
-            },
+              : sql`json_build_object('action_id', act_action_id, 'status', 'proposed')`;
+            s.return(actionToolResult);
           });
         },
       });
@@ -2253,12 +2374,10 @@ export function createSparkTools(
                     ),
                 );
                 s.if(sql`lf_crop_output_width_requested`, (s) => {
-                  if (sharedExecutor) {
-                    s.if(sql`spark_read_only`, (s) =>
-                      s.throwError(
-                        sql.lit`outputWidth requires mutable execution.`,
-                      ));
-                  }
+                  s.if(sql`spark_read_only`, (s) =>
+                    s.throwError(
+                      sql.lit`outputWidth requires mutable execution.`,
+                    ));
                   s.defScalar(
                     "lf_source_region",
                     sql`json_build_object(
@@ -2915,6 +3034,7 @@ export function createSparkTools(
 
   const READ_PDF_TEXT: SparkTool = {
     name: "readPdfText",
+    timeoutMs: SPARK_FILE_READ_TIMEOUT_MS,
     statements: (s) => {
       defAttachmentLookup(s);
       s.defScalar(
@@ -2990,23 +3110,34 @@ export function createSparkTools(
         )`);
       });
       // Per-page cap keeps a huge PDF from blowing the console/context; the
-      // truncation flag tells the agent to re-request page-by-page.
+      // truncation flag tells the agent to re-request page-by-page. Extract
+      // the document text once: whole-document text of a several-hundred-page
+      // drawing set takes seconds.
+      s.defScalar(
+        "rpt_text_limit",
+        sql`case when rpt_page is null then 4000 else 20000 end`,
+      );
+      s.defTable("rpt_page_texts", {
+        fields: [
+          { name: "page", type: "Int" },
+          { name: "text", type: "String" },
+        ],
+      });
+      s.modify(sql`insert into rpt_page_texts (page, text)
+        select page, text from pdf.text(rpt_bytes)
+        where (rpt_page is null and page <= 5) or page = rpt_page`);
       s.return(sql`json_build_object(
         'name', att.name,
         'pageCount', rpt_page_count,
         'truncated', (rpt_page is null and rpt_page_count > 5)
-          or exists(select 1 from pdf.text(rpt_bytes)
-            where (rpt_page is null or page = rpt_page)
-              and length(text) > case when rpt_page is null then 4000 else 20000 end),
+          or exists(select 1 from rpt_page_texts
+            where length(text) > rpt_text_limit),
         'pages', coalesce(
           (select json_array_agg(json_build_object(
               'page', page,
-              'text', left(text,
-                case when rpt_page is null then 4000 else 20000 end)
+              'text', left(text, rpt_text_limit)
             ) order by page)
-           from pdf.text(rpt_bytes)
-           where (rpt_page is null and page <= 5)
-             or page = rpt_page),
+           from rpt_page_texts),
           '[]'::json)
       )`);
     },
@@ -3014,6 +3145,7 @@ export function createSparkTools(
 
   const RENDER_PDF_PAGE: SparkTool = {
     name: "renderPdfPage",
+    timeoutMs: SPARK_FILE_READ_TIMEOUT_MS,
     statements: (s) => {
       defAttachmentLookup(s);
       s.defScalar(
@@ -3461,33 +3593,31 @@ export function createSparkTools(
   }
 
   return [
-    sharedExecutor
-      ? {
-        ...EMIT_IMAGE,
-        statements: (s) => {
-          s.if(sql`spark_external`, (s) => externalSparkImage.statements(s))
-            .else((s) => EMIT_IMAGE.statements(s));
-        },
-      }
-      : EMIT_IMAGE,
+    {
+      ...EMIT_IMAGE,
+      statements: (s) => {
+        s.if(sql`spark_external`, (s) => externalSparkImage.statements(s))
+          .else((s) => EMIT_IMAGE.statements(s));
+      },
+    },
     ...(opts.mcp !== false
       ? [
         generatedFileDownloadTool,
-        ...(opts.workspace ? sparkDriveTransferTools : []),
+        ...(opts.workspace
+          ? sparkDriveTransferTools(sql`http.request_info()->>'origin'`)
+          : []),
       ]
       : []),
     READ_CAPABILITY,
+    ...sparkHelpTools,
+    sparkShowHelpMediaTool,
     QUERY,
     LIST_FILES,
     READ_FILE,
     ...governedDocumentTools,
-    ...(sharedExecutor
-      ? [
-        ...externalSparkReceiptTools(opts),
-        ...externalSparkArtifactTools(),
-        ...externalSparkMessageTools(),
-      ]
-      : []),
+    ...externalSparkReceiptTools(opts),
+    ...externalSparkArtifactTools(),
+    ...externalSparkMessageTools(),
     ASK_QUESTIONS,
     UNDO_LAST_CHANGES,
     LIST_ATTACHMENTS,
@@ -3498,7 +3628,6 @@ export function createSparkTools(
     ...fileImageTools,
     ...fileMarkupTools,
     ...actionTools,
-    ...functionTools,
   ];
 }
 
@@ -4261,8 +4390,6 @@ function executeNativeSparkActions(
 
 export function registerSparkReactors(opts: RegisterReactorsOpts) {
   registerSparkTitleReactor();
-  registerSparkExecutor(opts);
-
   const allActions = opts.capabilities.flatMap((capability) =>
     (capability.actions ?? []).map((a) => ({
       ...a,
@@ -4272,49 +4399,35 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
       qualifiedName: `${capability.name}.${a.name}`,
     }))
   );
+  registerSparkActionProcedures(allActions);
+  registerSparkExecutor(opts);
+
   const reversibleActions = allActions.filter((a) => a.mode === "reversible");
   const approvalActions = allActions.filter((a) => a.mode !== "reversible");
-  let reversibleNameCondition = sql`false`;
-  if (reversibleActions.length > 0) {
-    reversibleNameCondition = sql`al.action_name = ${
-      sql.lit(reversibleActions[0].qualifiedName)
-    }`;
-    for (let i = 1; i < reversibleActions.length; i++) {
-      reversibleNameCondition =
-        sql`${reversibleNameCondition} or al.action_name = ${
-          sql.lit(reversibleActions[i].qualifiedName)
-        }`;
-    }
-  }
+  const reversibleNameCondition = sparkActionNameCondition(
+    reversibleActions.map((action) => action.qualifiedName),
+    sql`al.action_name`,
+  );
 
   // ---- PLAN REACTOR ----
-  system.addReactor({
-    name: "spark_agent_plan",
-    query: sql`
-      select
-        ba.id,
-        ba.spark_conversation_id,
-        ba.status,
-        ba.retry_at,
-        ba.retry_count
-      from db.spark_agents ba
-      join db.spark_conversations bc on bc.id = ba.spark_conversation_id
-      where (
-        ba.status = 'awaiting_plan'
-        or (ba.status = 'failed_retrying_plan'
-            and ba.retry_at is not null and ba.retry_at <= now())
-        or (ba.status = 'waiting_on_approval'
-            and not exists (
-              select 1 from db.spark_action_log al
-              where al.spark_conversation_id = ba.spark_conversation_id
-                and (al.status = 'proposed'
-                  or (al.status = 'approved' and al.input_json is not null))))
-      )
-      and not bc.is_paused
-      and bc.status = 'active'
-        and coalesce(ba.execution_mode, 'native') = 'native'
-    `,
-    recordName: "run_record",
+  // The handler body compiles as a stored procedure, keeping the reactor small.
+  system.storedProcedure({
+    name: "spark_agent_plan_run",
+    transaction: "standalone",
+    inputRecords: [{
+      name: "run_record",
+      fields: [
+        { name: "id", type: "Int", notNull: true },
+        { name: "spark_conversation_id", type: "Int", notNull: true },
+        {
+          name: "status",
+          type: { type: "Enum", enum: "spark_agent_status" },
+          notNull: true,
+        },
+        { name: "retry_at", type: "TimestampTz" },
+        { name: "retry_count", type: "Int", notNull: true },
+      ],
+    }],
     procedure: (s) => {
       // Guard against race conditions
       s.defScalar(
@@ -4362,6 +4475,39 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
       planNativeSparkTurn(s, opts);
     },
   });
+  system.addReactor({
+    name: "spark_agent_plan",
+    query: sql`
+      select
+        ba.id,
+        ba.spark_conversation_id,
+        ba.status,
+        ba.retry_at,
+        ba.retry_count
+      from db.spark_agents ba
+      join db.spark_conversations bc on bc.id = ba.spark_conversation_id
+      where (
+        ba.status = 'awaiting_plan'
+        or (ba.status = 'failed_retrying_plan'
+            and ba.retry_at is not null and ba.retry_at <= now())
+        or (ba.status = 'waiting_on_approval'
+            and not exists (
+              select 1 from db.spark_action_log al
+              where al.spark_conversation_id = ba.spark_conversation_id
+                and (al.status = 'proposed'
+                  or (al.status = 'approved' and al.input_json is not null))))
+      )
+      and not bc.is_paused
+      and bc.status = 'active'
+        and coalesce(ba.execution_mode, 'native') = 'native'
+    `,
+    recordName: "run_record",
+    procedure: (s) => {
+      s.callStoredProcedure("spark_agent_plan_run", {
+        inputRecords: { run_record: "run_record" },
+      });
+    },
+  });
 
   // Never replay orphaned execution: its database effects may have committed.
   system.addReactor({
@@ -4382,7 +4528,7 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
         )
         and event.type = 'execute_script_success'
         and event.tool_outputs is null
-        and event.created_at < date.add(hour, -1, now())
+        and event.created_at < ${sparkInterruptedExecutionStart}
     `,
     recordName: "interrupted_record",
     procedure: (s) => {
@@ -4423,7 +4569,7 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
       `);
       s.modify(sql`
         update db.spark_agents
-        set status = case when interrupted_tool_outputs is null
+        set status = case when coalesce(json_array_length(interrupted_tool_outputs), 0) = 0
               then 'failed' else 'awaiting_plan' end,
             retry_count = 0,
             retry_at = null::timestamp, completed_at = null::timestamp
@@ -4518,6 +4664,177 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
   // be recorded, and the unconditional action_input/action_result scalar
   // definitions would fail declaration-liveness validation.
   if (approvalActions.length > 0) {
+    const executeAction = registerSparkActionDispatch({
+      name: "spark_action_execute_run",
+      record: {
+        name: "action_record",
+        fields: [
+          { name: "id", type: "Int", notNull: true },
+          { name: "spark_conversation_id", type: "Int", notNull: true },
+          { name: "spark_agent_id", type: "Int", notNull: true },
+          {
+            name: "action_name",
+            type: { type: "String", maxLength: 4294967295 },
+            notNull: true,
+          },
+          { name: "input_json", type: "Json" },
+        ],
+      },
+      actions: approvalActions.map((a) => ({
+        actionName: a.qualifiedName,
+        procedure: (s) => {
+          const actionProcedure = a.procedure;
+          if (actionProcedure) {
+            s.defScalar("action_input", sql`action_record.input_json`);
+            s.defScalar("action_result", { type: "String" });
+            s.defScalar(
+              "action_sys_user_id",
+              {
+                expr: sql`(select sys_user_id from db.spark_conversations
+              where id = action_record.spark_conversation_id)`,
+                allowNoRead: true,
+              },
+            );
+
+            s.try({
+              body: (s) => {
+                s.startTransaction();
+                s.if(
+                  sql`exists (select 1 from db.spark_action_log
+                        where id = action_record.id and status = 'approved')`,
+                  (s) => {
+                    const hasCapabilityGate =
+                      a.capabilityPermission !== undefined ||
+                      a.capabilityPermissions !== undefined;
+                    const hasActionGate = a.permission !== undefined ||
+                      a.permissions !== undefined;
+                    if (hasCapabilityGate || hasActionGate) {
+                      const hasCapabilityAccess = hasCapabilityGate
+                        ? hasSparkPermissionGate(
+                          a.capabilityPermission,
+                          a.capabilityPermissions,
+                          sql`action_sys_user_id`,
+                        )
+                        : sql`true`;
+                      const hasActionAccess = hasActionGate
+                        ? hasSparkPermissionGate(
+                          a.permission,
+                          a.permissions,
+                          sql`action_sys_user_id`,
+                        )
+                        : sql`true`;
+                      s.if(
+                        sql`action_sys_user_id is not null and not (
+                              ${hasCapabilityAccess} and ${hasActionAccess}
+                            )`,
+                        (s) => {
+                          s.throwError(
+                            sql
+                              .lit`The action is no longer permitted for this user.`,
+                          );
+                        },
+                      );
+                    }
+                    s.if(
+                      sql`not (${
+                        sparkSessionActionAllowed(
+                          opts,
+                          sql`action_sys_user_id`,
+                          sql`action_record.spark_conversation_id`,
+                          sql`action_record.action_name`,
+                          a.qualifiedName,
+                        )
+                      })`,
+                      (s) =>
+                        s.throwError(
+                          sql.lit`This action is no longer authorized.`,
+                        ),
+                    );
+                    if (sparkActionUsesProcedure(a)) {
+                      callSparkActionProcedure(
+                        s,
+                        sparkActionProcedureName(a.qualifiedName),
+                      );
+                    } else {
+                      actionProcedure(s);
+                    }
+                    s.modify(sql`
+                        update db.spark_action_log
+                        set status = 'executed',
+                            result_json = coalesce(try_cast(action_result as json), '{}'::json)
+                        where id = action_record.id`);
+                    s.modify(sql`
+                    insert into db.spark_agent_events
+                      (spark_agent_id, type, content, action_id, created_at)
+                    values (
+                      action_record.spark_agent_id,
+                      'action_executed',
+                      'Executed: ' || action_record.action_name,
+                      action_record.id,
+                      now()
+                    )`);
+                    s.commitTransaction();
+                  },
+                ).else((s) => s.rollbackTransaction());
+              },
+              catch: (s) => {
+                s.rollbackTransaction();
+                s.startTransaction();
+                s.if(
+                  sql`exists (select 1 from db.spark_action_log
+                        where id = action_record.id and status = 'approved')`,
+                  (s) => {
+                    s.modify(sql`
+                          update db.spark_action_log
+                          set status = 'failed',
+                              result_json = json_build_object(
+                                'error',
+                                'Action failed; no changes were committed. ' || coalesce(nullif(act_exec_error.message,''),'Unknown error.')
+                              )
+                          where id = action_record.id`);
+                    s.modify(sql`
+                          insert into db.spark_agent_events
+                            (spark_agent_id, type, content, action_id, created_at)
+                          values (
+                            action_record.spark_agent_id,
+                            'error_occurred',
+                            'Action failed; no changes were committed. ' || coalesce(nullif(act_exec_error.message,''),'Unknown error.'),
+                            action_record.id,
+                            now()
+                          )`);
+                    s.commitTransaction();
+                  },
+                ).else((s) => s.rollbackTransaction());
+              },
+              errorName: "act_exec_error",
+            });
+          } else {
+            s.startTransaction();
+            s.if(
+              sql`exists (select 1 from db.spark_action_log
+                where id = action_record.id and status = 'approved')`,
+              (s) => {
+                s.modify(sql`
+                  update db.spark_action_log
+                  set status = 'executed'
+                  where id = action_record.id`);
+                s.modify(sql`
+                  insert into db.spark_agent_events
+                    (spark_agent_id, type, content, action_id, created_at)
+                  values (
+                    action_record.spark_agent_id,
+                    'action_executed',
+                    'Executed: ' || action_record.action_name,
+                    action_record.id,
+                    now()
+                  )`);
+                s.commitTransaction();
+              },
+            ).else((s) => s.rollbackTransaction());
+          }
+        },
+      })),
+    });
     system.addReactor({
       name: "spark_action_execute",
       query: sql`
@@ -4543,178 +4860,7 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
     `,
       recordName: "action_record",
       procedure: (s) => {
-        s.defScalar("action_input", sql`action_record.input_json`);
-        s.defScalar("action_result", { type: "String" });
-        s.defScalar(
-          "action_sys_user_id",
-          {
-            expr: sql`(select sys_user_id from db.spark_conversations
-              where id = action_record.spark_conversation_id)`,
-            allowNoRead: true,
-          },
-        );
-
-        let hasAnyExecute = false;
-        for (const a of approvalActions) {
-          const actionProcedure = a.procedure;
-          if (actionProcedure) {
-            hasAnyExecute = true;
-            s.if(
-              sql`action_record.action_name = ${sql.lit(a.qualifiedName)}`,
-              (s) => {
-                s.try({
-                  body: (s) => {
-                    s.startTransaction();
-                    s.if(
-                      sql`exists (select 1 from db.spark_action_log
-                        where id = action_record.id and status = 'approved')`,
-                      (s) => {
-                        const hasCapabilityGate =
-                          a.capabilityPermission !== undefined ||
-                          a.capabilityPermissions !== undefined;
-                        const hasActionGate = a.permission !== undefined ||
-                          a.permissions !== undefined;
-                        if (hasCapabilityGate || hasActionGate) {
-                          const hasCapabilityAccess = hasCapabilityGate
-                            ? hasSparkPermissionGate(
-                              a.capabilityPermission,
-                              a.capabilityPermissions,
-                              sql`action_sys_user_id`,
-                            )
-                            : sql`true`;
-                          const hasActionAccess = hasActionGate
-                            ? hasSparkPermissionGate(
-                              a.permission,
-                              a.permissions,
-                              sql`action_sys_user_id`,
-                            )
-                            : sql`true`;
-                          s.if(
-                            sql`action_sys_user_id is not null and not (
-                              ${hasCapabilityAccess} and ${hasActionAccess}
-                            )`,
-                            (s) => {
-                              s.throwError(
-                                sql
-                                  .lit`The action is no longer permitted for this user.`,
-                              );
-                            },
-                          );
-                        }
-                        s.if(
-                          sql`not (${
-                            sparkSessionActionAllowed(
-                              opts,
-                              sql`action_sys_user_id`,
-                              sql`action_record.spark_conversation_id`,
-                              sql`action_record.action_name`,
-                              a.qualifiedName,
-                            )
-                          })`,
-                          (s) =>
-                            s.throwError(
-                              sql.lit`This action is no longer authorized.`,
-                            ),
-                        );
-                        actionProcedure(s);
-                        s.modify(sql`
-                        update db.spark_action_log
-                        set status = 'executed',
-                            result_json = coalesce(try_cast(action_result as json), '{}'::json)
-                        where id = action_record.id`);
-                        s.modify(sql`
-                    insert into db.spark_agent_events
-                      (spark_agent_id, type, content, action_id, created_at)
-                    values (
-                      action_record.spark_agent_id,
-                      'action_executed',
-                      'Executed: ' || action_record.action_name,
-                      action_record.id,
-                      now()
-                    )`);
-                        s.commitTransaction();
-                      },
-                    ).else((s) => s.rollbackTransaction());
-                  },
-                  catch: (s) => {
-                    s.rollbackTransaction();
-                    s.startTransaction();
-                    s.if(
-                      sql`exists (select 1 from db.spark_action_log
-                        where id = action_record.id and status = 'approved')`,
-                      (s) => {
-                        s.modify(sql`
-                          update db.spark_action_log
-                          set status = 'failed',
-                              result_json = json_build_object(
-                                'error',
-                                'Action failed; no changes were committed. ' || coalesce(nullif(act_exec_error.message,''),'Unknown error.')
-                              )
-                          where id = action_record.id`);
-                        s.modify(sql`
-                          insert into db.spark_agent_events
-                            (spark_agent_id, type, content, action_id, created_at)
-                          values (
-                            action_record.spark_agent_id,
-                            'error_occurred',
-                            'Action failed; no changes were committed. ' || coalesce(nullif(act_exec_error.message,''),'Unknown error.'),
-                            action_record.id,
-                            now()
-                          )`);
-                        s.commitTransaction();
-                      },
-                    ).else((s) => s.rollbackTransaction());
-                  },
-                  errorName: "act_exec_error",
-                });
-              },
-            );
-          }
-        }
-
-        // Actions without a procedure: just mark as executed
-        if (!hasAnyExecute || approvalActions.some((a) => !a.procedure)) {
-          const noExecNames = approvalActions.filter((a) => !a.procedure);
-          let noExecCheck: Sql;
-          if (noExecNames.length === 0 && !hasAnyExecute) {
-            noExecCheck = sql`true`;
-          } else if (noExecNames.length > 0) {
-            noExecCheck = sql`action_record.action_name = ${
-              sql.lit(noExecNames[0].qualifiedName)
-            }`;
-            for (let i = 1; i < noExecNames.length; i++) {
-              noExecCheck = sql`${noExecCheck} or action_record.action_name = ${
-                sql.lit(noExecNames[i].qualifiedName)
-              }`;
-            }
-          } else {
-            noExecCheck = sql`false`;
-          }
-          s.if(noExecCheck, (s) => {
-            s.startTransaction();
-            s.if(
-              sql`exists (select 1 from db.spark_action_log
-                where id = action_record.id and status = 'approved')`,
-              (s) => {
-                s.modify(sql`
-                  update db.spark_action_log
-                  set status = 'executed'
-                  where id = action_record.id`);
-                s.modify(sql`
-                  insert into db.spark_agent_events
-                    (spark_agent_id, type, content, action_id, created_at)
-                  values (
-                    action_record.spark_agent_id,
-                    'action_executed',
-                    'Executed: ' || action_record.action_name,
-                    action_record.id,
-                    now()
-                  )`);
-                s.commitTransaction();
-              },
-            ).else((s) => s.rollbackTransaction());
-          });
-        }
+        executeAction(s);
 
         // After execution, check if all batch actions are done and resume agent
         s.defScalar(
@@ -4827,6 +4973,138 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
   // Picks up undo_requested actions and runs their undo
   const undoableActions = allActions.filter((a) => a.undo);
   if (undoableActions.length > 0) {
+    const undoAction = registerSparkActionDispatch({
+      name: "spark_action_undo_run",
+      record: {
+        name: "undo_record",
+        fields: [
+          { name: "id", type: "Int", notNull: true },
+          { name: "spark_conversation_id", type: "Int", notNull: true },
+          { name: "spark_agent_id", type: "Int", notNull: true },
+          {
+            name: "action_name",
+            type: { type: "String", maxLength: 4294967295 },
+            notNull: true,
+          },
+          { name: "input_json", type: "Json" },
+          { name: "result_json", type: "Json" },
+        ],
+      },
+      actions: undoableActions.map((a) => {
+        const undo = a.undo;
+        if (!undo) {
+          throw new Error("Spark undo dispatcher requires an undo body.");
+        }
+        return {
+          actionName: a.qualifiedName,
+          procedure: (s) => {
+            s.setContext(
+              sql`(select context_json from db.spark_conversations where id = undo_record.spark_conversation_id)`,
+            );
+            // Context scalars for consumer undo procedures. allowNoRead: which of
+            // these an undo reads depends on the registered actions (e.g. the
+            // built-in documents.edit_document undo reads only action_result).
+            s.defScalar("action_input", {
+              expr: sql`undo_record.input_json`,
+              allowNoRead: true,
+            });
+            s.defScalar("action_result", {
+              expr: sparkActionUndoResult(sql`undo_record.result_json`),
+              allowNoRead: true,
+            });
+            s.defScalar(
+              "action_sys_user_id",
+              {
+                expr: sql`(select sys_user_id from db.spark_conversations
+              where id = undo_record.spark_conversation_id)`,
+                allowNoRead: true,
+              },
+            );
+
+            s.try({
+              body: (s) => {
+                s.startTransaction();
+                s.if(
+                  sql`exists (select 1 from db.spark_action_log
+                      where id = undo_record.id and status = 'undo_requested')`,
+                  (s) => {
+                    s.if(
+                      sql`undo_record.spark_agent_id is null and not (${
+                        sparkSessionActionAllowed(
+                          opts,
+                          sql`action_sys_user_id`,
+                          sql`undo_record.spark_conversation_id`,
+                          sql`undo_record.action_name`,
+                          a.qualifiedName,
+                        )
+                      })`,
+                      (s) =>
+                        s.throwError(
+                          sql.lit`This undo is no longer authorized.`,
+                        ),
+                    );
+                    undo(s);
+                    s.modify(sql`
+                        update db.spark_action_log
+                        set status = 'undone', result_json = ${
+                      sparkActionUndoResult(sql`undo_record.result_json`)
+                    }
+                        where id = undo_record.id`);
+                    s.if(
+                      sql`undo_record.spark_agent_id is not null`,
+                      (s) =>
+                        s.modify(sql`
+                        insert into db.spark_agent_events
+                          (spark_agent_id, type, content, action_id, created_at)
+                        values (
+                          undo_record.spark_agent_id,
+                          'action_undone',
+                          'Undone: ' || undo_record.action_name,
+                          undo_record.id,
+                          now()
+                        )`),
+                    );
+                    s.commitTransaction();
+                  },
+                ).else((s) => s.rollbackTransaction());
+              },
+              errorName: "undo_error",
+              catch: (s) => {
+                // A direct first rollback preserves the compiler's caught-error record.
+                s.rollbackTransaction();
+                s.startTransaction();
+                s.if(
+                  sql`exists (select 1 from db.spark_action_log
+                      where id = undo_record.id and status = 'undo_requested')`,
+                  (s) => {
+                    s.modify(sql`
+                        update db.spark_action_log
+                        set status = 'executed', result_json = json_build_object('__spark_undo_failure', json_build_object('error', undo_error.message, 'result', ${
+                      sparkActionUndoResult(sql`undo_record.result_json`)
+                    }))
+                        where id = undo_record.id`);
+                    s.if(
+                      sql`undo_record.spark_agent_id is not null`,
+                      (s) =>
+                        s.modify(sql`
+                        insert into db.spark_agent_events
+                          (spark_agent_id, type, content, created_at)
+                        values (
+                          undo_record.spark_agent_id,
+                          'error_occurred',
+                          'Undo failed: ' || undo_error.message,
+                          now()
+                        )`),
+                    );
+                    s.commitTransaction();
+                  },
+                ).else((s) => s.rollbackTransaction());
+              },
+            });
+          },
+        };
+      }),
+    });
     system.addReactor({
       name: "spark_action_undo",
       query: sql`
@@ -4847,116 +5125,7 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
       `,
       recordName: "undo_record",
       procedure: (s) => {
-        s.setContext(
-          sql`(select context_json from db.spark_conversations where id = undo_record.spark_conversation_id)`,
-        );
-        // Context scalars for consumer undo procedures. allowNoRead: which of
-        // these an undo reads depends on the registered actions (e.g. the
-        // built-in documents.edit_document undo reads only action_result).
-        s.defScalar("action_input", {
-          expr: sql`undo_record.input_json`,
-          allowNoRead: true,
-        });
-        s.defScalar("action_result", {
-          expr: sparkActionUndoResult(sql`undo_record.result_json`),
-          allowNoRead: true,
-        });
-        s.defScalar(
-          "action_sys_user_id",
-          {
-            expr: sql`(select sys_user_id from db.spark_conversations
-              where id = undo_record.spark_conversation_id)`,
-            allowNoRead: true,
-          },
-        );
-
-        for (const a of undoableActions) {
-          s.if(
-            sql`undo_record.action_name = ${sql.lit(a.qualifiedName)}`,
-            (s) => {
-              s.try({
-                body: (s) => {
-                  s.startTransaction();
-                  s.if(
-                    sql`exists (select 1 from db.spark_action_log
-                      where id = undo_record.id and status = 'undo_requested')`,
-                    (s) => {
-                      s.if(
-                        sql`undo_record.spark_agent_id is null and not (${
-                          sparkSessionActionAllowed(
-                            opts,
-                            sql`action_sys_user_id`,
-                            sql`undo_record.spark_conversation_id`,
-                            sql`undo_record.action_name`,
-                            a.qualifiedName,
-                          )
-                        })`,
-                        (s) =>
-                          s.throwError(
-                            sql.lit`This undo is no longer authorized.`,
-                          ),
-                      );
-                      a.undo!(s);
-                      s.modify(sql`
-                        update db.spark_action_log
-                        set status = 'undone', result_json = ${
-                        sparkActionUndoResult(sql`undo_record.result_json`)
-                      }
-                        where id = undo_record.id`);
-                      s.if(
-                        sql`undo_record.spark_agent_id is not null`,
-                        (s) =>
-                          s.modify(sql`
-                        insert into db.spark_agent_events
-                          (spark_agent_id, type, content, action_id, created_at)
-                        values (
-                          undo_record.spark_agent_id,
-                          'action_undone',
-                          'Undone: ' || undo_record.action_name,
-                          undo_record.id,
-                          now()
-                        )`),
-                      );
-                      s.commitTransaction();
-                    },
-                  ).else((s) => s.rollbackTransaction());
-                },
-                errorName: "undo_error",
-                catch: (s) => {
-                  // A direct first rollback preserves the compiler's caught-error record.
-                  s.rollbackTransaction();
-                  s.startTransaction();
-                  s.if(
-                    sql`exists (select 1 from db.spark_action_log
-                      where id = undo_record.id and status = 'undo_requested')`,
-                    (s) => {
-                      s.modify(sql`
-                        update db.spark_action_log
-                        set status = 'executed', result_json = json_build_object('__spark_undo_failure', json_build_object('error', undo_error.message, 'result', ${
-                        sparkActionUndoResult(sql`undo_record.result_json`)
-                      }))
-                        where id = undo_record.id`);
-                      s.if(
-                        sql`undo_record.spark_agent_id is not null`,
-                        (s) =>
-                          s.modify(sql`
-                        insert into db.spark_agent_events
-                          (spark_agent_id, type, content, created_at)
-                        values (
-                          undo_record.spark_agent_id,
-                          'error_occurred',
-                          'Undo failed: ' || undo_error.message,
-                          now()
-                        )`),
-                      );
-                      s.commitTransaction();
-                    },
-                  ).else((s) => s.rollbackTransaction());
-                },
-              });
-            },
-          );
-        }
+        undoAction(s);
       },
     });
   }
@@ -4966,41 +5135,38 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
   // and has a non-`ask` policy for that blocker. Composes with the other
   // reactors by writing to the blocker rows (questions/action_log) —
   // auto_approve hands off to action_execute, fail ends the run.
-  system.addReactor({
-    name: "spark_agent_policy_resolve",
-    query: sql`
-      select
-        ba.id,
-        ba.spark_conversation_id,
-        ba.status,
-        ba.question_policy,
-        ba.approval_low_policy,
-        ba.approval_high_policy,
-        ba.approval_external_policy
-      from db.spark_agents ba
-      join db.spark_conversations bc on bc.id = ba.spark_conversation_id
-      where not bc.is_paused
-        and bc.status = 'active'
-        and coalesce(ba.execution_mode, 'native') = 'native'
-        and (
-          (ba.status = 'waiting_on_questions'
-            and ba.question_policy in ('fail', 'use_defaults'))
-          or (ba.status = 'waiting_on_approval'
-            and exists (
-              select 1 from db.spark_action_log al
-              where al.spark_conversation_id = ba.spark_conversation_id
-                and al.status = 'proposed'
-                and (
-                  (al.danger = 'low'
-                    and ba.approval_low_policy in ('auto_approve', 'fail'))
-                  or (al.danger = 'high'
-                    and ba.approval_high_policy in ('auto_approve', 'fail'))
-                  or (al.danger = 'external'
-                    and ba.approval_external_policy in ('auto_approve', 'fail'))
-                )))
-        )
-    `,
-    recordName: "policy_record",
+  // The handler body compiles as a stored procedure, keeping the reactor small.
+  system.storedProcedure({
+    name: "spark_agent_policy_resolve_run",
+    transaction: "standalone",
+    inputRecords: [{
+      name: "policy_record",
+      fields: [
+        { name: "id", type: "Int", notNull: true },
+        { name: "spark_conversation_id", type: "Int", notNull: true },
+        {
+          name: "status",
+          type: { type: "Enum", enum: "spark_agent_status" },
+          notNull: true,
+        },
+        {
+          name: "question_policy",
+          type: { type: "Enum", enum: "spark_question_policy" },
+        },
+        {
+          name: "approval_low_policy",
+          type: { type: "Enum", enum: "spark_approval_policy" },
+        },
+        {
+          name: "approval_high_policy",
+          type: { type: "Enum", enum: "spark_approval_policy" },
+        },
+        {
+          name: "approval_external_policy",
+          type: { type: "Enum", enum: "spark_approval_policy" },
+        },
+      ],
+    }],
     procedure: (s) => {
       s.if(
         sql`policy_record.status = 'waiting_on_questions'
@@ -5120,6 +5286,47 @@ export function registerSparkReactors(opts: RegisterReactorsOpts) {
           });
         },
       );
+    },
+  });
+  system.addReactor({
+    name: "spark_agent_policy_resolve",
+    query: sql`
+      select
+        ba.id,
+        ba.spark_conversation_id,
+        ba.status,
+        ba.question_policy,
+        ba.approval_low_policy,
+        ba.approval_high_policy,
+        ba.approval_external_policy
+      from db.spark_agents ba
+      join db.spark_conversations bc on bc.id = ba.spark_conversation_id
+      where not bc.is_paused
+        and bc.status = 'active'
+        and coalesce(ba.execution_mode, 'native') = 'native'
+        and (
+          (ba.status = 'waiting_on_questions'
+            and ba.question_policy in ('fail', 'use_defaults'))
+          or (ba.status = 'waiting_on_approval'
+            and exists (
+              select 1 from db.spark_action_log al
+              where al.spark_conversation_id = ba.spark_conversation_id
+                and al.status = 'proposed'
+                and (
+                  (al.danger = 'low'
+                    and ba.approval_low_policy in ('auto_approve', 'fail'))
+                  or (al.danger = 'high'
+                    and ba.approval_high_policy in ('auto_approve', 'fail'))
+                  or (al.danger = 'external'
+                    and ba.approval_external_policy in ('auto_approve', 'fail'))
+                )))
+        )
+    `,
+    recordName: "policy_record",
+    procedure: (s) => {
+      s.callStoredProcedure("spark_agent_policy_resolve_run", {
+        inputRecords: { policy_record: "policy_record" },
+      });
     },
   });
 

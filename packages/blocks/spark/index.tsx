@@ -1,9 +1,10 @@
+import { sparkActionNameCondition } from "./action_dispatch";
 import {
   SparkActionResult,
   type SparkActionResultRenderer,
 } from "./action_result";
-import type { SparkFunctionContext } from "./function_context";
-export type { SparkFunctionContext } from "./function_context";
+import type { SparkFunction } from "./function_context";
+export type { SparkFunction, SparkFunctionContext } from "./function_context";
 import { initializeMcpConnections, type TenantMcpOptions } from "blocks/mcp";
 import { McpSettings } from "blocks/mcp/settings";
 import { registerSparkMcp, sparkMcpCapabilities } from "./mcp";
@@ -14,6 +15,7 @@ import {
   SparkChangesPanel,
 } from "./action_activity";
 import { SparkMcpActivity } from "./mcp_activity";
+import { HelpMediaCards } from "./help_media_card";
 import { AgentControls } from "components/agent_controls";
 import { agentModelExpr, agentReasoningEffortExpr } from "std/agent_models";
 import { Button } from "components/button";
@@ -74,7 +76,11 @@ import {
 } from "std/ui";
 import { AuthBlock, userHasPermission } from "../auth/index";
 import { useJsModule } from "std/js_modules";
-import { type RegisterReactorsOpts, registerSparkReactors } from "./agent";
+import {
+  type RegisterReactorsOpts,
+  registerSparkReactors,
+  sparkUserLabelExpr,
+} from "./agent";
 let registeredMcpEnabled = true;
 let registeredMcpOptions: RegisterReactorsOpts | undefined;
 import {
@@ -100,7 +106,17 @@ export {
   type SparkWorkspaceType,
 } from "./workspace.ts";
 import { styles } from "./styles";
-import { undoSparkActionBatch } from "./action_undo";
+import {
+  capabilityFieldGrants,
+  validateCapabilityReadGrants,
+} from "./query_policy";
+import { registerSparkArtifactProcedures } from "./artifacts_panel";
+import {
+  assertSparkActionBatchUndoable,
+  prepareSparkUndo,
+  sparkActionBatchTransactions,
+  undoSparkActionBatchInTransaction,
+} from "./action_undo";
 import {
   conversationListQuery,
   conversationVisibleTo,
@@ -187,10 +203,7 @@ const registeredUiFieldWhitelist: SparkTableFields[] = [];
 // it falls back to `User <id>`.
 let registeredUserDisplayName: ((userIdExpr: Sql) => Sql) | undefined;
 function sparkUserNameExpr(userIdExpr: Sql): Sql {
-  const custom = registeredUserDisplayName?.(userIdExpr);
-  return custom
-    ? sql`coalesce(${custom}, 'User ' || ${userIdExpr}::string)`
-    : sql`'User ' || ${userIdExpr}::string`;
+  return sparkUserLabelExpr(registeredUserDisplayName, userIdExpr);
 }
 
 // Capability metadata for chat conversation creation (which capabilities a new chat
@@ -331,6 +344,50 @@ export function registerSparkAttachmentUploadApi(opts: {
       s.setHeader("x-content-type-options", sql.lit`nosniff`);
       s.setHeader("cache-control", sql.lit`private, no-store`);
       s.returnBlob(sql`preview_hash`);
+    },
+  });
+  api.get("/spark/help-media/{help_media_id:id}", {
+    procedure: (s) => {
+      AuthBlock.validateApi(s, opts.cookieName ?? sql.lit`y-t`);
+      s.defScalar("help_user", sql`coalesce(auth_user_id, current_user)`);
+      s.if(sql`help_user is null`, (s) => {
+        s.setHttpStatus(401);
+        s.return(sql.lit`Not authenticated`);
+      });
+      s.if(
+        sql`not (${canAccessSpark(sql`help_user`)})
+          or not exists(select 1 from db.sys_users where id = help_user and not disabled)`,
+        (s) => {
+          s.setHttpStatus(403);
+          s.return(sql.lit`Not authorized`);
+        },
+      );
+      s.serviceRequest({
+        serviceType: sql.lit`help`,
+        operation: sql.lit`media`,
+        requestJson: sql`json_build_object('mediaId', help_media_id)`,
+        defResultJsonScalar: "help_media_result",
+        defResultBytesScalar: "help_media_bytes",
+        defErrorJsonScalar: "help_media_error",
+      });
+      s.if(sql`help_media_error is not null`, (s) => {
+        s.setHttpStatus(502);
+        s.return(sql.lit`Help media unavailable`);
+      });
+      s.setHeader("content-type", sql`help_media_result->>'mimeType'`);
+      s.setHeader("x-content-type-options", sql.lit`nosniff`);
+      // A help media ID always names the same file, so the browser may keep it.
+      s.setHeader(
+        "cache-control",
+        sql.lit`private, max-age=31536000, immutable`,
+      );
+      // Studio shares this system's blob storage and names the blob, so
+      // returnBlob can answer the range requests video seeking needs. Older
+      // Studio versions return the bytes instead.
+      s.if(sql`help_media_result->>'blobHash' is not null`, (s) => {
+        s.returnBlob(sql`bytes.from_hex(help_media_result->>'blobHash')`);
+      });
+      s.return(sql`help_media_bytes`);
     },
   });
   api.post(sparkAttachmentUploadPath, {
@@ -490,28 +547,18 @@ export interface SparkAction {
   procedure?: (
     s: import("std/statements").GeneralServerStatements,
   ) => void;
+  /**
+   * Validate restored business invariants inside every reversible Undo transaction.
+   * Receives the original action result. Throw to roll back the entire Undo;
+   * do not start/commit transactions or perform external effects.
+   */
+  validateUndo?: (
+    s: import("std/statements").GeneralServerStatements,
+    result: Sql,
+  ) => void;
   /** Custom transaction body for approval-mode undo. Reversible mode uses transaction undo. */
   undo?: (
     s: import("std/statements").GeneralServerStatements,
-  ) => void;
-}
-
-/**
- * A function: read-only domain computation the agent can call directly from
- * SCRIPT — no approval, runs immediately, returns JSON. The procedure reads
- * the `function_input` JSON scalar and must call `s.return(<json expr>)`.
- * MUST be read-only/idempotent by contract: if it writes, it's an action.
- */
-export interface SparkFunction {
-  name: string;
-  description: string;
-  /** TypeScript type shown to the agent for this function's input. */
-  inputType?: string;
-  /** Maximum wall time while JavaScript waits for this function. */
-  timeoutMs?: number;
-  procedure: (
-    s: import("std/statements").GeneralServerStatements,
-    context: SparkFunctionContext,
   ) => void;
 }
 
@@ -544,26 +591,36 @@ export interface SparkCapability {
    * that list them in `SparkStartOpts.capabilities` get them.
    */
   internal?: boolean;
-  /** Views queryable via `tools.query()`. Preferred read surface. */
+  /**
+   * Views queryable via `tools.query()`. Step down to a view only when a table
+   * grant cannot express the access: row scoping (for example per
+   * `current_user`), or derived data a query cannot reasonably compute.
+   */
   views?: string[];
   /**
-   * Tables the agent may read WHOLE (all columns) via `tools.query()` and from
-   * render_ui cards (as db.<name>). Also the DynamicNode compile-time whitelist;
-   * keep it minimal. A table listed here but NOT in `fieldWhitelist` is a
-   * wholesale grant, and that wins over any column restriction another held
-   * capability places on the same table.
+   * Tables the agent may read WHOLE (all columns, every row) via
+   * `tools.query()` and from render_ui cards (as db.<name>). Preferred read
+   * surface: grant the real tables a role works with. Step down to
+   * `fieldWhitelist`/`fieldBlacklist` for sensitive columns, or to a view for
+   * row scoping. A wholesale grant wins over any column restriction another
+   * held capability places on the same table.
    */
   tables?: string[];
   /**
-   * Column-level read access for a table (`tools.query()` + render_ui). Use for
-   * tables with sensitive fields. Caveat: once a table appears here it is capped
-   * to these columns for the ENTIRE query, unioned across every held capability
-   * that restricts it — UNLESS some held capability grants the same table
-   * wholesale via `tables` (which wins). So do not list a table in both `tables`
-   * and `fieldWhitelist` within one capability expecting whole access — the
-   * restriction applies; pick one.
+   * Column-level read access: only these columns of the table
+   * (`tools.query()` + render_ui). Once any held capability restricts a table,
+   * queries are capped to the union of allowed columns across held
+   * capabilities, unless some held capability grants the table wholesale via
+   * `tables`. Within one capability, a table also listed in `tables` is
+   * restricted to this whitelist, and a blacklisted table takes no other grant.
    */
   fieldWhitelist?: SparkTableFields[];
+  /**
+   * Column-level read access: every real column of the table except these.
+   * Merges exactly like the equivalent `fieldWhitelist` entry. Virtual
+   * columns are never exposed under a column restriction.
+   */
+  fieldBlacklist?: SparkTableFields[];
   actions?: SparkAction[];
   functions?: SparkFunction[];
   /**
@@ -1161,90 +1218,13 @@ function SparkCardNode(
         s.tryServer({
           body: (s) => {
             s.startTransaction();
-            s.if(
-              sql`spark_ui_event_name = 'spark.request'`,
-              (s) => {
-                s.defScalar(
-                  "spark_ui_request_message",
-                  sql`spark_ui_event_payload_json->>'message'`,
-                );
-                s.if(sql`spark_ui_request_message is null`, (s) => {
-                  s.throwError(
-                    sql.lit`This card action needs a request message.`,
-                  );
-                });
-                s.if(
-                  sql`not exists (
-                    select 1 from db.spark_conversations c
-                    where c.id = active_conversation_id
-                      and c.sys_user_id = current_user
-                  )`,
-                  (s) => {
-                    s.throwError(
-                      sql.lit`The conversation owner can use this card action.`,
-                    );
-                  },
-                );
-                s.defScalar(
-                  "spark_ui_request_agent_id",
-                  sql`(select id from db.spark_agents
-                    where spark_conversation_id = active_conversation_id
-                      and status not in ('completed', 'failed')
-                    limit 1)`,
-                );
-                s.if(sql`spark_ui_request_agent_id is null`, (s) => {
-                  s.modify(sql`insert into db.spark_agents
-                    (spark_conversation_id, status)
-                    values (active_conversation_id, 'awaiting_plan')
-                    returning id into spark_ui_request_agent_id`);
-                });
-                s.modify(sql`
-                  insert into db.spark_agent_events
-                    (spark_agent_id, type, content, payload, created_at)
-                  values (
-                    spark_ui_request_agent_id,
-                    'user_message',
-                    spark_ui_request_message,
-                    json_build_object(
-                      'action', 'ui_request',
-                      'name', spark_ui_event_name,
-                      'payload', spark_ui_event_payload_json
-                    ),
-                    now()
-                  )`);
-                s.modify(sql`
-                  update db.spark_conversations
-                  set last_message_at = now(), is_paused = false
-                  where id = active_conversation_id`);
-                s.modify(sql`
-                  update db.spark_agents
-                  set status = 'awaiting_plan', retry_count = 0,
-                      retry_at = null::timestamp
-                  where id = spark_ui_request_agent_id
-                    and status in ('completed', 'waiting_on_questions',
-                      'waiting_on_approval')`);
+            s.callStoredProcedure("spark_record_card_event", {
+              inputScalars: {
+                active_conversation_id: sql`active_conversation_id`,
+                spark_ui_event_name: sql`spark_ui_event_name`,
+                spark_ui_event_payload_json: sql`spark_ui_event_payload_json`,
               },
-              (s) => {
-                s.defScalar(
-                  "spark_ui_event_agent_id",
-                  sql`(select id from db.spark_agents
-                    where spark_conversation_id = active_conversation_id
-                    order by id desc limit 1)`,
-                );
-                s.modify(sql`
-                  insert into db.spark_agent_events
-                    (spark_agent_id, type, content, payload, created_at)
-                  values (
-                    spark_ui_event_agent_id,
-                    'blocker_resolved',
-                    'UI event: ' || spark_ui_event_name,
-                    json_build_object('action', 'ui_event',
-                      'name', spark_ui_event_name,
-                      'payload', spark_ui_event_payload_json),
-                    now()
-                  )`);
-              },
-            );
+            });
             s.commitTransaction();
             // The mounted timeline <Listen> sees the new event row and
             // refetches the conversation tree.
@@ -1252,6 +1232,94 @@ function SparkCardNode(
         });
       }}
     />
+  );
+}
+
+/** Transaction body of a Spark card internal event; the caller owns start/commit. */
+function recordSparkCardEvent(s: ServerStatementsBase<any>) {
+  s.if(
+    sql`spark_ui_event_name = 'spark.request'`,
+    (s) => {
+      s.defScalar(
+        "spark_ui_request_message",
+        sql`spark_ui_event_payload_json->>'message'`,
+      );
+      s.if(sql`spark_ui_request_message is null`, (s) => {
+        s.throwError(
+          sql.lit`This card action needs a request message.`,
+        );
+      });
+      s.if(
+        sql`not exists (
+          select 1 from db.spark_conversations c
+          where c.id = active_conversation_id
+            and c.sys_user_id = current_user
+        )`,
+        (s) => {
+          s.throwError(
+            sql.lit`The conversation owner can use this card action.`,
+          );
+        },
+      );
+      s.defScalar(
+        "spark_ui_request_agent_id",
+        sql`(select id from db.spark_agents
+          where spark_conversation_id = active_conversation_id
+            and status not in ('completed', 'failed')
+          limit 1)`,
+      );
+      s.if(sql`spark_ui_request_agent_id is null`, (s) => {
+        s.modify(sql`insert into db.spark_agents
+          (spark_conversation_id, status)
+          values (active_conversation_id, 'awaiting_plan')
+          returning id into spark_ui_request_agent_id`);
+      });
+      s.modify(sql`
+        insert into db.spark_agent_events
+          (spark_agent_id, type, content, payload, created_at)
+        values (
+          spark_ui_request_agent_id,
+          'user_message',
+          spark_ui_request_message,
+          json_build_object(
+            'action', 'ui_request',
+            'name', spark_ui_event_name,
+            'payload', spark_ui_event_payload_json
+          ),
+          now()
+        )`);
+      s.modify(sql`
+        update db.spark_conversations
+        set last_message_at = now(), is_paused = false
+        where id = active_conversation_id`);
+      s.modify(sql`
+        update db.spark_agents
+        set status = 'awaiting_plan', retry_count = 0,
+            retry_at = null::timestamp
+        where id = spark_ui_request_agent_id
+          and status in ('completed', 'waiting_on_questions',
+            'waiting_on_approval')`);
+    },
+    (s) => {
+      s.defScalar(
+        "spark_ui_event_agent_id",
+        sql`(select id from db.spark_agents
+          where spark_conversation_id = active_conversation_id
+          order by id desc limit 1)`,
+      );
+      s.modify(sql`
+        insert into db.spark_agent_events
+          (spark_agent_id, type, content, payload, created_at)
+        values (
+          spark_ui_event_agent_id,
+          'blocker_resolved',
+          'UI event: ' || spark_ui_event_name,
+          json_build_object('action', 'ui_event',
+            'name', spark_ui_event_name,
+            'payload', spark_ui_event_payload_json),
+          now()
+        )`);
+    },
   );
 }
 
@@ -1469,6 +1537,15 @@ function TimelineEventCard(props: { basePath?: string }) {
         </div>
       </Show>
 
+      <Show
+        when={sql`event.event_type = 'tool_activity'
+          and json_typeof(event.payload->'help_media') = 'array'`}
+      >
+        <HelpMediaCards
+          eventId={sql`event.source_event_id`}
+          entries={sql`event.payload->'help_media'`}
+        />
+      </Show>
       <Show when={sql`event.event_type = 'tool_activity'`}>
         <Show when={sql`event.payload->>'source' = 'mcp'`}>
           <EventAttachments />
@@ -1717,35 +1794,40 @@ function TimelineEventCard(props: { basePath?: string }) {
                     s.if(
                       sql`action_is_reversible`,
                       (s) => {
-                        s.defRecord(
-                          "undo_action",
-                          sql`select action.spark_conversation_id,
-                                  action.execution_event_id
-                                from db.spark_action_log action
-                                join db.spark_conversations conversation
-                                  on conversation.id = action.spark_conversation_id
-                                where action.id = event.action_id
-                                  and action.status = 'executed'
-                                  and conversation.sys_user_id = current_user`,
-                        );
-                        s.if(
-                          sql`undo_action.execution_event_id is null`,
-                          (s) => {
-                            s.throwError(
-                              sql
-                                .lit`These Spark changes are no longer available to undo.`,
-                            );
-                          },
-                        );
-                        undoSparkActionBatch(s, {
-                          conversationId:
-                            sql`undo_action.spark_conversation_id`,
-                          executionEventId: sql`undo_action.execution_event_id`,
-                          actionId: sql`event.action_id`,
-                          actionFilter: registeredReversibleActionCondition(
-                            sql`action_name`,
-                          ),
+                        s.defScalar("undo_conversation_id", {
+                          type: "BigInt",
                         });
+                        s.defScalar("undo_execution_event_id", {
+                          type: "BigInt",
+                        });
+                        s.callStoredProcedure("spark_check_action_batch_undo", {
+                          inputScalars: { p_action_id: sql`event.action_id` },
+                          outputScalars: {
+                            p_conversation_id: "undo_conversation_id",
+                            p_execution_event_id: "undo_execution_event_id",
+                          },
+                        });
+                        prepareSparkUndo(
+                          s,
+                          sparkActionBatchTransactions({
+                            conversationId: sql`undo_conversation_id`,
+                            executionEventId: sql`undo_execution_event_id`,
+                            actionId: sql`event.action_id`,
+                            actionFilter: sparkActionNameCondition(
+                              registeredReversibleActions,
+                              sql`action_name`,
+                            ),
+                          }),
+                        );
+                        s.startTransaction();
+                        s.callStoredProcedure("spark_undo_action_batch", {
+                          inputScalars: {
+                            p_conversation_id: sql`undo_conversation_id`,
+                            p_execution_event_id: sql`undo_execution_event_id`,
+                            p_action_id: sql`event.action_id`,
+                          },
+                        });
+                        s.commitTransaction();
                       },
                     ).else((s) => {
                       s.startTransaction();
@@ -2239,6 +2321,8 @@ function ConversationTimeline(
                   timeline_expanded_activity_turn = turn_number
                   or (turn_is_terminal and activity_position = 1)
                   or not turn_is_terminal
+                  -- Help media cards stay visible after the turn collapses.
+                  or json_typeof(payload->'help_media') = 'array'
                 ))
               order by created_at, id`,
           );
@@ -2776,18 +2860,47 @@ function sendMessageProcedure(
   );
   s.startTransaction();
   s.if(sql`active_conversation_id is null`, (s) => {
-    s.modify(
-      sql`insert into db.spark_conversations
-        (sys_user_id, status, is_paused, capabilities_json, label,
-         auto_title_pending, reasoning_effort, model,
-         context_json, last_message_at)
-        values (current_user, 'active', false, ${chatCapabilitiesJsonExpr()},
-          'New chat',
-          true, pending_reasoning_effort::enums.spark_ai_reasoning_effort, pending_model,
-          pending_conversation_context, now())
-        returning id into active_conversation_id`,
-    );
+    s.defScalar("created_conversation_id", { type: "BigInt" });
+    s.callStoredProcedure("spark_create_conversation", {
+      inputScalars: {
+        pending_reasoning_effort: sql`pending_reasoning_effort`,
+        pending_model: sql`pending_model`,
+        pending_conversation_context: sql`pending_conversation_context`,
+      },
+      outputScalars: { active_conversation_id: "created_conversation_id" },
+    });
+    s.setScalar("active_conversation_id", sql`created_conversation_id`);
   });
+  s.callStoredProcedure("spark_record_user_message", {
+    inputScalars: {
+      active_conversation_id: sql`active_conversation_id`,
+      message_input: sql`message_input`,
+    },
+    inputTables: { staged_attachments: "staged_attachments" },
+  });
+  s.commitTransaction();
+  s.refetch();
+}
+
+/** New-conversation insert of sendMessageProcedure; the caller owns start/commit. */
+function createSparkConversation(s: ServerStatementsBase<any>) {
+  s.defScalar("new_conversation_id", { type: "BigInt" });
+  s.modify(
+    sql`insert into db.spark_conversations
+      (sys_user_id, status, is_paused, capabilities_json, label,
+       auto_title_pending, reasoning_effort, model,
+       context_json, last_message_at)
+      values (current_user, 'active', false, ${chatCapabilitiesJsonExpr()},
+        'New chat',
+        true, pending_reasoning_effort::enums.spark_ai_reasoning_effort, pending_model,
+        pending_conversation_context, now())
+      returning id into new_conversation_id`,
+  );
+  s.setScalar("active_conversation_id", sql`new_conversation_id`);
+}
+
+/** Message/attachment writes of sendMessageProcedure; the caller owns start/commit. */
+function recordSparkUserMessage(s: ServerStatementsBase<any>) {
   s.defTable("sent_attachments", {
     fields: [
       { name: "sort", type: "BigInt", notNull: true },
@@ -2804,7 +2917,7 @@ function sendMessageProcedure(
     sql`insert into sent_attachments
         (sort, name, mime, size, kind, body, blob_hash_hex)
       select id, name, mime, size, kind, body, blob_hash_hex
-      from ui.staged_attachments`,
+      from staged_attachments`,
   );
   s.modify(
     sql`update db.spark_conversations
@@ -2880,8 +2993,6 @@ function sendMessageProcedure(
         and status in ('completed', 'waiting_on_questions',
           'waiting_on_approval')`,
   );
-  s.commitTransaction();
-  s.refetch();
 }
 
 function MessageComposerInner(props: { basePath?: string }) {
@@ -3003,13 +3114,6 @@ function MessageComposerInner(props: { basePath?: string }) {
             (select is_paused from db.spark_conversations
               where id = active_conversation_id), false)`,
         );
-        s.defScalar(
-          "composer_multiline",
-          sql`composer_expanded
-            or position(chr(10) in message_input) > 0
-            or length(message_input) > 72`,
-        );
-        s.defScalar("composer_window_width", 0);
       }}
     >
       <Show when={sql`attachment_upload_error != ''`}>
@@ -3062,167 +3166,183 @@ function MessageComposerInner(props: { basePath?: string }) {
           </Show>
         </div>
       </Show>
-      <div
-        sx={styles.composerRow}
-        style={{
-          "grid-template-columns": sql`case when composer_multiline
-            then 'minmax(0, 1fr) auto'
-            else 'auto minmax(0, 1fr) auto' end`,
-          "align-items": sql`case when composer_multiline
-            then 'end' else 'center' end`,
-          height: sql`case when composer_expanded then '100%' else 'auto' end`,
-          "min-height": sql`case when composer_multiline
-            then '152px' else '52px' end`,
-          "padding-bottom": sql`case when composer_multiline
-            then '10px' else '3px' end`,
+      <Data
+        local
+        procedure={(s) => {
+          s.defScalar(
+            "composer_multiline",
+            sql`composer_expanded
+              or position(chr(10) in message_input) > 0
+              or length(message_input) > 72`,
+          );
+          s.defScalar("composer_window_width", 0);
         }}
       >
-        <IconButton
-          variant="plain"
-          color="neutral"
-          size="sm"
-          aria-label="Attach file"
-          sx={styles.composerAttachButton}
+        <div
+          sx={styles.composerRow}
           style={{
-            "grid-column": sql`'1'`,
-            "grid-row": sql`case when composer_multiline then '2' else '1' end`,
+            "grid-template-columns": sql`case when composer_multiline
+            then 'minmax(0, 1fr) auto'
+            else 'auto minmax(0, 1fr) auto' end`,
+            "align-items": sql`case when composer_multiline
+            then 'end' else 'center' end`,
+            height:
+              sql`case when composer_expanded then '100%' else 'auto' end`,
+            "min-height": sql`case when composer_multiline
+            then '152px' else '52px' end`,
+            "padding-bottom": sql`case when composer_multiline
+            then '10px' else '3px' end`,
           }}
-          onClick={(s) => {
-            s.jsCall({
-              module: "http_file_upload",
-              exportName: "selectFiles",
-              handle: uploadHandle,
-              argJson: sql`json_build_object(
+        >
+          <IconButton
+            variant="plain"
+            color="neutral"
+            size="sm"
+            aria-label="Attach file"
+            sx={styles.composerAttachButton}
+            style={{
+              "grid-column": sql`'1'`,
+              "grid-row":
+                sql`case when composer_multiline then '2' else '1' end`,
+            }}
+            onClick={(s) => {
+              s.jsCall({
+                module: "http_file_upload",
+                exportName: "selectFiles",
+                handle: uploadHandle,
+                argJson: sql`json_build_object(
                 'handle', ${uploadHandle},
                 'accept', ${sql.lit(sparkAttachmentAccept)},
                 'multiple', true)`,
-            });
-          }}
-        >
-          <MaterialIcon icon="Add" />
-        </IconButton>
-        <div
-          sx={styles.composerInputSlot}
-          style={{
-            "grid-column":
-              sql`case when composer_multiline then '1 / 3' else '2' end`,
-            "grid-row": sql`'1'`,
-          }}
-        >
-          <Textarea
-            placeholder={sql.lit`Type a message...`}
-            bindScalar="message_input"
-            minRows={1}
-            variant="plain"
-            sx={styles.composerTextarea}
+              });
+            }}
+          >
+            <MaterialIcon icon="Add" />
+          </IconButton>
+          <div
+            sx={styles.composerInputSlot}
             style={{
-              height:
-                sql`case when composer_expanded then '100%' else 'auto' end`,
-              "--spark-composer-textarea-right": sql`case
+              "grid-column":
+                sql`case when composer_multiline then '1 / 3' else '2' end`,
+              "grid-row": sql`'1'`,
+            }}
+          >
+            <Textarea
+              placeholder={sql.lit`Type a message...`}
+              bindScalar="message_input"
+              minRows={1}
+              variant="plain"
+              sx={styles.composerTextarea}
+              style={{
+                height:
+                  sql`case when composer_expanded then '100%' else 'auto' end`,
+                "--spark-composer-textarea-right": sql`case
                 when composer_multiline then '2.75rem'
                 else 'var(--textarea-padding-x)'
               end`,
-            }}
-            onKeyDown={(s) => {
-              s.if(
-                sql`event.key = 'Escape' and trim(message_input) = ''
-                  and agent_busy and not conv_is_paused`,
-                (s) => {
-                  s.event.preventDefault();
-                  setPaused(s, true);
-                },
-              );
-              s.if(sql`event.key = 'Enter'`, (s) => {
-                // Enter (no shift) sends — desktop only. On narrow (touch)
-                // viewports there is no Shift key, so Enter inserts a
-                // newline and sending is the send button's job.
-                s.window.getInnerWidth("composer_window_width");
+              }}
+              onKeyDown={(s) => {
                 s.if(
-                  sql`not event.shift_key and composer_window_width >= 640`,
+                  sql`event.key = 'Escape' and trim(message_input) = ''
+                  and agent_busy and not conv_is_paused`,
                   (s) => {
                     s.event.preventDefault();
-                    submit(s);
+                    setPaused(s, true);
                   },
                 );
-              });
+                s.if(sql`event.key = 'Enter'`, (s) => {
+                  // Enter (no shift) sends — desktop only. On narrow (touch)
+                  // viewports there is no Shift key, so Enter inserts a
+                  // newline and sending is the send button's job.
+                  s.window.getInnerWidth("composer_window_width");
+                  s.if(
+                    sql`not event.shift_key and composer_window_width >= 640`,
+                    (s) => {
+                      s.event.preventDefault();
+                      submit(s);
+                    },
+                  );
+                });
+              }}
+            />
+            <Show when={sql`composer_expanded`}>
+              <div
+                aria-hidden="true"
+                sx={{ height: "calc(min(72dvh, 640px) - 136px)" }}
+              />
+            </Show>
+          </div>
+          <div
+            sx={styles.composerButtons}
+            style={{
+              "grid-column":
+                sql`case when composer_multiline then '2' else '3' end`,
+              "grid-row":
+                sql`case when composer_multiline then '2' else '1' end`,
             }}
-          />
-          <Show when={sql`composer_expanded`}>
-            <div
-              aria-hidden="true"
-              sx={{ height: "calc(min(72dvh, 640px) - 136px)" }}
-            />
-          </Show>
-        </div>
-        <div
-          sx={styles.composerButtons}
-          style={{
-            "grid-column":
-              sql`case when composer_multiline then '2' else '3' end`,
-            "grid-row": sql`case when composer_multiline then '2' else '1' end`,
-          }}
-        >
-          <SparkAiControlMenu />
-          {/* Stop: idle prompt, agent running, not already paused. */}
-          <Show
-            when={sql`trim(message_input) = '' and agent_busy and not conv_is_paused`}
           >
-            <IconButton
-              aria-label="Stop agent"
-              icon="Stop"
-              variant="solid"
-              color="neutral"
-              size="sm"
-              onClick={(s) => setPaused(s, true)}
-            />
-          </Show>
-          {/* Play: idle prompt, conversation paused — resume the loop. */}
-          <Show
-            when={sql`trim(message_input) = '' and conv_is_paused`}
-          >
-            <IconButton
-              aria-label="Resume agent"
-              icon="PlayArrow"
-              variant="solid"
-              color="success"
-              size="sm"
-              onClick={(s) => setPaused(s, false)}
-            />
-          </Show>
-          {/* Send: there is input, or the agent is idle and not paused. */}
-          <Show
-            when={sql`trim(message_input) != ''
+            <SparkAiControlMenu />
+            {/* Stop: idle prompt, agent running, not already paused. */}
+            <Show
+              when={sql`trim(message_input) = '' and agent_busy and not conv_is_paused`}
+            >
+              <IconButton
+                aria-label="Stop agent"
+                icon="Stop"
+                variant="solid"
+                color="neutral"
+                size="sm"
+                onClick={(s) => setPaused(s, true)}
+              />
+            </Show>
+            {/* Play: idle prompt, conversation paused — resume the loop. */}
+            <Show
+              when={sql`trim(message_input) = '' and conv_is_paused`}
+            >
+              <IconButton
+                aria-label="Resume agent"
+                icon="PlayArrow"
+                variant="solid"
+                color="success"
+                size="sm"
+                onClick={(s) => setPaused(s, false)}
+              />
+            </Show>
+            {/* Send: there is input, or the agent is idle and not paused. */}
+            <Show
+              when={sql`trim(message_input) != ''
               or exists (select 1 from ui.staged_attachments)
               or (not agent_busy and not conv_is_paused)`}
-          >
-            <IconButton
-              aria-label="Send message"
-              icon="ArrowUpward"
-              variant="solid"
-              color="primary"
-              size="sm"
-              sx={styles.composerSendButton}
-              style={{
-                "background-color": sql`case
+            >
+              <IconButton
+                aria-label="Send message"
+                icon="ArrowUpward"
+                variant="solid"
+                color="primary"
+                size="sm"
+                sx={styles.composerSendButton}
+                style={{
+                  "background-color": sql`case
                   when trim(message_input) = ''
                     and not exists (select 1 from ui.staged_attachments)
                     then '#e6eef7'
                   else '#2f80ed'
                 end`,
-                color: sql`case
+                  color: sql`case
                   when trim(message_input) = ''
                     and not exists (select 1 from ui.staged_attachments)
                     then '#a4aab1'
                   else '#ffffff'
                 end`,
-              }}
-              disabled={sql`trim(message_input) = ''
+                }}
+                disabled={sql`trim(message_input) = ''
                 and not exists (select 1 from ui.staged_attachments)`}
-              onClick={(s) => submit(s)}
-            />
-          </Show>
+                onClick={(s) => submit(s)}
+              />
+            </Show>
+          </div>
         </div>
-      </div>
+      </Data>
     </Data>
   );
   return (
@@ -3648,15 +3768,10 @@ function SparkCardArtifact(
             size="sm"
             variant="plain"
             color="neutral"
-            onClick={(s) => {
-              s.navigate(
-                sql`case when active_conversation_id is not null
-                  then ${
-                  sparkConvPath(props.basePath, sql`active_conversation_id`)
-                }
-                  else ${sparkListPath(props.basePath)} end`,
-              );
-            }}
+            href={sql`case when active_conversation_id is not null
+              then ${sparkConvPath(props.basePath, sql`active_conversation_id`)}
+              else ${sparkListPath(props.basePath)} end`}
+            backLink
           >
             <MaterialIcon icon="ArrowBack" />
           </IconButton>
@@ -4366,6 +4481,12 @@ export function SparkPage(props: {
   basePath?: string;
   /** App-owned handoff/document routes, before the conversation catch-all. */
   additionalRoutes?: Node;
+  /**
+   * Expand the Connected assistants refusal for users without MCP permission
+   * into an explanation of how it is granted. Off by default; see
+   * {@link McpSettings}.
+   */
+  explainMissingMcpPermission?: boolean;
 }) {
   const basePath = props.basePath ?? "";
   const app = system.renderingApp;
@@ -4379,6 +4500,13 @@ export function SparkPage(props: {
       settingsPath: `${basePath}/connected-assistants`,
       permission: canAccessSpark,
       capabilities: (user) => sparkMcpCapabilities(mcpOptions, user),
+      capabilityLabels: Object.fromEntries(
+        registeredCapabilitiesMeta.filter((c) => !c.internal).map((c) => [
+          c.name,
+          c.label ??
+            c.name.replaceAll("_", " ").replace(/^./, (ch) => ch.toUpperCase()),
+        ]),
+      ),
     }
     : undefined;
   if (connection && mcpOptions) registerSparkMcp(connection, mcpOptions);
@@ -4419,9 +4547,14 @@ export function SparkPage(props: {
       <AppRoutes>
         {connection && (
           <Route path={`${basePath}/connected-assistants`}>
-            <McpSettings options={connection}>
-              <SparkMcpActivity basePath={basePath} />
-            </McpSettings>
+            <ManagementShell basePath={basePath} flush>
+              <McpSettings
+                options={connection}
+                explainMissingPermission={props.explainMissingMcpPermission}
+              >
+                <SparkMcpActivity basePath={basePath} />
+              </McpSettings>
+            </ManagementShell>
           </Route>
         )}
         {props.additionalRoutes}
@@ -6424,6 +6557,7 @@ export class SparkBlock implements Block {
           }
         }
       }
+      validateCapabilityReadGrants(cap);
       for (const t of cap.tables ?? []) {
         if (!system.db.tables[t]) {
           throw new Error(
@@ -6457,11 +6591,13 @@ export class SparkBlock implements Block {
         }
         if (
           !(cap.tables ?? []).includes(fs.table) &&
-          !(cap.views ?? []).includes(fs.table)
+          !(cap.views ?? []).includes(fs.table) &&
+          !capabilityFieldGrants(cap).some((grant) => grant.table === fs.table)
         ) {
           throw new Error(
             `Spark capability "${cap.name}": fileSource "${fs.name}" relation ` +
-              `"${fs.table}" must also be listed in this capability's tables or views.`,
+              `"${fs.table}" must also be readable through this capability's ` +
+              `tables, fieldWhitelist, fieldBlacklist, or views.`,
           );
         }
         if (fs.lookup) continue;
@@ -6509,6 +6645,7 @@ export class SparkBlock implements Block {
       enableDynamicUi: this.opts.enableDynamicUi ?? true,
       allowedCardJsModules: this.opts.allowedCardJsModules ?? [],
       mockProcedure: this.opts.mockProcedure,
+      userDisplayName: this.opts.userDisplayName,
     };
     registerSparkReactors(registeredMcpOptions);
     registeredUserDisplayName = this.opts.userDisplayName;
@@ -6540,7 +6677,7 @@ export class SparkBlock implements Block {
       for (const t of skill.tables ?? []) {
         if (!registeredUiTables.includes(t)) registeredUiTables.push(t);
       }
-      for (const fields of skill.fieldWhitelist ?? []) {
+      for (const fields of capabilityFieldGrants(skill)) {
         const existing = registeredUiFieldWhitelist.find((item) =>
           item.table === fields.table
         );
@@ -6575,6 +6712,128 @@ export class SparkBlock implements Block {
         });
       }
     }
+    // Stored procedures keep these chat UI bodies out of every Spark route.
+    system.storedProcedure({
+      name: "spark_undo_action_batch",
+      transaction: "caller",
+      inputScalars: [
+        { name: "p_conversation_id", type: "BigInt" },
+        { name: "p_execution_event_id", type: "BigInt" },
+        { name: "p_action_id", type: "BigInt" },
+      ],
+      procedure: (s) =>
+        undoSparkActionBatchInTransaction(s, {
+          conversationId: sql`p_conversation_id`,
+          executionEventId: sql`p_execution_event_id`,
+          actionId: sql`p_action_id`,
+          actionFilter: sparkActionNameCondition(
+            registeredReversibleActions,
+            sql`action_name`,
+          ),
+        }),
+    });
+    system.storedProcedure({
+      name: "spark_check_action_batch_undo",
+      transaction: "caller",
+      inputScalars: [{ name: "p_action_id", type: "BigInt" }],
+      outputScalars: [
+        { name: "p_conversation_id", type: "BigInt" },
+        { name: "p_execution_event_id", type: "BigInt" },
+      ],
+      procedure: (s) => {
+        s.defRecord(
+          "undo_action",
+          sql`select action.spark_conversation_id,
+                  action.execution_event_id
+                from db.spark_action_log action
+                join db.spark_conversations conversation
+                  on conversation.id = action.spark_conversation_id
+                where action.id = p_action_id
+                  and action.status = 'executed'
+                  and conversation.sys_user_id = current_user`,
+        );
+        s.if(
+          sql`undo_action.execution_event_id is null`,
+          (s) => {
+            s.throwError(
+              sql.lit`These Spark changes are no longer available to undo.`,
+            );
+          },
+        );
+        assertSparkActionBatchUndoable(s, {
+          conversationId: sql`undo_action.spark_conversation_id`,
+          executionEventId: sql`undo_action.execution_event_id`,
+          actionId: sql`p_action_id`,
+          actionFilter: sparkActionNameCondition(
+            registeredReversibleActions,
+            sql`action_name`,
+          ),
+        });
+        s.setScalar(
+          "p_conversation_id",
+          sql`undo_action.spark_conversation_id`,
+        );
+        s.setScalar(
+          "p_execution_event_id",
+          sql`undo_action.execution_event_id`,
+        );
+      },
+    });
+    system.storedProcedure({
+      name: "spark_create_conversation",
+      transaction: "caller",
+      inputScalars: [
+        { name: "pending_reasoning_effort", type: "String" },
+        { name: "pending_model", type: "String" },
+        { name: "pending_conversation_context", type: "Json" },
+      ],
+      outputScalars: [{ name: "active_conversation_id", type: "BigInt" }],
+      procedure: (s) => createSparkConversation(s),
+    });
+    system.storedProcedure({
+      name: "spark_record_user_message",
+      transaction: "caller",
+      inputScalars: [
+        { name: "active_conversation_id", type: "BigInt" },
+        { name: "message_input", type: "String" },
+      ],
+      inputTables: [{
+        name: "staged_attachments",
+        fields: [
+          { name: "id", type: "BigInt", notNull: true },
+          {
+            name: "name",
+            type: { type: "String", maxLength: 500 },
+            notNull: true,
+          },
+          {
+            name: "mime",
+            type: { type: "String", maxLength: 200 },
+            notNull: true,
+          },
+          { name: "size", type: "BigInt", notNull: true },
+          {
+            name: "kind",
+            type: { type: "String", maxLength: 20 },
+            notNull: true,
+          },
+          { name: "body", type: { type: "String", maxLength: 50000 } },
+          { name: "blob_hash_hex", type: { type: "String", maxLength: 64 } },
+        ],
+      }],
+      procedure: (s) => recordSparkUserMessage(s),
+    });
+    registerSparkArtifactProcedures();
+    system.storedProcedure({
+      name: "spark_record_card_event",
+      transaction: "caller",
+      inputScalars: [
+        { name: "active_conversation_id", type: "BigInt" },
+        { name: "spark_ui_event_name", type: "String" },
+        { name: "spark_ui_event_payload_json", type: "Json" },
+      ],
+      procedure: (s) => recordSparkCardEvent(s),
+    });
   }
 
   /**

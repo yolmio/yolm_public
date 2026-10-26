@@ -49,8 +49,9 @@ db.table("external_event_types", (table) => {
 ```
 
 This creates a custom combobox for selecting `external_event_types` records.
-Foreign key fields that reference this table can show rich formatted items
-instead of just the record name.
+Foreign key fields that reference this table show the event name and owner on
+the first line and the scheduling URL on the second, instead of just the
+record name.
 
 ## Use Cases
 
@@ -133,46 +134,10 @@ db.table("customers", (table) => {
 
 ## Control Types
 
-### Select (Simple Dropdown)
-
-For tables with few records that should be displayed as a simple dropdown:
-
-```typescript
-db.table("categories", (table) => {
-  table.string("name", 15).notNull();
-  table.string("description", 2000);
-  table.setFormControl("Select");  // Simple dropdown instead of combobox
-});
-
-db.table("shippers", (table) => {
-  table.string("name", 40).notNull();
-  table.string("phone", 24);
-  table.setFormControl("Select");
-});
-```
-
-Use `Select` when:
-- The table has a small number of records (< 20)
-- Users benefit from seeing all options at once
-- No search/filtering is needed
-
-### Combobox
-
-The most common custom control, used for foreign key selections with search capability:
-
-```typescript
-table.setFormControl({
-  type: "Combobox",
-  displayItem: ({ record }) => <CustomDisplay />,
-});
-```
-
-### Custom Renderer
-
-You can also pass a custom render function when `Select` or `Combobox` are not
-enough. The custom renderer is still a table-level record picker; use field
-definitions and form-field components for scalar controls such as text inputs,
-numbers, dates, and checkboxes.
+For the available control types (`"Select"`, `"Combobox"` with `where`,
+`limit`, and `dialogInsert`, and fully custom pickers), see
+[Table form controls](table_controls.md). This page covers rich `displayItem`
+renderers for the combobox.
 
 ## Best Practices
 
@@ -195,57 +160,3 @@ The table-level control is used when a form renders a foreign key to that table:
   </Form.Insert>
 </Form>
 ```
-
-## Combined Example
-
-Combobox display for an event-type lookup table:
-
-```typescript
-db.table("external_event_types", (table) => {
-  table.string("name", 100).notNull();
-  table.string("owner", 200);
-  table.string("scheduling_url", 200).notNull();
-  table.string("calendly_uri", 200);
-  table.string("utm_source", 75);
-  table.string("utm_content", 75);
-  table.bool("active").notNull();
-
-  table.setFormControl({
-    type: "Combobox",
-    displayItem: ({ record }) => {
-      return (
-        <Data procedure={(s) => {
-          s.defRecord(
-            "event_type",
-            sql`select * from db.external_event_types where id = ${record}.id`
-          );
-        }}>
-          <div className="flex flex-col gap-2">
-            <div className="flex gap-2 items-baseline">
-              {sql`event_type.name`}
-              <Typography level="body-sm">{sql`event_type.owner`}</Typography>
-            </div>
-            <Typography level="body-xs">
-              {sql`event_type.scheduling_url`}
-            </Typography>
-          </div>
-        </Data>
-      );
-    },
-  });
-
-  table.searchConfig({
-    fields: [
-      { field: "name", priority: 1 },
-      { field: "owner", priority: 2 },
-      { field: "scheduling_url", priority: 2 },
-    ],
-  });
-});
-```
-
-When users select an event type in a form, they see:
-- **Main line**: Event name + owner (small text)
-- **Second line**: Full scheduling URL (smaller text)
-
-This helps users quickly identify the right event type among many similar options.

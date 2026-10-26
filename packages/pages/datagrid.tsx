@@ -49,6 +49,7 @@ import {
   type DefaultView,
   DynamicDatagrid,
   type FilterType,
+  type RelationStringFilter,
   type SortConfig,
 } from "./datagrid_internals/dynamic_datagrid";
 import {
@@ -643,6 +644,8 @@ export class DatagridBuilder {
       initialWidth?: number;
       initiallyDisplaying?: boolean;
       filter?: boolean;
+      /** Opt in to a relation-backed string filter for this FK field. */
+      relationFilter?: RelationStringFilter;
       sort?: boolean;
       pin?: "left" | "right";
     } = {},
@@ -680,6 +683,14 @@ export class DatagridBuilder {
     });
     if (!column) {
       return this;
+    }
+    if (opts.relationFilter) {
+      if (column.filter?.type !== "string") {
+        throw new Error(
+          `addFkField relationFilter requires a string filter for ${otherTable.name}.${otherField.name}`,
+        );
+      }
+      column.filter = { ...column.filter, relation: opts.relationFilter };
     }
     column.viewStorageName = opts.storageName ??
       `${otherTable.name}_${otherField.name}`;
@@ -877,7 +888,9 @@ export class DatagridBuilder {
       viewStorageName: column.storageName,
       columnsDisplayName: column.columnsDisplayName ?? displayName,
       queryGeneration: {
-        expr: sql.lit(sql.exprToString(column.expr)),
+        // Parenthesize so filter encoders can splice the text next to
+        // operators without virtual-expression precedence leaking (#521).
+        expr: sql.lit(sql.exprToString(sql`(${column.expr})`)),
         alwaysGenerate: false,
       },
       displayInfo: {
@@ -1256,6 +1269,8 @@ export interface DatagridPageProps {
   toolbar?: Node;
   /** Content placed at the right of the default toolbar. */
   toolbarRight?: Node;
+  /** Content shown after a successful query returns no rows. The toolbar remains available. */
+  emptyState?: Node;
   disableFiltering?: boolean;
   /** Disable saved views (the column/view management UI). */
   disableViews?: boolean;
@@ -1708,6 +1723,7 @@ function DatagridPageInner(props: DatagridPageProps) {
       tableModel={table}
       selectable={selectable}
       toolbar={toolbar}
+      emptyState={props.emptyState}
       datagridName={datagridName}
       enableFiltering={!props.disableFiltering}
       enableViews={!props.disableViews}

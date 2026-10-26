@@ -1,3 +1,4 @@
+import { Link } from "components/link";
 import { Chip } from "components/chip";
 import { Input } from "components/input";
 import { MaterialIcon } from "components/material_icon";
@@ -10,7 +11,7 @@ import type { UiServerStatements } from "std/statements";
 import { system } from "std/system";
 import { Conditional, Each, Show } from "std/ui";
 import { AuthBlock } from "./index";
-import { accessRuleSourceLabel } from "./access_sources";
+import { accessRuleSourceHref, accessRuleSourceLabel } from "./access_sources";
 import {
   assertOriginalAccessActor,
   canAssignStaffRole,
@@ -56,7 +57,9 @@ export function UserRoles(props: {
           );
           s.defTable(
             "user_role_sources",
-            sql`select distinct auth_role_id,
+            sql`select distinct auth_role_id, ${
+              accessRuleSourceHref(sql`source`, sql`source_record_id`)
+            } as source_href,
           ${
               accessRuleSourceLabel(sql`source`, sql`source_record_id`)
             } as source_label
@@ -143,7 +146,15 @@ export function UserRoles(props: {
                       color="neutral"
                       startIcon="RuleOutlined"
                     >
-                      Rule · {sql`role_source.source_label`}
+                      Rule ·{" "}
+                      <Show
+                        when={sql`role_source.source_href is not null`}
+                        fallback={sql`role_source.source_label`}
+                      >
+                        <Link href={sql`role_source.source_href`}>
+                          {sql`role_source.source_label`}
+                        </Link>
+                      </Show>
                     </Chip>
                   </Each>
                 </div>

@@ -13,8 +13,10 @@ import type {
   RegisteredFileViewer,
 } from "./types.ts";
 import { driveText } from "./i18n";
+import { fileViewerStateSql } from "./viewer_state_sql";
 
 export interface FileViewerProps {
+  controlledRevisionId?: Sql;
   files: DriveBlockContract;
   fileItemId: AnyExpr;
   /**
@@ -98,18 +100,20 @@ export function FileViewer(props: FileViewerProps) {
   return (
     <Data
       procedure={(s) => {
-        s.callStoredProcedure("files_viewer_state", {
-          inputScalars: {
-            p_file_item_id: props.fileItemId,
-            p_retained_version: retainedVersion ? sql`true` : sql`false`,
-            p_file_version_id: props.fileVersionId ?? sql`cast(null as bigint)`,
-            p_use_current_version: props.fileVersionId === undefined ||
-                props.fileVersionId === null
+        // A nested stored-procedure call dominated production UI-state CPU.
+        // Share its exact authorized query without crossing that boundary.
+        s.defRecord(
+          "file_viewer",
+          fileViewerStateSql(
+            props.files,
+            sql`${props.fileItemId}`,
+            sql`${props.fileVersionId ?? sql`cast(null as bigint)`}`,
+            props.fileVersionId === undefined || props.fileVersionId === null
               ? sql`true`
               : sql`false`,
-          },
-          outputRecords: { file_viewer: "file_viewer" },
-        });
+            retainedVersion ? sql`true` : sql`false`,
+          ),
+        );
       }}
     >
       <Show
@@ -130,6 +134,7 @@ export function FileViewer(props: FileViewerProps) {
           const selected = sql`${match} and not (${earlierViewerMatches})`;
           earlierViewerMatches = sql`${earlierViewerMatches} or ${match}`;
           const renderProps = {
+            controlledRevisionId: props.controlledRevisionId,
             fileSpaceId: sql`file_viewer.file_space_id`,
             fileItemId: sql`file_viewer.file_item_id`,
             fileVersionId: sql`file_viewer.file_version_id`,

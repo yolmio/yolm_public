@@ -1,6 +1,6 @@
 import { Alert } from "components/alert";
 import { Button } from "components/button";
-import { Card, CardContent, CardHeader } from "components/card";
+import { Card, CardContent } from "components/card";
 import { DataTable } from "components/data_table";
 import { FormControl } from "components/form_control";
 import { FormLabel } from "components/form_label";
@@ -20,7 +20,8 @@ import {
   personTable,
   personTypeSql,
 } from "../helpers";
-import { adminSelectClass, TrainingAdminFrame } from "./shared";
+import { adminSelectClass } from "./shared";
+import { PageShell } from "../shared";
 
 export function TrainingAdminAudiencesPage(props: { block: TrainingBlock }) {
   const workforce = props.block.opts.workforce;
@@ -52,9 +53,20 @@ export function TrainingAdminAudiencesPage(props: { block: TrainingBlock }) {
         });
       }}
     >
-      <TrainingAdminFrame>
+      <PageShell
+        title="Audiences"
+        subtitle="Reusable groups of people, matched by workforce attributes, for assigning training."
+        actions={
+          <Button
+            startIcon="GroupAdd"
+            onClick={(s) => s.setScalar("add_audience_open", sql`true`)}
+          >
+            Add audience
+          </Button>
+        }
+      >
         <DynamicAudiencesWorkspace block={props.block} />
-      </TrainingAdminFrame>
+      </PageShell>
     </Data>
   );
 }
@@ -76,22 +88,24 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
           );
           s.defTable(
             "audience_job_profiles",
-            sql`select id, name, code
+            sql`select id, name
                 from db.${sql.ref(workforce.jobProfilesTable)}
                 where is_active
                 order by name`,
           );
-          s.defTable(
-            "audience_organizations",
-            sql`select id, name
+          if (workforce.organizationsTable) {
+            s.defTable(
+              "audience_organizations",
+              sql`select id, name
                 from db.${sql.ref(workforce.organizationsTable)}
                 where is_active
                 order by name`,
-          );
+            );
+          }
           if (hasOrgUnits) {
             s.defTable(
               "audience_org_units",
-              sql`select id, name, code
+              sql`select id, name
                   from db.${sql.ref(workforce.orgUnitsTable!)}
                   where is_active
                   order by name`,
@@ -100,16 +114,14 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
           if (hasLocations) {
             s.defTable(
               "audience_locations",
-              sql`select id, name, code
-                  from db.${sql.ref(workforce.locationsTable!)}
-                  where is_active
-                  order by name`,
+              workforce.locationOptions?.() ?? sql`select id, name
+                  from db.${sql.ref(workforce.locationsTable!)} order by name`,
             );
           }
           if (hasPositions) {
             s.defTable(
               "audience_positions",
-              sql`select id, name, code
+              sql`select id, name
                   from db.${sql.ref(workforce.positionsTable!)}
                   where is_active
                   order by name`,
@@ -154,32 +166,18 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
         }}
       >
         <Card variant="outlined">
-          <CardHeader>
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-              <div>
-                <Typography level="title-lg" startIcon="Groups">
-                  Dynamic Audiences
-                </Typography>
-                <Typography level="body-sm" className="text-neutral-600 mt-1">
-                  Define reusable employee groups for training requirements.
-                </Typography>
-              </div>
-              <Button
-                startIcon="GroupAdd"
-                onClick={(s) => s.setScalar("add_audience_open", sql`true`)}
-              >
-                Add audience
-              </Button>
-            </div>
-          </CardHeader>
           <CardContent>
             <DataTable
               query={sql`
                 select a.id, a.name, a.description,
                        coalesce(a.worker_type, 'Any type') as worker_type,
                        coalesce(job.name, 'Any job') as job_profile_name,
-                       coalesce(emp.name, 'Any company') as employer_name,
-                       coalesce(host.name, 'Any host') as host_name,
+                       ${
+                workforce.organizationsTable
+                  ? sql`coalesce(emp.name, 'Any company') as employer_name,
+                       coalesce(host.name, 'Any host') as host_name,`
+                  : sql``
+              }
                        ${
                 hasOrgUnits
                   ? sql`coalesce(unit.name, 'Any unit') as org_unit_name,`
@@ -200,14 +198,40 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                        coalesce(a.assignment_status, 'Any status')
                          as assignment_status,
                        coalesce(lang.name, 'Any') as language,
+                       coalesce(nullif(concat_ws(' · ',
+                         'Type: ' || a.worker_type,
+                         'Job: ' || job.name,
+                         ${
+                workforce.organizationsTable
+                  ? sql`'Employer: ' || emp.name,
+                         'Host: ' || host.name,`
+                  : sql``
+              }
+                         ${hasOrgUnits ? sql`'Unit: ' || unit.name,` : sql``}
+                         ${
+                hasLocations ? sql`'Location: ' || location.name,` : sql``
+              }
+                         ${
+                hasPositions ? sql`'Position: ' || position.name,` : sql``
+              }
+                         'Relationship: ' || a.relationship_status,
+                         'Assignment: ' || a.assignment_status,
+                         'Language: ' || lang.name
+                       ), ''), 'Everyone') as criteria,
                        case when a.is_active then 'Active' else 'Inactive' end as status
                 from db.training_audiences a
                 left join db.${sql.ref(workforce.jobProfilesTable)} job
                   on job.id = a.workforce_job_profile_id
-                left join db.${sql.ref(workforce.organizationsTable)} emp
+                ${
+                workforce.organizationsTable
+                  ? sql`left join db.${
+                    sql.ref(workforce.organizationsTable)
+                  } emp
                   on emp.id = a.employer_workforce_organization_id
                 left join db.${sql.ref(workforce.organizationsTable)} host
-                  on host.id = a.host_workforce_organization_id
+                  on host.id = a.host_workforce_organization_id`
+                  : sql``
+              }
                 ${
                 hasOrgUnits
                   ? sql`left join db.${sql.ref(workforce.orgUnitsTable!)} unit
@@ -216,9 +240,12 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
               }
                 ${
                 hasLocations
-                  ? sql`left join db.${
-                    sql.ref(workforce.locationsTable!)
-                  } location
+                  ? sql`left join (${
+                    workforce.locationOptions?.({ includeInactive: true }) ??
+                      sql`select id, name from db.${
+                        sql.ref(workforce.locationsTable!)
+                      }`
+                  }) location
                   on location.id = a.workforce_location_id`
                   : sql``
               }
@@ -240,8 +267,9 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                 "description",
                 "worker_type",
                 "job_profile_name",
-                "employer_name",
-                "host_name",
+                ...(workforce.organizationsTable
+                  ? ["employer_name", "host_name"]
+                  : []),
                 ...(hasOrgUnits ? ["org_unit_name"] : []),
                 ...(hasLocations ? ["location_name"] : []),
                 ...(hasPositions ? ["position_name"] : []),
@@ -251,27 +279,11 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                 "status",
               ]}
               columns={(b) => {
-                b.simpleColumn("name", "Audience", { width: "16%" });
-                b.simpleColumn("worker_type", "Worker type", { width: "9%" });
-                b.simpleColumn("job_profile_name", "Job", { width: "9%" });
-                b.simpleColumn("employer_name", "Employer", { width: "11%" });
-                b.simpleColumn("host_name", "Host", { width: "9%" });
-                if (hasOrgUnits) {
-                  b.simpleColumn("org_unit_name", "Org unit", { width: "9%" });
-                }
-                if (hasLocations) {
-                  b.simpleColumn("location_name", "Location", { width: "9%" });
-                }
-                if (hasPositions) {
-                  b.simpleColumn("position_name", "Position", { width: "9%" });
-                }
-                b.simpleColumn("relationship_status", "Rel. status", {
-                  width: "8%",
+                b.simpleColumn("name", "Audience", { width: "28%" });
+                b.simpleColumn("criteria", "Matches people with", {
+                  width: "56%",
                 });
-                b.simpleColumn("assignment_status", "Asg. status", {
-                  width: "8%",
-                });
-                b.simpleColumn("language", "Lang", { width: "6%" });
+                b.simpleColumn("status", "Status", { width: "16%" });
               }}
               actions={(b) => {
                 b.custom(
@@ -373,49 +385,53 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                 <Select.Option value="">Any job</Select.Option>
                 <Each table="audience_job_profiles" recordName="job">
                   <Select.Option value={sql`job.id`}>
-                    {sql`job.name || ' · ' || job.code`}
+                    {sql`job.name`}
                   </Select.Option>
                 </Each>
               </Select>
             </FormControl>
-            <FormControl>
-              <FormLabel>Employer company</FormLabel>
-              <Select
-                className={adminSelectClass}
-                value={sql`add_audience_employer_organization_id`}
-                onInput={(s) =>
-                  s.setScalar(
-                    "add_audience_employer_organization_id",
-                    sql`target_value`,
-                  )}
-              >
-                <Select.Option value="">Any company</Select.Option>
-                <Each table="audience_organizations" recordName="org">
-                  <Select.Option value={sql`org.id`}>
-                    {sql`org.name`}
-                  </Select.Option>
-                </Each>
-              </Select>
-            </FormControl>
-            <FormControl>
-              <FormLabel>Host company</FormLabel>
-              <Select
-                className={adminSelectClass}
-                value={sql`add_audience_host_organization_id`}
-                onInput={(s) =>
-                  s.setScalar(
-                    "add_audience_host_organization_id",
-                    sql`target_value`,
-                  )}
-              >
-                <Select.Option value="">Any company</Select.Option>
-                <Each table="audience_organizations" recordName="org">
-                  <Select.Option value={sql`org.id`}>
-                    {sql`org.name`}
-                  </Select.Option>
-                </Each>
-              </Select>
-            </FormControl>
+            {workforce.organizationsTable && (
+              <>
+                <FormControl>
+                  <FormLabel>Employer company</FormLabel>
+                  <Select
+                    className={adminSelectClass}
+                    value={sql`add_audience_employer_organization_id`}
+                    onInput={(s) =>
+                      s.setScalar(
+                        "add_audience_employer_organization_id",
+                        sql`target_value`,
+                      )}
+                  >
+                    <Select.Option value="">Any company</Select.Option>
+                    <Each table="audience_organizations" recordName="org">
+                      <Select.Option value={sql`org.id`}>
+                        {sql`org.name`}
+                      </Select.Option>
+                    </Each>
+                  </Select>
+                </FormControl>
+                <FormControl>
+                  <FormLabel>Host company</FormLabel>
+                  <Select
+                    className={adminSelectClass}
+                    value={sql`add_audience_host_organization_id`}
+                    onInput={(s) =>
+                      s.setScalar(
+                        "add_audience_host_organization_id",
+                        sql`target_value`,
+                      )}
+                  >
+                    <Select.Option value="">Any company</Select.Option>
+                    <Each table="audience_organizations" recordName="org">
+                      <Select.Option value={sql`org.id`}>
+                        {sql`org.name`}
+                      </Select.Option>
+                    </Each>
+                  </Select>
+                </FormControl>
+              </>
+            )}
             {hasOrgUnits && (
               <FormControl>
                 <FormLabel>Org unit</FormLabel>
@@ -428,7 +444,7 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                   <Select.Option value="">Any unit</Select.Option>
                   <Each table="audience_org_units" recordName="unit">
                     <Select.Option value={sql`unit.id`}>
-                      {sql`unit.name || coalesce(' · ' || unit.code, '')`}
+                      {sql`unit.name`}
                     </Select.Option>
                   </Each>
                 </Select>
@@ -446,7 +462,7 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                   <Select.Option value="">Any location</Select.Option>
                   <Each table="audience_locations" recordName="location">
                     <Select.Option value={sql`location.id`}>
-                      {sql`location.name || coalesce(' · ' || location.code, '')`}
+                      {sql`location.name`}
                     </Select.Option>
                   </Each>
                 </Select>
@@ -464,7 +480,7 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                   <Select.Option value="">Any position</Select.Option>
                   <Each table="audience_positions" recordName="position">
                     <Select.Option value={sql`position.id`}>
-                      {sql`position.name || coalesce(' · ' || position.code, '')`}
+                      {sql`position.name`}
                     </Select.Option>
                   </Each>
                 </Select>
@@ -543,16 +559,24 @@ export function DynamicAudiencesWorkspace(props: { block: TrainingBlock }) {
                     s.startTransaction();
                     let audienceColumns = sql`name, description, worker_type,
                          workforce_job_profile_id,
-                         employer_workforce_organization_id,
-                         host_workforce_organization_id,
+                         ${
+                      workforce.organizationsTable
+                        ? sql`employer_workforce_organization_id,
+                         host_workforce_organization_id,`
+                        : sql``
+                    }
                          relationship_status, assignment_status,
                          training_language`;
                     let audienceValues = sql`trim(ui.add_audience_name),
                          nullif(trim(ui.add_audience_description), ''),
                          nullif(trim(ui.add_audience_worker_type), ''),
                          nullif(trim(ui.add_audience_job_profile_id), '')::bigint,
-                         nullif(trim(ui.add_audience_employer_organization_id), '')::bigint,
-                         nullif(trim(ui.add_audience_host_organization_id), '')::bigint,
+                         ${
+                      workforce.organizationsTable
+                        ? sql`nullif(trim(ui.add_audience_employer_organization_id), '')::bigint,
+                         nullif(trim(ui.add_audience_host_organization_id), '')::bigint,`
+                        : sql``
+                    }
                          nullif(trim(ui.add_audience_relationship_status), ''),
                          nullif(trim(ui.add_audience_assignment_status), ''),
                          nullif(ui.add_audience_language, '')`;

@@ -23,13 +23,17 @@ deleting them.
 import { sendGrid } from "services/sendgrid";
 ```
 
-To customize the API key:
+To use a different API key, pass the **name** of another static secret.
+Unlike HubSpot and Calendly, whose options take the secret value, SendGrid's
+`apiKey` option is a secret name; the client reads it with `getStaticSecret`
+when it builds the `Authorization` header:
 
 ```ts
 import { SendGrid } from "services/sendgrid";
+import { sql } from "std/sql_utils";
 
 const altSendGrid = new SendGrid({
-  apiKey: sql.lit`other_sendgrid_api_key`,
+  apiKey: sql.lit`other_sendgrid_api_key`, // static secret name, not the key
 });
 ```
 
@@ -50,6 +54,9 @@ sendGrid.contacts.addContacts({ emailTableName: "staged_emails" })(s);
 sendGrid.contacts.deleteContacts({ contactIdTableName: "staged_contact_ids" })(s);
 ```
 
+Each helper also accepts `optIn`; see
+[External-Service Opt-In](./solution_services.md#external-service-opt-in).
+
 Reusable table definitions for the staging tables ship as `addedContactsTable`
 and `deletedContactsTable` (pass to `s.defTable(...)`).
 
@@ -60,5 +67,5 @@ and `deletedContactsTable` (pass to `s.defTable(...)`).
 
 ## Related
 
-- [Static secrets block](../blocks/static_secrets.md)
+- Store API keys as server-side static secrets.
 - [Outbox patterns](../concepts/outbox.md) — for transactional email delivery

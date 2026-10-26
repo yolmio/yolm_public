@@ -91,16 +91,23 @@ export interface Pipeline {
 }
 
 export interface PipelineStage {
-  source?: string;
+  source?: string | PipelineStageSource;
   name?: string;
   dependencies?: string[];
   after?: string | string[];
   where?: Sql;
-  process: GeneralServerStatement[];
+  process?: GeneralServerStatement[];
+  processBatch?: GeneralServerStatement[];
+  /** Query output columns whose equal key tuples must be delivered in one batch. */
+  keepTogetherBy?: string[];
   /** If true, process batches within this stage in parallel using multiple threads. */
   parallelize?: boolean;
   checkpointAfter?: boolean;
 }
+
+export type PipelineStageSource =
+  | { type: "Table"; table: string }
+  | { type: "Query"; query: Sql };
 
 export type ReactorMode = "Batch" | "PerRecord";
 
@@ -359,6 +366,9 @@ export interface ScheduledProcedure {
 
 export type StoredProcedureTransactionMode = "caller" | "standalone";
 
+/** A procedure callable only through a checked RunJavascript tool binding. */
+export type StoredProcedureInvocationKind = "ordinary" | "toolEntry";
+
 export interface StoredProcedureScalarField {
   name: string;
   type: FieldType;
@@ -373,6 +383,8 @@ export interface StoredProcedureFieldSet {
 export interface StoredProcedure {
   name: string;
   transaction?: StoredProcedureTransactionMode;
+  /** Omitted (or `ordinary`) procedures cannot be registered as JS tools. */
+  invocationKind?: StoredProcedureInvocationKind;
   inputScalars?: StoredProcedureScalarField[];
   inputRecords?: StoredProcedureFieldSet[];
   inputTables?: StoredProcedureFieldSet[];
@@ -420,6 +432,13 @@ export interface ModifyStatement {
 /** Throws an error in the procedure, error will be of type `thrown_error` */
 export interface ThrowStatement {
   t: "Throw";
+  message: SqlExpression;
+  description?: SqlExpression;
+}
+
+/** Expected server rejection; requires runtime validation-error support. */
+export interface ValidationErrorStatement {
+  t: "ValidationError";
   message: SqlExpression;
   description?: SqlExpression;
 }
@@ -2428,6 +2447,8 @@ export interface RunJavascriptStatement {
   script: SqlExpression;
   /** Optional tools that the JavaScript can call. */
   tools?: RunJavascriptTool[];
+  /** Required common policy for procedure-backed tools. */
+  procedureToolPolicy?: ProcedureToolPolicy;
   /** Optional sandbox configuration for security and resource limits. */
   sandbox?: RunJavascriptSandbox;
   /** Optional scalar to store the result. */
@@ -2446,13 +2467,37 @@ export interface RunJavascriptStatement {
   includeLibs?: SqlExpression;
 }
 
+export type ProcedureToolInputBinding =
+  | { kind: "normalizedArguments" }
+  | { kind: "trustedHostScalar"; scalar: string }
+  | { kind: "policyOutput"; scalar: string };
+
+export interface ProcedureToolStateOutput {
+  outputScalar: string;
+  stateScalar: string;
+}
+
+/** A metadata-only binding to a checked `toolEntry` stored procedure. */
 export interface RunJavascriptTool {
-  /** The name of the tool. */
   name: string;
-  /** Maximum time to await one call before the tool is cancelled. */
   timeoutMs?: number;
-  /** The statements to execute when the tool is called. */
-  statements: GeneralServerStatement[];
+  implementation: "procedure";
+  procedure: string;
+  inputBindings: Record<string, ProcedureToolInputBinding>;
+  stateOutputs: ProcedureToolStateOutput[];
+  policyMetadataJson: string;
+  statements?: never;
+}
+
+export type ProcedureToolPolicyInputBinding =
+  | { kind: "rawArguments" }
+  | { kind: "toolMetadata" }
+  | { kind: "trustedHostScalar"; scalar: string };
+
+export interface ProcedureToolPolicy {
+  procedure: string;
+  inputBindings: Record<string, ProcedureToolPolicyInputBinding>;
+  outputBindings: Record<string, string>;
 }
 
 export interface RunJavascriptSandbox {
@@ -2591,6 +2636,8 @@ export interface RemoveFilesStatement {
 export interface CallStoredProcedureStatement {
   t: "CallStoredProcedure";
   name: string;
+  /** Skip JIT prewarming for a bounded static dispatcher child call. */
+  prewarm?: "never";
   inputScalars?: Record<string, SqlExpression>;
   inputRecords?: Record<string, string>;
   inputTables?: Record<string, string>;
@@ -2601,6 +2648,7 @@ export interface CallStoredProcedureStatement {
 
 export type GeneralServerBaseStatement =
   | BaseStatement
+  | ValidationErrorStatement
   | SetCurrentUserStatement
   | SetContextStatement
   | SleepStatement
@@ -3208,11 +3256,23 @@ export interface QueryParamsNode {
   children: Node;
 }
 
+/**
+ * How writes to a query param update browser history: `"replace"` (default)
+ * updates the current entry in place; `"push"` adds an entry so the browser's
+ * Back button steps through changes.
+ */
+export type QueryParamHistory = "replace" | "push";
+
 export interface QueryParam {
   name: string;
   default?: SqlExpression;
   type: FieldType;
   allowNoRead?: boolean;
+  /**
+   * History behavior for writes to this param (`SetScalar`, bound inputs, and
+   * `SetQueryParam` without an explicit `replace`). Defaults to `"replace"`.
+   */
+  history?: QueryParamHistory;
 }
 
 export interface DataGridNode {
@@ -3631,6 +3691,7 @@ export interface FlushReactorsStatement {
 }
 
 export type TestStatement =
+  | ValidationErrorStatement
   | IfStatement<TestStatement>
   | WhileStatement<TestStatement>
   | BlockStatement<TestStatement>

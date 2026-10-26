@@ -13,6 +13,11 @@ export interface TenantMcpOptions {
   settingsPath: string;
   permission: (user: Sql) => Sql;
   capabilities: (user: Sql) => Sql;
+  /**
+   * Display labels for capability names stored on connections. When set, the
+   * settings page lists each assistant's capabilities by these labels.
+   */
+  capabilityLabels?: Record<string, string>;
 }
 let initialized = false;
 /** All new tables are additive. Credentials are stored as SHA-256 hashes. */
@@ -97,6 +102,28 @@ export const mcpHash = (value: Sql) =>
 export const mcpGatewayHash = (value: Sql) =>
   sql`bytes.to_hex(crypto.sha256(${value}))`;
 export const mcpRandom = () => sql`bytes.to_hex(crypto.random_bytes(32))`;
+
+const loopbackRedirectPrefix =
+  "(?i)^http://(127[.]0[.]0[.]1|\\[::1\\]|localhost)(:[0-9]{1,5})?";
+/**
+ * Clients choose their own callbacks (HTTPS on any host, native loopback, or
+ * private-use app schemes); only unsafe or malformed URIs are refused. Consent
+ * navigates to the registered URI, so script-capable schemes must never pass.
+ */
+const mcpRedirectUriRejected = (uri: Sql) =>
+  sql`length(${uri}) > 2048 or position('#' in ${uri}) > 0 or regex.is_match(${uri}, '[\\s\\x00-\\x1f\\x7f]') or not regex.is_match(${uri}, '^[A-Za-z][A-Za-z0-9+.-]*:.') or regex.is_match(${uri}, '(?i)^(javascript|data|file|blob|about|vbscript):') or regex.is_match(${uri}, '^[A-Za-z][A-Za-z0-9+.-]*://[^/?]*@') or (regex.is_match(${uri}, '(?i)^http:') and not regex.is_match(${uri}, ${
+    sql.lit(`${loopbackRedirectPrefix}([/?]|$)`)
+  })) or (regex.is_match(${uri}, '(?i)^https:') and not regex.is_match(${uri}, '(?i)^https://[^/?]+([/?]|$)'))`;
+/**
+ * Loopback callback without its port, or null otherwise. Native clients bind
+ * ephemeral ports, so any port matches (RFC 8252 §7.3).
+ */
+const mcpLoopbackRedirect = (uri: Sql) =>
+  sql`case when regex.is_match(${uri}, ${
+    sql.lit(`${loopbackRedirectPrefix}([/?]|$)`)
+  }) then 'http://' || lower(regex.capture(${uri}, ${
+    sql.lit(loopbackRedirectPrefix)
+  }, 1)) || regex.replace(${uri}, ${sql.lit(loopbackRedirectPrefix)}, '') end`;
 
 export function mcpRequestOrigin(
   s: EndpointStatements,
@@ -659,7 +686,9 @@ export function registerMcpOAuth(opts: TenantMcpOptions) {
         (s) => oauthError(s, "invalid_client_metadata"),
       );
       s.if(
-        sql`exists(select 1 from json.array_each(registration->'redirect_uris') r where json_typeof(r.value) != 'string' or length(r.value::string) > 2048 or not regex.is_match(r.value::string, '^(https://[a-zA-Z0-9.-]+(:[0-9]+)?/|http://(127[.]0[.]0[.]1|localhost)(:[0-9]+)?/)[^#]*$'))`,
+        sql`exists(select 1 from json.array_each(registration->'redirect_uris') r where json_typeof(r.value) != 'string' or ${
+          mcpRedirectUriRejected(sql`r.value::string`)
+        })`,
         (s) => oauthError(s, "invalid_redirect_uri"),
       );
       oauthAdmission(s, (s) => {
@@ -714,7 +743,11 @@ export function registerMcpOAuth(opts: TenantMcpOptions) {
       );
       // Qualify the persisted client_id; request parameters occupy procedure scope.
       s.if(
-        sql`oauth_client.id is null or not (oauth_client.redirect_uris @> json_build_array(redirect_uri)) or response_type != 'code' or code_challenge_method != 'S256' or not regex.is_match(code_challenge, '^[A-Za-z0-9_-]{43}$') or resource != mcp_resource or exists(select 1 from string.split(scope, ' ') where value not in ('', ${
+        sql`oauth_client.id is null or not (oauth_client.redirect_uris @> json_build_array(redirect_uri) or exists(select 1 from json.array_each(oauth_client.redirect_uris) r where ${
+          mcpLoopbackRedirect(sql`r.value::string`)
+        } = ${
+          mcpLoopbackRedirect(sql`redirect_uri`)
+        })) or response_type != 'code' or code_challenge_method != 'S256' or not regex.is_match(code_challenge, '^[A-Za-z0-9_-]{43}$') or resource != mcp_resource or exists(select 1 from string.split(scope, ' ') where value not in ('', ${
           sql.lit(mcpScope(opts.surface, "read"))
         }, ${sql.lit(mcpScope(opts.surface, "write"))}))`,
         (s) => oauthError(s, "invalid_request"),

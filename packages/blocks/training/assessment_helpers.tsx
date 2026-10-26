@@ -6,6 +6,55 @@ import type { IServerBaseStatements } from "std/statements";
 import type { TrainingBlockOpts } from "./types.ts";
 import { activeAssessmentVersionSql } from "./helpers";
 
+/** Review requirements snapshotted by both real attempts and temporary previews. */
+export function assessmentItemRequiresReviewSql(item: Sql) {
+  return sql`${item}.type = 'text_response'
+    or ${item}.requires_review or ${item}.reviewer_signature_required`;
+}
+
+/** Pure grading/required-input expressions shared by real attempts and preview UI state. */
+export function multipleChoiceExactMatchSql(grade: Sql) {
+  return sql`${grade}.correct_choice_count > 0
+    and ${grade}.correct_selected_count = ${grade}.correct_choice_count
+    and ${grade}.incorrect_selected_count = 0`;
+}
+
+export function multipleChoicePointsSql(grade: Sql) {
+  return sql`case
+    when ${multipleChoiceExactMatchSql(grade)} then ${grade}.item_points::double
+    when ${grade}.partial_credit and ${grade}.correct_choice_count > 0 then round(
+      ${grade}.item_points::double * greatest(
+        ${grade}.correct_selected_count - ${grade}.incorrect_selected_count, 0)::double
+        / ${grade}.correct_choice_count::double, 2)
+    else 0::double end`;
+}
+
+export function assessmentRequiredAnswerMissingSql(
+  item: Sql,
+  response: Sql,
+  hasChoice: Sql,
+) {
+  return sql`${item}.is_required and case ${item}.type::string
+    when 'multiple_choice' then not ${hasChoice}
+    when 'text_response' then nullif(trim(coalesce(${response}.text_response, '')), '') is null
+    when 'practical_observation' then ${item}.practical_result_required and ${response}.practical_result is null
+    when 'signature' then ${response}.signature_data is null
+      and nullif(trim(coalesce(${response}.signature_name, '')), '') is null
+    else false end`;
+}
+
+export function assessmentRequiredMetadataMissingSql(
+  field: Sql,
+  response: Sql,
+) {
+  return sql`${field}.required and case ${field}.type::string
+    when 'text' then nullif(trim(coalesce(${response}.text_value, '')), '') is null
+    when 'number' then ${response}.number_value is null
+    when 'date' then ${response}.date_value is null
+    when 'single_choice' then ${response}.selected_choice_id is null
+    else false end`;
+}
+
 /**
  * Assessment lifecycle helpers. These own every attempt state transition:
  * UI code must not hand-roll creates, submits, grading, reviews, or task
@@ -63,7 +112,10 @@ export function taskAssessmentIdSql(task: Sql) {
  * does not affect the derived state; enforce it at attempt creation.
  */
 function assessmentRetakeAvailableSql(task: Sql) {
-  const versionId = activeAssessmentVersionSql(taskAssessmentIdSql(task));
+  const versionId = activeAssessmentVersionSql(
+    taskAssessmentIdSql(task),
+    sql`(select training_language from db.training_assignments where id = ${task}.training_assignment_id)`,
+  );
   return sql`(
     select v.max_attempts is null
       or ${completedAssessmentAttemptCountSql(sql`${task}.id`)} < v.max_attempts
@@ -183,7 +235,10 @@ export function createOrResumeAssessmentAttempt<
                i.training_assessment_id,
                assessment.execution_mode,
                ${
-      activeAssessmentVersionSql(sql`i.training_assessment_id`)
+      activeAssessmentVersionSql(
+        sql`i.training_assessment_id`,
+        sql`assignment.training_language`,
+      )
     } as published_version_id
         from db.training_employee_tasks t
         join db.training_assignments assignment
@@ -205,7 +260,7 @@ export function createOrResumeAssessmentAttempt<
   );
   s.throwErrorIf(
     sql`assessment_attempt_task.assignment_status not in
-        ('pending', 'in_progress', 'validation_pending')
+        ('pending', 'in_progress')
       or assessment_attempt_task.employee_final_signed_at is not null`,
     sql.lit`Signed or completed training assignments cannot be changed.`,
   );
@@ -282,9 +337,7 @@ export function createOrResumeAssessmentAttempt<
          max_points, include_in_score, requires_review)
       select assessment_attempt_id, item.id, item.points,
              item.include_in_score,
-             item.type = 'text_response'
-               or item.requires_review
-               or item.reviewer_signature_required
+             ${assessmentItemRequiresReviewSql(sql`item`)}
       from db.training_assessment_items item
       join db.training_assessment_sections section
         on section.id = item.training_assessment_section_id
@@ -321,7 +374,7 @@ function attemptEditableWhereSql(attemptId: Sql) {
       and att.status = 'in_progress'
       and task.status in ('assigned', 'in_progress')
       and assignment.status in
-        ('pending', 'in_progress', 'validation_pending')
+        ('pending', 'in_progress')
       and assignment.employee_final_signed_at is null
   )`;
 }
@@ -445,7 +498,11 @@ export function saveAssessmentResponseSql(args: {
     set ${assignments}
     where training_assessment_attempt_id = ${args.attemptId}
       and training_assessment_item_id = ${args.itemId}
-      and ${attemptEditableWhereSql(args.attemptId)}
+      and ${
+    attemptEditableWhereSql(
+      sql`training_assessment_responses.training_assessment_attempt_id`,
+    )
+  }
   `;
 }
 
@@ -502,7 +559,11 @@ export function saveAssessmentMetadataResponseSql(args: {
     set ${assignments}
     where training_assessment_attempt_id = ${args.attemptId}
       and training_assessment_metadata_field_id = ${args.fieldId}
-      and ${attemptEditableWhereSql(args.attemptId)}
+      and ${
+    attemptEditableWhereSql(
+      sql`training_assessment_metadata_responses.training_assessment_attempt_id`,
+    )
+  }
       and (
         ${args.selectedChoiceId ?? sql`null`} is null
         or exists (
@@ -640,24 +701,8 @@ function autoGradeMultipleChoiceStatements<
     "assessment_mc_scores",
     sql`
       select g.response_id,
-             g.correct_choice_count > 0
-               and g.correct_selected_count = g.correct_choice_count
-               and g.incorrect_selected_count = 0 as exact_match,
-             case
-               when g.correct_choice_count > 0
-                 and g.correct_selected_count = g.correct_choice_count
-                 and g.incorrect_selected_count = 0
-               then g.item_points::double
-               when g.partial_credit and g.correct_choice_count > 0
-               then round(
-                 g.item_points::double
-                   * greatest(
-                     g.correct_selected_count - g.incorrect_selected_count,
-                     0)::double
-                   / g.correct_choice_count::double,
-                 2)
-               else 0::double
-             end as awarded
+             ${multipleChoiceExactMatchSql(sql`g`)} as exact_match,
+             ${multipleChoicePointsSql(sql`g`)} as awarded
       from assessment_mc_grades g
     `,
   );
@@ -858,7 +903,7 @@ export function submitAssessmentAttempt<
   s.throwErrorIf(
     sql`assessment_submit_attempt.task_status not in ('assigned', 'in_progress')
       or assessment_submit_attempt.assignment_status not in
-        ('pending', 'in_progress', 'validation_pending')
+        ('pending', 'in_progress')
       or assessment_submit_attempt.employee_final_signed_at is not null`,
     sql.lit`Signed or completed training assignments cannot be changed.`,
   );
@@ -869,22 +914,16 @@ export function submitAssessmentAttempt<
       join db.training_assessment_items item
         on item.id = r.training_assessment_item_id
       where r.training_assessment_attempt_id = assessment_submit_attempt.id
-        and item.is_required
-        and case item.type::string
-          when 'multiple_choice' then not exists (
-            select 1
-            from db.training_assessment_response_selected_choices sc
-            where sc.training_assessment_response_id = r.id
-          )
-          when 'text_response' then
-            nullif(trim(coalesce(r.text_response, '')), '') is null
-          when 'practical_observation' then
-            item.practical_result_required and r.practical_result is null
-          when 'signature' then
-            r.signature_data is null
-            and nullif(trim(coalesce(r.signature_name, '')), '') is null
-          else false
-        end
+        and ${
+      assessmentRequiredAnswerMissingSql(
+        sql`item`,
+        sql`r`,
+        sql`exists (
+          select 1 from db.training_assessment_response_selected_choices sc
+          where sc.training_assessment_response_id = r.id
+        )`,
+      )
+    }
     )`,
     sql.lit`Every required question needs an answer before submitting.`,
   );
@@ -895,15 +934,7 @@ export function submitAssessmentAttempt<
       join db.training_assessment_metadata_fields field
         on field.id = r.training_assessment_metadata_field_id
       where r.training_assessment_attempt_id = assessment_submit_attempt.id
-        and field.required
-        and case field.type::string
-          when 'text' then
-            nullif(trim(coalesce(r.text_value, '')), '') is null
-          when 'number' then r.number_value is null
-          when 'date' then r.date_value is null
-          when 'single_choice' then r.selected_choice_id is null
-          else false
-        end
+        and ${assessmentRequiredMetadataMissingSql(sql`field`, sql`r`)}
     )`,
     sql.lit`Every required assessment detail needs a value before submitting.`,
   );
@@ -1111,7 +1142,7 @@ export function reviewAssessmentAttempt<
   s.throwErrorIf(
     sql`assessment_review_attempt.task_status not in ('assigned', 'in_progress')
       or assessment_review_attempt.assignment_status not in
-        ('pending', 'in_progress', 'validation_pending')`,
+        ('pending', 'in_progress')`,
     sql.lit`This assessment attempt is no longer active.`,
   );
   s.throwErrorIf(
@@ -1275,7 +1306,7 @@ export function reviewAssessmentResponse<
   s.throwErrorIf(
     sql`assessment_review_response.task_status not in ('assigned', 'in_progress')
       or assessment_review_response.assignment_status not in
-        ('pending', 'in_progress', 'validation_pending')
+        ('pending', 'in_progress')
       or assessment_review_response.employee_final_signed_at is not null`,
     sql.lit`This assessment response is no longer active.`,
   );

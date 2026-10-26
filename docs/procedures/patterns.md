@@ -10,6 +10,7 @@ tags:
 related:
   - procedures/overview.md
   - procedures/server_statements.md
+  - procedures/occ.md
   - sql/query_planning.md
 ---
 
@@ -20,12 +21,15 @@ related:
 ```typescript
 function handleCreateUser(s: UiServerStatements, name: StringExpr) {
   s.startTransaction();
-  s.modify(sql`INSERT INTO users (name) VALUES (${name})`);
+  s.modify(sql`insert into db.users (name) values (${name})`);
   s.commitTransaction();
 }
 ```
 
 ## Fast, Low-Conflict Transactions
+
+Read [OCC and transaction patterns](occ.md) for the runtime's read dependencies,
+replay boundaries, generated-ID rules, and validation requirements.
 
 Yolm uses optimistic concurrency control (OCC). Database reads performed after
 `startTransaction()` become dependencies that are checked at commit. If a
@@ -80,9 +84,10 @@ whole predicate, such as proving that no matching row exists or removing every
 matching row as of commit.
 
 Keep requests, waits, parsing, and other slow work outside the transaction.
-For retryable API or job inputs, use a stable idempotency key backed by a unique
-constraint (or another durable deduplication record); OCC protects transaction
-atomicity, but it does not make two separate requests the same operation.
+When a caller can redeliver the same operation (partner retries, webhooks), use
+a stable idempotency key backed by a unique constraint; OCC protects transaction
+atomicity, but it does not make two separate requests the same operation. A
+natural business key, or a reactor keyed on missing output, often suffices.
 
 ## Error Handling Pattern
 
@@ -90,7 +95,7 @@ atomicity, but it does not make two separate requests the same operation.
 s.try({
   body: s => {
     s.startTransaction();
-    s.modify(sql`INSERT INTO users (name) VALUES ('John')`);
+    s.modify(sql`insert into db.users (name) values ('John')`);
     s.commitTransaction();
   },
   errorName: "db_error",
@@ -99,30 +104,6 @@ s.try({
     s.setScalar("ui.error", sql.lit`Failed to create user`);
   }
 });
-```
-
-## DOM Event Handling Pattern
-
-```typescript
-function handleEvent(s: DomStatements) {
-  s.if(sql`event.key = 'Enter'`, (s) => {
-    s.event.preventDefault();
-    s.tryServer({
-      body: (s) => {
-        s.startTransaction();
-        s.modify(sql`insert into db.todos (name) values (ui.input_value)`);
-        s.commitTransaction();
-      },
-      errorName: "server_error",
-      catch: (s) => {
-        s.debugExpr(sql`server_error.type`);
-        s.debugExpr(sql`server_error.message`);
-        s.setScalar("ui.error", sql.lit`Failed to insert todo`);
-      }
-    });
-    s.return();
-  });
-}
 ```
 
 ## Reusable Function Pattern (Macro-like)
@@ -177,7 +158,7 @@ function findOrderRates<T extends IServerBaseStatements>(
 
 ```typescript
 s.forEachTable("users", "user", (s) => {
-  s.debugExpr(sql`user.name`);
+  s.debugExpr(sql`user_record.name`);
 });
 ```
 
@@ -192,20 +173,15 @@ s.forEachTableWithOpts({
   where: sql`member_status = 'active' and not do_not_send_email`,
   cursorName: "member",
   body: (s) => {
-    s.debugExpr(sql`member.email`);
-
-    // Process each member
-    s.modify(sql`
-      insert into db.email_queue (email, subject, body)
-      values (
-        coalesce(member.notification_email, member.email),
-        'Reminder',
-        'Please complete your task'
-      )
-    `);
+    s.debugExpr(sql`coalesce(member.notification_email, member.email)`);
   },
 });
 ```
+
+Prefer one set-based `insert ... select` or `update` over per-row writes in a
+loop. To email each matching row, insert the rows into an
+[outbox table](../concepts/outbox.md) in one transaction instead of calling a
+provider or a bespoke queue table from the loop.
 
 ### With Ordering
 
@@ -214,10 +190,10 @@ s.defTable("orders", sql`select * from db.orders`);
 s.forEachTableWithOpts({
   table: "orders",
   where: sql`status = 'pending'`,
-  orderBy: sql`created_at desc`,
+  orderBy: sql`id desc`,
   cursorName: "order",
   body: (s) => {
-    // Process orders from newest to oldest
+    // Process orders, highest id first
   },
 });
 ```
@@ -261,10 +237,68 @@ mutations. Those primitives own their loading, error, duplicate-submission, and
 refetch behavior. Do not hand-roll a plain `Button`, `s.tryServer`, and UI
 loading/error scalars for ordinary form submissions or commands.
 
+```tsx
+<Form>
+  <Form.Insert table="todos">
+    <Form.Field field="title" />
+    <Form.ErrorAlert />
+    <Form.SubmitButton>Add Todo</Form.SubmitButton>
+  </Form.Insert>
+</Form>
+
+<ActionButton
+  action={(s) => {
+    s.startTransaction();
+    s.modify(sql`update db.todos set done = true where id = todo.id`);
+    s.commitTransaction();
+  }}
+>
+  Mark Done
+</ActionButton>
+```
+
+See [Form](../ui/form.md) and [ActionButton](../ui/action_button.md) for
+options.
+
 Use a raw event handler only when the flow is not represented by those
 primitives. If it performs server work, make pending state visible with
 `s.commitUiTreeChanges()`, handle the error and recovery path, and call
-`s.refetch()` when affected reads must refresh.
+`s.refetch()` when affected reads must refresh. For example, a keyboard
+shortcut has no button for `ActionButton` to own, so it uses `s.tryServer`
+with UI scalars declared in an enclosing `Data local`:
+
+```tsx
+<EventHandlers
+  document={{
+    keydown: (s) => {
+      s.if(
+        sql`event.key = 'Enter' and (event.ctrl_key or event.meta_key) and not marking_done`,
+        (s) => {
+          s.event.preventDefault();
+          s.setScalar("marking_done", sql.true);
+          s.setScalar("mark_error", sql.null);
+          s.commitUiTreeChanges();
+          s.tryServer({
+            body: (s) => {
+              s.startTransaction();
+              s.modify(sql`update db.todos set done = true where id = ${todoId}`);
+              s.commitTransaction();
+              s.refetch();
+            },
+            errorName: "server_error",
+            catch: (s) => {
+              s.setScalar("mark_error", sql`server_error.message`);
+            },
+            finally: (s) => {
+              s.setScalar("marking_done", sql.false);
+            },
+          });
+        },
+      );
+    },
+  }}
+/>
+```
 
 If the client-side continuation after `tryServer` needs a value computed on the
 server, declare a proc-local result scalar before `tryServer` and set it in the

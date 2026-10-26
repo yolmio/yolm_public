@@ -15,8 +15,8 @@ related:
 
 # Sidebar
 
-Use `Sidebar` for multi-section apps that need persistent navigation,
-collapsible menus, mobile drawer behavior, settings, and search shortcuts.
+`Sidebar` is the app shell for multi-section apps: persistent navigation,
+collapsible menus, a mobile drawer, settings, and search shortcuts.
 
 ```tsx
 import { Sidebar, useSidebar } from "components/sidebar";
@@ -24,9 +24,8 @@ import { Sidebar, useSidebar } from "components/sidebar";
 
 ## Shared Navigation Shell
 
-Use the opt-in `shell` provider option to give the shell ownership of navigation
-controls and account placement. Existing providers without `shell` keep their
-page-owned controls and collapse behavior.
+The opt-in `shell` provider option gives the shell ownership of navigation
+controls and account placement; without it, pages keep their own controls.
 
 ```tsx
 <Sidebar.Provider
@@ -38,58 +37,46 @@ page-owned controls and collapse behavior.
   }}
 >
   <Sidebar.Root variant="soft">
-    <Sidebar.Header title="Back Office" subtitle="Example Company" />
+    <Sidebar.Header title="Back Office" />
     <Sidebar.Content>{/* Existing navigation groups and links */}</Sidebar.Content>
   </Sidebar.Root>
   <Sidebar.MainScreen>{routes}</Sidebar.MainScreen>
 </Sidebar.Provider>
 ```
 
-The `account` callback runs at generation time and receives `compact` and
-`placement`; forward them to the shared `AccountMenu`. Keep user expressions,
-app permissions and URLs in the system's account wrapper.
-The shell inserts the full account menu at the bottom of the expanded sidebar
-and drawer, and compact menus in the desktop rail and mobile header. Remove
-existing account footers and mobile close controls when adopting it. Other
-footer content, such as clock-in actions, can remain.
+The `account` callback runs at generation time with `compact` and `placement`;
+forward them to the shared `AccountMenu`, and keep user expressions,
+permissions, and URLs in the system's account wrapper. The shell places the
+full account menu at the bottom of the expanded sidebar and drawer, and
+compact menus in the desktop rail and mobile header, so remove existing
+account footers and mobile close controls (other footer content can stay).
 
-The callback creates several menu instances; it is not a singleton. Load shared
-identity data above `Sidebar.Provider`, or let the account component load its own
-data. Scalars declared only in `Sidebar.Root.procedure` are unavailable to the
-mobile header in `Sidebar.MainScreen`. Keep app-specific navigation counts in
-the root's procedure.
+The callback creates several menu instances, not a singleton: load shared
+identity data above `Sidebar.Provider` or inside the account component.
+Scalars declared only in `Sidebar.Root.procedure` are not visible to the
+mobile header in `Sidebar.MainScreen`; keep only app-specific navigation
+counts there.
 
-`Sidebar.Header` renders branding from `shell.brand` and adds collapse and
-mobile-close buttons. Pass `title` and optionally `subtitle` for app-specific
-labels; omit them to show the brand name or full wordmark. Header children are
-rendered below the brand/control row, with automatic header height. Use them
-for client selectors or other context controls. Put compact header actions,
-such as Spark's search button, in `actions`; they appear beside the brand and
-before the shared collapse control.
+`Sidebar.Header` renders `shell.brand` plus collapse and mobile-close buttons.
+`title` / `subtitle` set app-specific labels (omit them to show the brand name
+or wordmark). Children render below the brand row (for client selectors and
+similar context controls); compact actions such as a search button go in
+`actions`, beside the brand and before the collapse control.
 
-`brand.logo` is a compact symbol, reused in the rail and mobile header.
-`brand.wordmark` optionally supplies a full logo for the expanded brand-only
-header; its aspect ratio is preserved. If no compact symbol is supplied, those
-small surfaces display `brand.initials` (or initials derived from `brand.name`)
-instead of shrinking a detailed wordmark into an unreadable square.
+`brand.logo` is a compact symbol reused in the rail and mobile header;
+`brand.wordmark` optionally supplies a full logo for the expanded header,
+aspect ratio preserved. Without a compact symbol, small surfaces show
+`brand.initials` (or initials derived from `brand.name`), e.g. a full logo
+plus `initials: "EC"`. No automatic cropping or asset lookup is performed.
 
-For example, an app can use an existing square logo or provide a compact symbol
-and full wordmark separately. A company can supply its full logo with
-`initials: "EC"` until a dedicated compact asset is available. No automatic
-cropping or asset lookup is performed.
-
-The 48 px desktop rail shows the brand logo, swapping to the sidebar icon on hover or keyboard focus.
-Mobile uses a header and a full drawer. Menu and submenu links dismiss the
-drawer, including same-route selections; route changes also dismiss it. The
-drawer closes when the viewport enters the desktop breakpoint. Its contents
-fit the available mobile width even when the desktop sidebar is wider.
-`Sidebar.Trigger` and `Sidebar.AutoTrigger` render nothing inside this shell,
-so shared pages do not create duplicate controls.
-
-The shell preserves keyboard-inset viewport sizing and honors reduced motion.
-It uses a single width transition, and replaces `collapsible="icon"` with the
-compact brand/account rail when enabled. Navigation state still uses the
-existing provider and cookie mechanism.
+- The 48 px desktop rail shows the brand logo, swapping to the sidebar icon on
+  hover or keyboard focus. With the shell, it replaces `collapsible="icon"`.
+- Mobile uses a header and a full-width drawer. Menu/submenu links (even to the
+  current route), route changes, and entering the desktop breakpoint close it.
+- `Sidebar.Trigger` and `Sidebar.AutoTrigger` render nothing inside the shell,
+  so shared pages do not duplicate controls.
+- The shell keeps keyboard-inset viewport sizing, honors reduced motion, and
+  still stores navigation state with the provider's cookie.
 
 ## Pinned Rail Shortcuts
 
@@ -108,14 +95,14 @@ tooltips, and an active-route indicator:
 </Sidebar.Root>
 ```
 
-The rail uses the root's data scope. Keep the rail focused on frequent tasks;
-the expanded sidebar remains the full navigation. Wrap permission-gated items
-in `Show`. Labels accept strings or translated SQL expressions. Links match
-exact paths by default; use `active` for sections with detail routes.
+The rail uses the root's data scope and holds frequent tasks only. Wrap
+permission-gated items in `Show`. `label` accepts a string or translated SQL;
+`href` matches the exact path by default, so pass an `active` expression for
+sections with detail routes.
 
-Render dialogs opened by shortcuts outside `Sidebar.Root`, in a common parent
-state scope. The rail is hidden on mobile and when expanded; putting a modal
-inside it would also hide the open modal during a viewport change.
+Render dialogs opened from the rail outside `Sidebar.Root`, in a common parent
+scope: the rail is hidden on mobile and when expanded, which would also hide
+an open modal inside it.
 
 ## Localization
 
@@ -125,10 +112,9 @@ as the fallback. This covers navigation buttons, tooltips, accessible labels,
 the apps heading, and logout. `AccountMenu.logoutLabel` remains an optional
 application override.
 
-Set the language in the scope containing the provider and render translated app
-titles and navigation items as usual. An app that sets this context from the
-person's preferred language needs no shell label props. Add shared chrome
-translations in `components/navigation_text` when supporting another language.
+Set the language in the scope containing the provider; no shell label props
+are needed. Add shared chrome translations for another language in
+`components/navigation_text`.
 
 ## Standard Layout
 
@@ -140,13 +126,8 @@ translations in `components/navigation_text` when supporting another language.
     </Sidebar.Header>
 
     <Sidebar.Content>
-      <Sidebar.Group label="Work">
+      <Sidebar.Group label="Work" requiredPermission="orders_view">
         <Sidebar.Menu>
-          <Sidebar.MenuItem>
-            <Sidebar.MenuButton href="/" icon="Dashboard">
-              Dashboard
-            </Sidebar.MenuButton>
-          </Sidebar.MenuItem>
           <Sidebar.MenuItem>
             <Sidebar.MenuButton href="/orders" icon="ListAlt">
               Orders
@@ -171,10 +152,9 @@ translations in `components/navigation_text` when supporting another language.
 </Sidebar.Provider>
 ```
 
-Use the exported TypeScript props for exact props.
-
-`Sidebar.Trigger` accepts the shared `Size` values: `"xs"`, `"sm"`, `"md"`,
-and `"lg"`.
+See the `Sidebar*Props` types in `components/sidebar` for exact props.
+`Sidebar.Trigger` takes `size` (`xs`-`lg`), `icon`, and `desktopWhen` (a SQL
+condition for showing the desktop trigger).
 
 ## Main Pieces
 
@@ -193,24 +173,11 @@ and `"lg"`.
 
 ## Navigation Rules
 
-- Use `href` on menu buttons for route navigation.
-- Use `requiredPermission` on groups/items for permission-gated navigation.
-- Use `collapsible="icon"` for dense admin apps where users benefit from an
-  icon rail.
-- Keep the route tree in `AppRoutes`/`Routes`; keep the sidebar focused on
-  navigation.
-
-```tsx
-<Sidebar.Group label="Admin" requiredPermission="users_manage">
-  <Sidebar.Menu>
-    <Sidebar.MenuItem>
-      <Sidebar.MenuButton href="/admin/users" icon="Group">
-        Users
-      </Sidebar.MenuButton>
-    </Sidebar.MenuItem>
-  </Sidebar.Menu>
-</Sidebar.Group>
-```
+- `href` on menu buttons navigates.
+- `requiredPermission` on `Sidebar.Group` / `Sidebar.MenuItem` hides the entry
+  unless the current user has that permission.
+- `collapsible="icon"` gives dense admin apps an icon rail.
+- Keep the route tree in `AppRoutes`; the sidebar only navigates.
 
 ## Collapsible Sections
 
@@ -230,24 +197,18 @@ and `"lg"`.
 
 ## Search And Settings
 
-Use search buttons for operational apps where users frequently jump to records:
+`Sidebar.SearchTableButton` (`searchDialog`) and
+`Sidebar.MultiTableSearchButton` (`multiTableSearchDialog`) open the
+[search dialogs](./search_dialogs.md); they take `Button` props and children.
 
-```tsx
-<Sidebar.SearchTableButton
-  searchDialog={{ table: "orders", displayValues: ["order_number"] }}
-  startIcon="Search"
->
-  Search Orders
-</Sidebar.SearchTableButton>
-```
-
-`Sidebar.Settings` is useful when the app supports color-mode changes or logout
-from the nav shell.
+`Sidebar.Settings` is a dropdown with a color-mode switch (cookie color
+schemes only) and logout (when a logout context is provided). It shows only
+while the sidebar or mobile drawer is open.
 
 ## Programmatic Control
 
-Use `useSidebar()` only when an event handler must open/close/refresh the
-sidebar directly.
+`useSidebar()` returns `sidebarToggle`, `sidebarOpen`, and `sidebarClose`
+statement helpers for event handlers.
 
 ```tsx
 const sidebar = useSidebar();
@@ -257,5 +218,6 @@ const sidebar = useSidebar();
 </Button>
 ```
 
-Use `Sidebar.refresh(s)` after a mutation if sidebar data is backed by a `Data`
-query watching `Sidebar.watchKeySql`.
+After a mutation that changes sidebar data (such as navigation counts), call
+`Sidebar.refresh(s)`; it refetches `Sidebar.Root` and any `Data` watching
+`Sidebar.watchKeySql`.

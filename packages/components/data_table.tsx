@@ -490,6 +490,7 @@ export interface RowDeleteHooks {
 
 interface EditAction extends RowEditHooks {
   type: "edit";
+  label?: string;
   ignoreFields?: string[];
   temporaryFields?: Node;
 }
@@ -525,10 +526,13 @@ export class ActionsBuilder {
 
   /** Add an edit action that opens an auto-generated update dialog for the row. */
   edit(
-    opts?: { ignoreFields?: string[]; temporaryFields?: Node } & RowEditHooks,
+    opts?:
+      & { label?: string; ignoreFields?: string[]; temporaryFields?: Node }
+      & RowEditHooks,
   ) {
     this.#actions.push({
       type: "edit",
+      label: opts?.label,
       ignoreFields: opts?.ignoreFields,
       temporaryFields: opts?.temporaryFields,
       beforeSubmitClient: opts?.beforeSubmitClient,
@@ -638,6 +642,8 @@ export interface DataTableProps {
   defaultCountQuery?: Sql;
   /** Enable a search bar. Pass `{ placeholder: "..." }` to customize the placeholder text. Pass a string array to restrict search to specific fields. */
   searchable?: boolean | string[] | { placeholder?: string };
+  /** Milliseconds to wait before applying search text. Defaults to `250`; pass `false` or `0` to search on every keystroke. */
+  searchDebounceMs?: number | false;
   /** Enable per-column filter controls. */
   filterable?: boolean;
   /** How per-column filters are presented. Default: `"inline"`. */
@@ -688,6 +694,8 @@ export interface DataTableProps {
   selectionTable?: string;
   /** Custom toolbar content rendered alongside the search bar and download button. */
   toolbar?: Node;
+  /** Custom toolbar content rendered immediately after the search bar. */
+  toolbarStart?: Node;
   /** Extra scalars available in the query context (e.g., from parent Data queryParams). Passed to the query analyzer so it can resolve unqualified scalar references. */
   analysisScalars?: Record<string, AnalyzeScalarType>;
   /** Minimum width (in px) for columns that don't have an explicit `width`. When set, the table becomes horizontally scrollable if columns exceed the container width. */
@@ -2256,9 +2264,11 @@ export function DataTable(props: DataTableProps) {
     scrollable = false,
     selectionTable: selectionTableProp,
     toolbar,
+    toolbarStart,
     analysisScalars,
     minColumnWidth,
     defaultFilters,
+    searchDebounceMs: searchDebounceMsProp,
   } = props;
   const controlSize: Size = size === "xs" ? "xs" : "sm";
 
@@ -2335,6 +2345,22 @@ export function DataTable(props: DataTableProps) {
 
   // Resolve search
   const enableSearch = !!searchable;
+  const searchDebounceMs = searchDebounceMsProp ?? 250;
+  if (
+    enableSearch &&
+    searchDebounceMs !== false &&
+    (!Number.isInteger(searchDebounceMs) ||
+      searchDebounceMs < 0 || searchDebounceMs > 2_147_483_647)
+  ) {
+    throw new Error(
+      "DataTable: searchDebounceMs must be an integer between 0 and 2147483647, or false",
+    );
+  }
+  const usesSearchDebounce = enableSearch && searchDebounceMs !== false &&
+    searchDebounceMs > 0;
+  const searchDebounceDelay = typeof searchDebounceMs === "number"
+    ? searchDebounceMs
+    : 0;
   const searchFields = Array.isArray(searchable) ? searchable : undefined;
   const searchConfig = enableSearch && !searchFields
     ? primaryTable?.getSearchConfig()
@@ -2382,7 +2408,7 @@ export function DataTable(props: DataTableProps) {
   // Determine if we need an outer Data for interactive state
   const needsOuterState = pageSize || enableSearch || enableSorting ||
     enableFiltering || selectable || hasEditableCols || minColumnWidth ||
-    enableDownload || toolbar;
+    enableDownload || toolbar || toolbarStart;
 
   // Build the base query with optional where clause
   let baseQuery = query;
@@ -2459,6 +2485,12 @@ export function DataTable(props: DataTableProps) {
           }
           if (enableSearch) {
             s.defScalar("dt_search", sql.lit``);
+            if (usesSearchDebounce) {
+              s.defScalar("dt_search_draft", sql.lit``);
+              s.defScalar("dt_search_debounce_handle", {
+                type: "BigUint",
+              });
+            }
           }
           if (enableSorting) {
             s.defScalar(
@@ -2529,7 +2561,8 @@ export function DataTable(props: DataTableProps) {
           }
         }}
       >
-        {(enableSearch || enableDownload || toolbar || filterControlsInPanel) &&
+        {(enableSearch || enableDownload || toolbar || toolbarStart ||
+          filterControlsInPanel) &&
           (
             <div
               className="flex items-center gap-2 p-2"
@@ -2541,17 +2574,60 @@ export function DataTable(props: DataTableProps) {
                 <Input
                   size={controlSize}
                   placeholder={searchPlaceholder}
-                  value={sql`dt_search`}
+                  value={usesSearchDebounce
+                    ? sql`dt_search_draft`
+                    : sql`dt_search`}
                   onInput={(s: DomStatements) => {
-                    s.setScalar("dt_search", sql`target_value`);
-                    if (pageSize) {
-                      s.setScalar("dt_page", sql`1`);
+                    if (usesSearchDebounce) {
+                      s.setScalar("dt_search_draft", sql`target_value`);
+                      cancelPendingSearch(s);
+                      s.if(
+                        sql`target_value = ''`,
+                        (s) => {
+                          applySearch(s, sql`target_value`);
+                        },
+                        (s) => {
+                          // Keep the delay on this input handler: later input
+                          // cancels it, and unmount cancels the attached task.
+                          s.setScalar(
+                            "dt_search_debounce_handle",
+                            sql`current_task()`,
+                          );
+                          s.commitUiTreeChanges();
+                          s.sleep(searchDebounceDelay);
+                          s.if(
+                            sql`dt_search_debounce_handle = current_task()`,
+                            (s) => {
+                              applySearch(s, sql`dt_search_draft`);
+                              s.setScalar(
+                                "dt_search_debounce_handle",
+                                sql.null,
+                              );
+                              s.commitUiTreeChanges();
+                            },
+                          );
+                        },
+                      );
+                    } else {
+                      applySearch(s, sql`target_value`);
                     }
                   }}
+                  onKeyDown={usesSearchDebounce
+                    ? (s: DomStatements) => {
+                      s.if(
+                        sql`event.key = 'Enter' and not event.is_composing and dt_search_debounce_handle is not null`,
+                        (s) => {
+                          cancelPendingSearch(s);
+                          applySearch(s, sql`dt_search_draft`);
+                        },
+                      );
+                    }
+                    : undefined}
                   startDecorator={<MaterialIcon icon="Search" />}
                   sx={{ flex: 1, maxWidth: 300 }}
                 />
               )}
+              {toolbarStart}
               <div sx={{ flex: 1 }} />
               {toolbar}
               {filterControlsInPanel && (
@@ -2636,6 +2712,20 @@ export function DataTable(props: DataTableProps) {
         )}
       </Data>
     );
+  }
+
+  function cancelPendingSearch(s: DomStatements) {
+    s.if(sql`dt_search_debounce_handle is not null`, (s) => {
+      s.cancelTask(sql`dt_search_debounce_handle`);
+    });
+    s.setScalar("dt_search_debounce_handle", sql.null);
+  }
+
+  function applySearch(s: DomStatements, search: Sql) {
+    s.setScalar("dt_search", search);
+    if (pageSize) {
+      s.setScalar("dt_page", sql`1`);
+    }
   }
 
   function buildDownloadQuery(): Sql {
@@ -3473,7 +3563,7 @@ export function DataTable(props: DataTableProps) {
                           action.onSubmitServerError!(s, ctx, err, rowId))
                         : undefined}
                     >
-                      Edit
+                      {action.label ?? "Edit"}
                     </AutoUpdateMenuItem>
                   );
                 case "delete":

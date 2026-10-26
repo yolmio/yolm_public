@@ -110,11 +110,23 @@ db.table("automation_mapping", (table) => {
 Document entire tables:
 
 ```typescript
-db.table("automation_internal_case_list_temps", (table) => {
-  table.description("Used for intermediate storage for LA jurisdiction only");
-  table.fk("orders").notNull();
-  table.string("case_number", 50);
+db.table("jurisdictions", (table) => {
+  table.description("Courts and counties we file and search orders in");
+  table.string("name", 100).notNull();
   // ...
+});
+```
+
+Do not create a persistent table for intermediate data that lives only while
+one procedure runs. Declare a procedure table instead; it is local to that
+execution and leaves nothing in the schema:
+
+```typescript
+s.defTable("case_list", {
+  fields: [
+    { name: "order_id", type: "BigUint", notNull: true },
+    { name: "case_number", type: { type: "String", maxLength: 50 } },
+  ],
 });
 ```
 

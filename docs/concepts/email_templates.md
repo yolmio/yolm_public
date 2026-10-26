@@ -12,32 +12,8 @@ tags:
 # Email Templates with MJML
 
 Yolm supports MJML (Mailjet Markup Language) for creating responsive email templates. MJML is converted to HTML that renders consistently across email clients.
-
-## Basic MJML Template
-
-```typescript
-const emailTemplate = sql.lit`
-<mjml>
-  <mj-head>
-    <mj-title>Welcome Email</mj-title>
-    <mj-attributes>
-      <mj-all font-family="Arial, sans-serif" />
-      <mj-text font-size="14px" line-height="1.5" />
-    </mj-attributes>
-  </mj-head>
-  <mj-body>
-    <mj-section>
-      <mj-column>
-        <mj-text>
-          Hello {{name}},<br><br>
-          Welcome to our platform!
-        </mj-text>
-      </mj-column>
-    </mj-section>
-  </mj-body>
-</mjml>
-`;
-```
+For MJML components and layout (`mj-button`, `mj-image`, multi-column
+sections, and so on), see the [MJML documentation](https://mjml.io/documentation/).
 
 ## Template with Variables
 
@@ -172,7 +148,7 @@ function setupNotificationVariables<T extends IServerBaseStatements>(
 ) {
   s.defScalar(
     "agent_name",
-    sql`(select su.name from db.sys_users su auto join db.agents where su.id = ${appointmentRecord}.sys_user_id)`
+    sql`(select agents.name from db.sys_users su auto join db.agents where su.id = ${appointmentRecord}.sys_user_id)`
   );
 
   s.defScalar(
@@ -252,65 +228,6 @@ const defaultEmailNotification: EmailNotificationConfig = {
 };
 ```
 
-## Common MJML Components
-
-### mj-text
-
-Basic text content:
-
-```xml
-<mj-text font-size="16px" color="#333333" font-weight="bold">
-  Welcome to our service!
-</mj-text>
-```
-
-### mj-button
-
-Call-to-action buttons:
-
-```xml
-<mj-button href="{{confirmation_url}}" background-color="#0066cc">
-  Confirm Appointment
-</mj-button>
-```
-
-### mj-image
-
-Images and logos:
-
-```xml
-<mj-image src="https://example.com/logo.png" alt="Company Logo" width="200px" />
-```
-
-### mj-divider
-
-Visual separators:
-
-```xml
-<mj-divider border-color="#cccccc" border-width="1px" />
-```
-
-### mj-spacer
-
-Vertical spacing:
-
-```xml
-<mj-spacer height="20px" />
-```
-
-## Multi-Column Layouts
-
-```xml
-<mj-section>
-  <mj-column width="50%">
-    <mj-text>Left column content</mj-text>
-  </mj-column>
-  <mj-column width="50%">
-    <mj-text>Right column content</mj-text>
-  </mj-column>
-</mj-section>
-```
-
 ## Conditional Content
 
 Use triple braces for optional HTML sections:
@@ -343,55 +260,10 @@ s.defScalar(
 
 ## Real-World Example: Appointment Notifications
 
-Complete example with confirmation, cancellation, and reschedule emails:
+Wire the template and variables into `SchedulingBlock`:
 
 ```typescript
-// Confirmation email
-const userConfirmationEmail = sql.lit`
-<mjml>
-  <mj-head>
-    <mj-title>Appointment Confirmation</mj-title>
-    <mj-attributes>
-      <mj-all font-family="Arial, sans-serif" />
-      <mj-text font-size="14px" line-height="1.5" />
-    </mj-attributes>
-  </mj-head>
-  <mj-body>
-    <mj-section>
-      <mj-column>
-        <mj-text>
-          Hi {{agent_name}},<br><br>
-          A new event has been scheduled.<br><br>
-          <b>Event Type:</b><br>{{event_type_name}}<br><br>
-          <b>Invitee:</b><br>{{invitee_name}}<br><br>
-          <b>Event Date/Time:</b><br>{{appointment_time}} - {{appointment_date}}<br><br>
-          {{{questions_and_answers}}}
-        </mj-text>
-      </mj-column>
-    </mj-section>
-  </mj-body>
-</mjml>`;
-
-// Cancellation email
-const userCancellationEmail = sql.lit`
-<mjml>
-  <mj-head>
-    <mj-title>Appointment Cancelled</mj-title>
-  </mj-head>
-  <mj-body>
-    <mj-section>
-      <mj-column>
-        <mj-text>
-          Hi {{agent_name}},<br><br>
-          The following event has been cancelled.<br><br>
-          <b>Event Type:</b><br>{{event_type_name}}<br><br>
-          <b>Invitee:</b><br>{{invitee_name}}<br><br>
-        </mj-text>
-      </mj-column>
-    </mj-section>
-  </mj-body>
-</mjml>`;
-
+// userConfirmationEmail is the template from "Template with Variables" above
 // Usage in SchedulingBlock
 system.addBlock(
   new SchedulingBlock({
@@ -412,7 +284,7 @@ system.addBlock(
     },
     userCancellationEmail: {
       from: `"Example App" <notifications@example.com>`,
-      mjml: userCancellationEmail,
+      mjml: userCancellationEmail, // a second template built the same way
       subject: sql.lit`Event Cancelled: {{invitee_name}}`,
       // ... other config
     },

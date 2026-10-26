@@ -77,6 +77,7 @@ export function saveTrainingDocumentDetailSettings(
   block: TrainingBlock,
   documentId: Sql,
 ) {
+  s.startTransaction();
   block.updateTrainingDocumentSettings(s, {
     documentId,
     requiresEssay: sql`ui.training_settings_requires_essay`,
@@ -89,6 +90,7 @@ export function saveTrainingDocumentDetailSettings(
     overdueRepeatEveryDays:
       sql`nullif(ui.training_settings_overdue_repeat, '')::bigint`,
   });
+  s.commitTransaction();
 }
 
 /** Training-owned settings rendered inside Documents' shared Settings tab. */

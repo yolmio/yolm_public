@@ -9,11 +9,11 @@ tags:
 
 # Advanced Form Patterns
 
-This document covers advanced Form usage beyond basic insert/update/merge operations. For fundamentals, see [Form Component](./form.md).
+Patterns beyond basic insert/update/merge. Start with
+[Form Component](./form.md); bare `Form.Field` elements below assume the `Form`
+sets `defaultFieldComponent`.
 
 ## Form.MergeMany with filterEmptyRecords
-
-`Form.MergeMany` handles multiple records that may or may not already exist in the database. Combined with `filterEmptyRecords`, it skips persisting rows where the user left all fields empty.
 
 ```tsx
 <Form.MergeMany
@@ -35,32 +35,28 @@ This document covers advanced Form usage beyond basic insert/update/merge operat
 </Form.MergeMany>
 ```
 
-### How filterEmptyRecords works
-
-- On submit, records where every user-editable field is null or empty are excluded from the database write.
-- Values provided via the `values` prop (like `member_id` and `week_end_date` above) do not count as "filled" — at least one field registered via `Form.Field` must have a non-empty value.
-- `defaultEmptyRecord` starts the form with one blank row so the user sees the fields immediately.
-- By default, `Form.MergeMany` deletes database rows in its merge scope when they are missing from the submitted form state. Set `deleteBehavior="initial"` on long-lived bulk forms to limit deletion to rows loaded when the form was initialized, preserving rows that other users add concurrently.
+- `filterEmptyRecords` excludes rows on submit whose registered `Form.Field`
+  values are all empty or still equal to their initial value. Columns supplied
+  through `values` do not make a row "filled".
+- `defaultEmptyRecord` starts with one blank row.
+- `Form.MergeMany` deletes rows in its merge scope that are missing from the
+  submitted state. On long-lived bulk forms set `deleteBehavior="initial"` to
+  delete only rows loaded at initialization, preserving rows other users add
+  concurrently.
 
 ## Nested Relations
 
-Form supports multi-level nesting of relations:
-
-Many-row merge relations use the same missing-row deletion behavior as
-`Form.MergeMany`. Set `deleteBehavior="initial"` when a long-lived nested form
-must preserve rows added concurrently after initialization.
+Relations nest to any depth. Many-row merge relations share `Form.MergeMany`'s
+missing-row deletion and accept the same `deleteBehavior`.
 
 ```tsx
-<Form>
+<Form defaultFieldComponent={LabelOnTopFormField}>
   <Form.Insert table="orders">
     <Form.Field field="customer_name" />
-
     <Form.Relation table="order_items">
       <Form.Each>
         <Form.Field field="product" />
         <Form.Field field="quantity" />
-
-        {/* Second level nesting */}
         <Form.Relation table="item_notes">
           <Form.Each fallback={
             <Form.AddCurrentTableButton variant="soft" size="sm" startIcon="Add">
@@ -70,7 +66,6 @@ must preserve rows added concurrently after initialization.
             <Form.Field field="note" />
           </Form.Each>
         </Form.Relation>
-
         <Form.DeleteRecordButton variant="plain" color="danger">
           Remove Item
         </Form.DeleteRecordButton>
@@ -79,24 +74,26 @@ must preserve rows added concurrently after initialization.
         Add Item
       </Form.AddCurrentTableButton>
     </Form.Relation>
-
     <Form.SubmitButton>Create Order</Form.SubmitButton>
   </Form.Insert>
 </Form>
 ```
 
-## Transaction Hooks — Real-World Examples
+## Transaction Hooks
 
-### Cross-field validation
+Hook order and the automatic post-commit `s.refetch()` are described in
+[Submit Hooks](./form.md#submit-hooks). Form state records are named
+`write_<singular table>` for single-row forms.
+
+Cross-field validation on the client (setting an error aborts the submit):
 
 ```tsx
 <Form
   beforeSubmitClient={(s, ctx) => {
-    // Validate that end date is after start date
-    const startField = ctx.record("write_event").field("start_date");
-    const endField = ctx.record("write_event").field("end_date");
-    s.if(sql`${endField.value} <= ${startField.value}`, (s) => {
-      endField.setError(s, sql.lit`End date must be after start date`);
+    const start = ctx.record("write_event").field("start_date");
+    const end = ctx.record("write_event").field("end_date");
+    s.if(sql`${end.value} <= ${start.value}`, (s) => {
+      end.setError(s, sql.lit`End date must be after start date`);
     });
   }}
 >
@@ -108,24 +105,13 @@ must preserve rows added concurrently after initialization.
 </Form>
 ```
 
-### Post-insert actions
+Server-side lookups and validation inside the transaction:
 
 ```tsx
 <Form
-  afterTransactionStart={(s, ctx) => {
-    // Look up the customer to set a computed field
+  afterTransactionStart={(s) => {
     s.defRecord("customer", sql`select * from db.customers where id = ui.write_order.customer_id`);
-  }}
-  beforeTransactionCommit={(s, ctx) => {
-    // After insert, use the generated ID for a related insert
-    s.modify(sql`
-      insert into db.audit_log (entity_type, entity_id, action, user_id)
-      values ('order', last_record_id(db.orders), 'created', current_user)
-    `);
-  }}
-  afterSubmitClientSuccess={(s) => {
-    s.refetch();
-    s.navigate(sql.lit`/orders`);
+    s.throwErrorIf(sql`customer.credit_hold`, sql.lit`Customer is on credit hold`);
   }}
 >
   {/* form content */}
@@ -133,8 +119,6 @@ must preserve rows added concurrently after initialization.
 ```
 
 ## Undo / Redo History
-
-Enable undo/redo with `keepHistory`:
 
 ```tsx
 <Form keepHistory historyThrottle={2000}>
@@ -148,14 +132,13 @@ Enable undo/redo with `keepHistory`:
       )}
     </Form.Field>
   </Form.Update>
-
-  {/* Undo/redo buttons use the surrounding FormICtx. */}
   <FormHistoryButtons />
 </Form>
 ```
 
-`FormHistoryButtons` is an application helper, not a built-in component. A
-custom helper can use the public context handles:
+`keepHistory` creates parallel `_write_history` tables and records changes made
+through field helpers, throttled by `historyThrottle` (default 3000 ms). There
+is no built-in undo control; read the `FormICtx` handles:
 
 ```tsx
 import { FormICtxKey } from "std/ictx";
@@ -176,56 +159,26 @@ function FormHistoryButtons() {
 }
 ```
 
-When `keepHistory` is true:
-- Parallel history tables are created with a `_write_history` suffix
-- Changes are recorded whenever you use field helper functions
-- History entries are throttled (default 3 seconds) to avoid recording every keystroke
-- Use `ctx.undo(s)` and `ctx.redo(s)` from FormContext (gate buttons with `ctx.canUndo` / `ctx.canRedo`)
-
 ## Shared Fields Pattern
 
-Use shared fields with `Form.InsertMany` when you want a single value to apply to all records:
+`shared` fields on `Form.InsertMany` hold one value applied to every row. They
+live in `ui.write_<table>_shared_fields`, outside `Form.Each`.
 
 ```tsx
-<Form>
+<Form defaultFieldComponent={LabelOnTopFormField}>
   <Form.InsertMany table="time_entries">
-    {/* Shared field: same date for all entries */}
-    <Form.Field field="date" shared>
-      {(field) => (
-        <Input
-          type="date"
-          value={field.value}
-          onInput={(s) => field.setValue(s, sql`target_value`)}
-        />
-      )}
-    </Form.Field>
-
-    {/* Per-record fields */}
+    <Form.Field field="date" shared />
     <Form.Each>
       <Form.Field field="project" />
       <Form.Field field="hours" />
-      <Form.Field field="description" />
     </Form.Each>
-
     <Form.AddCurrentTableButton startIcon="Add">Add Entry</Form.AddCurrentTableButton>
     <Form.SubmitButton>Save All Entries</Form.SubmitButton>
   </Form.InsertMany>
 </Form>
 ```
 
-Shared fields are stored in a separate UI state table: `write_{table}_shared_fields`.
-
 ## Before Unload Check
 
-Warn users before they navigate away with unsaved changes:
-
-```tsx
-<Form beforeUnloadCheck>
-  <Form.Update table="profile" where={sql`id = current_user`}>
-    <Form.Field field="bio" />
-    <Form.SubmitButton>Save</Form.SubmitButton>
-  </Form.Update>
-</Form>
-```
-
-This uses `ctx.stateHash()` to compare the current form state with the last saved state.
+`<Form beforeUnloadCheck>` prompts before leaving the page with unsaved changes,
+comparing `ctx.stateHash()` with the hash recorded at the last save.

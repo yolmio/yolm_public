@@ -1405,6 +1405,11 @@ export class DomStatements extends StatementsBase<yom.DomProcStatement> {
     return this;
   }
 
+  /**
+   * Writes a query param and updates the URL. `replace` overrides the param's
+   * declared `history` (default `"replace"`): true updates the current history
+   * entry, false adds one. A plain `setScalar` on a query param is equivalent.
+   */
   setQueryParam(param: string, value: Sql, replace?: Sql) {
     this.pushToBacking({
       t: "SetQueryParam",
@@ -1999,6 +2004,18 @@ function parseKey(key: string): BooleanExpr {
  * }
  */
 export interface IServerBaseStatements extends IStatementsBase {
+  /** Reject expected invalid input without recording an execution failure. */
+  validationError(message: Sql, description?: Sql): this;
+  validationErrorIf(
+    condition: BooleanExpr,
+    message: Sql,
+    description?: Sql,
+  ): this;
+  validationErrorUnless(
+    condition: BooleanExpr,
+    message: Sql,
+    description?: Sql,
+  ): this;
   setContext(context: Sql): this;
   /**
        Sleeps for the specified number of milliseconds, then continues the procedure.
@@ -2383,15 +2400,63 @@ export interface RenderTypstOpts {
   pdfOptions?: TypstPdfOptions | Sql;
 }
 
+declare const procedureToolRefBrand: unique symbol;
+
+/**
+ * Opaque reference minted only by `System.toolEntryProcedure`. Its private
+ * brand prevents a normal TypeScript caller from pairing an arbitrary stored
+ * procedure name with a JavaScript tool registration.
+ */
+export interface ProcedureToolRef {
+  readonly procedure: string;
+  readonly [procedureToolRefBrand]: void;
+}
+
+export type ProcedureToolInputBinding =
+  | { kind: "normalizedArguments" }
+  | { kind: "trustedHostScalar"; scalar: string }
+  | { kind: "policyOutput"; scalar: string };
+
+export interface ProcedureToolStateOutput {
+  outputScalar: string;
+  stateScalar: string;
+}
+
+export interface ProcedureJavascriptTool {
+  name: string;
+  timeoutMs?: number;
+  implementation: ProcedureToolRef;
+  inputBindings: Record<string, ProcedureToolInputBinding>;
+  stateOutputs?: ProcedureToolStateOutput[];
+  policyMetadataJson: string;
+  /** Procedure-backed tools never carry an inline JavaScript body. */
+  statements?: never;
+}
+
+export type JavascriptTool = ProcedureJavascriptTool;
+
+export type ProcedureToolPolicyInputBinding =
+  | { kind: "rawArguments" }
+  | { kind: "toolMetadata" }
+  | { kind: "trustedHostScalar"; scalar: string };
+
+/**
+ * Common, read-only application policy required by each procedure-backed
+ * JavaScript tool catalog. Native validation verifies its interface/effects.
+ */
+export interface ProcedureToolPolicy {
+  procedure: string;
+  inputBindings: Record<string, ProcedureToolPolicyInputBinding>;
+  outputBindings: Record<string, string>;
+}
+
 /** Options for running a sandboxed JavaScript snippet in a V8 isolate from a server proc. */
 export interface RunJavascriptOpts {
   script: Sql;
   /** Server procedures the script may invoke as named tools (the JS-to-Yolm bridge). */
-  tools?: {
-    name: string;
-    timeoutMs?: number;
-    statements: GeneralServerStatementsOrFn;
-  }[];
+  tools?: JavascriptTool[];
+  /** Required when the script exposes tools. */
+  procedureToolPolicy?: ProcedureToolPolicy;
   /** Scalar receiving the script's return value (JSON). */
   resultScalar?: string;
   /** Scalar receiving captured `console` output. */
@@ -2411,6 +2476,8 @@ export interface RunJavascriptOpts {
  * `input*` pass values in, `output*` receive results back.
  */
 export interface CallStoredProcedureOpts {
+  /** Skip JIT prewarming for a bounded static dispatcher child call. */
+  prewarm?: "never";
   inputScalars?: Record<string, AnyExpr>;
   inputRecords?: Record<string, string>;
   inputTables?: Record<string, string>;
@@ -2426,6 +2493,7 @@ function callStoredProcedureStatement(
   return {
     t: "CallStoredProcedure",
     name,
+    ...(opts.prewarm === undefined ? {} : { prewarm: opts.prewarm }),
     inputScalars: Object.fromEntries(
       Object.entries(opts.inputScalars ?? {}).map(([key, value]) => [
         key,
@@ -2450,8 +2518,43 @@ function callStoredProcedureStatement(
  * statements. Abstract — never instantiated directly.
  */
 export abstract class ServerStatementsBase<Statement extends object>
-  extends StatementsBase<Statement>
+  extends StatementsBase<Statement | yom.ValidationErrorStatement>
   implements IServerBaseStatements {
+  /**
+   * Expected input/business-rule rejection. Ordinary throwError and logError
+   * remain reportable. UI callers receive the existing thrown_error response.
+   * Requires the validation-error-capable runtime before model deployment.
+   */
+  validationError(message: Sql, description?: Sql): this {
+    this.pushToBacking({
+      t: "ValidationError",
+      message: sql.toYOM(message),
+      description: description === undefined
+        ? undefined
+        : sql.toYOM(description),
+    });
+    return this;
+  }
+
+  validationErrorIf(
+    condition: BooleanExpr,
+    message: Sql,
+    description?: Sql,
+  ): this {
+    return this.if(condition, (s) => s.validationError(message, description));
+  }
+
+  validationErrorUnless(
+    condition: BooleanExpr,
+    message: Sql,
+    description?: Sql,
+  ): this {
+    return this.unless(
+      condition,
+      (s) => s.validationError(message, description),
+    );
+  }
+
   /**
    * Set the ambient JSON request context (the SetContext statement). Subsequent
    * queries — including whitelisted views — can read it via the
@@ -3610,18 +3713,45 @@ export abstract class ServerStatementsBase<Statement extends object>
   }
 
   runJavascript(opts: RunJavascriptOpts): this {
-    this.pushToBacking({
+    if (opts.tools?.length) {
+      if (!opts.procedureToolPolicy) {
+        throw new Error(
+          "RunJavascript procedure tools require one procedureToolPolicy.",
+        );
+      }
+      const normalizedArgumentOutputs = Object.values(
+        opts.procedureToolPolicy.outputBindings,
+      ).filter((name) => name === "normalizedArguments");
+      if (normalizedArgumentOutputs.length !== 1) {
+        throw new Error(
+          "procedureToolPolicy must designate exactly one normalizedArguments output.",
+        );
+      }
+    } else if (opts.procedureToolPolicy) {
+      throw new Error(
+        "procedureToolPolicy is only valid with procedure-backed JavaScript tools.",
+      );
+    }
+    const statement: yom.RunJavascriptStatement = {
       t: "RunJavascript",
       script: sql.toYOM(opts.script),
-      tools: opts.tools?.map((t) => ({
-        name: t.name,
-        timeoutMs: t.timeoutMs,
-        statements: GeneralServerStatements.normalizeToArray(t.statements),
+      tools: opts.tools?.map((tool) => ({
+        name: tool.name,
+        timeoutMs: tool.timeoutMs,
+        implementation: "procedure" as const,
+        procedure: tool.implementation.procedure,
+        inputBindings: tool.inputBindings,
+        stateOutputs: tool.stateOutputs ?? [],
+        policyMetadataJson: tool.policyMetadataJson,
       })) ?? [],
+      ...(opts.procedureToolPolicy === undefined
+        ? {}
+        : { procedureToolPolicy: opts.procedureToolPolicy }),
       resultScalar: opts.resultScalar,
       consoleOutput: opts.consoleOutput,
       includeLibs: opts.includeLibs ? sql.toYOM(opts.includeLibs) : undefined,
-    } as yom.RunJavascriptStatement as any);
+    };
+    this.pushToBacking(statement as unknown as Statement);
     return this;
   }
 
@@ -3642,7 +3772,29 @@ export interface StudioCheckSystemOpts {
   validatedPathsScalar?: string;
   capabilities?: Sql;
   databaseMapping?: Sql;
+  /** Deprecated pipeline-only opt-in; prefer `checkCoverage.pipelines`. */
   checkPipelines?: Sql;
+  /**
+   * Source families to include in addition to the serving system. Omitted
+   * families keep the platform default, which excludes them from checking.
+   */
+  checkCoverage?: StudioCheckCoverage;
+  /**
+   * Receives the TypeScript check status as JSON:
+   * `{status: "not_run" | "completed" | "skipped", reason?}`.
+   */
+  typeCheckScalar?: string;
+}
+
+/**
+ * Optional source families included by {@link StudioApi.checkSystem}. A
+ * boolean fixes inclusion at generation time; a SQL boolean decides it at run
+ * time (true includes the family, false or null keeps the default exclusion).
+ */
+export interface StudioCheckCoverage {
+  tests?: boolean | Sql;
+  transforms?: boolean | Sql;
+  pipelines?: boolean | Sql;
 }
 
 export interface StudioValidateSavedFileOpts {
@@ -3679,6 +3831,21 @@ export interface StudioStartDeploySystemJobOpts {
   takeProductionSnapshot?: Sql;
   /** Caller-generated idempotency key retained across a lost admission response. */
   requestId?: Sql;
+  /**
+   * Live version the caller reviewed (-1 = nothing live). Admission rejects
+   * the deploy with `live_version_changed` when production has moved.
+   */
+  expectedLiveVersionId?: Sql;
+  /**
+   * Source hash of the candidate version the caller reviewed. Admission
+   * rejects the deploy with `source_changed` when the version's files changed.
+   */
+  expectedCandidateSourceHash?: Sql;
+  /**
+   * Source hash of the live deployed version the caller reviewed (empty when
+   * nothing was live). Admission rejects with `source_changed` on mismatch.
+   */
+  expectedLiveSourceHash?: Sql;
   deployRunIdScalar?: string;
 }
 
@@ -3690,6 +3857,10 @@ export interface StudioStartStudioOperationOpts {
   requestId: Sql;
   operation: Sql;
   executionRunIdScalar?: string;
+  /** Attribution; the platform binds userId to the authenticated requester. */
+  actor?: Sql;
+  /** Full admission response, including retryable rejection details. */
+  resultJsonScalar?: string;
 }
 
 /**
@@ -3725,6 +3896,14 @@ export interface StudioCheckDeployCompatibilityOpts {
   newColumnsScalar?: string;
   orphanedTablesScalar?: string;
   orphanedFieldsScalar?: string;
+  /** `[{table, field, kind}]` for an `automatic_backfill` result. */
+  automaticBackfillFieldsScalar?: string;
+  /**
+   * Structured schema differences against production:
+   * `[{kind, table, field, enum, value, renamed_from, from, to, effect, reason}]`
+   * where `from`/`to` are field types (`{type, not_null, enum?, table?, ...}`).
+   */
+  schemaChangesScalar?: string;
 }
 
 export interface StudioRunTransformOpts {
@@ -3804,8 +3983,12 @@ export interface StudioGetProductionPipelineCatalogOpts {
   resultScalar: string;
 }
 
-export interface StudioGetProductionPipelineHistoryOpts {
-  invocationId?: Sql;
+export interface StudioResolveProductionPipelineReviewOpts {
+  invocationId: Sql;
+  /** `effects_applied` or `no_effects`. */
+  resolution: Sql;
+  /** Required operator explanation recorded with the resolution. */
+  note: Sql;
   resultScalar: string;
 }
 
@@ -4130,9 +4313,29 @@ export class StudioApi {
       version: opts.version,
       capabilities: opts.capabilities,
       database_mapping: opts.databaseMapping,
+      check_coverage: opts.checkCoverage
+        ? sql.jsonBuildObject(
+          Object.fromEntries(
+            Object.entries(opts.checkCoverage).map(([family, included]) => [
+              family,
+              included instanceof Sql
+                ? sql`case when coalesce(${included}, false) then 'include' else 'exclude' end`
+                : included
+                ? "include"
+                : "exclude",
+            ]),
+          ),
+        )
+        : undefined,
       check_pipelines: opts.checkPipelines,
     });
     this.pushStudioCheckResult(r, opts);
+    if (opts.typeCheckScalar) {
+      this.pushScalar(
+        opts.typeCheckScalar,
+        sql`${new Sql(r)}->'type_check'`,
+      );
+    }
     return this;
   }
 
@@ -4178,6 +4381,9 @@ export class StudioApi {
       requested_deploy_type: opts.requestedDeployType,
       take_production_snapshot: opts.takeProductionSnapshot,
       request_id: opts.requestId,
+      expected_live_version_id: opts.expectedLiveVersionId,
+      expected_candidate_source_hash: opts.expectedCandidateSourceHash,
+      expected_live_source_hash: opts.expectedLiveSourceHash,
     });
     if (opts.deployRunIdScalar) {
       this.pushScalar(
@@ -4193,13 +4399,49 @@ export class StudioApi {
       type: sql.lit`StartStudioOperation`,
       request_id: opts.requestId,
       operation: opts.operation,
+      actor: opts.actor ?? sql`json_build_object('userId', current_user)`,
     });
+    if (opts.resultJsonScalar) {
+      this.pushScalar(opts.resultJsonScalar, sql`${new Sql(r)}`);
+    }
     if (opts.executionRunIdScalar) {
       this.pushScalar(
         opts.executionRunIdScalar,
         sql`(${new Sql(r)}->>'execution_run_id')::bigint`,
       );
     }
+    return this;
+  }
+
+  /** Start a server-side import of pinned Drive versions and return its job. */
+  importDriveFiles(
+    opts: { request: Sql; actor?: Sql; resultScalar: string },
+  ): this {
+    const r = this.studioRequest({
+      type: sql.lit`ImportDriveFiles`,
+      request: opts.request,
+      actor: opts.actor ?? sql`json_build_object('userId', current_user)`,
+    });
+    this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`);
+    return this;
+  }
+
+  /** Request interruption of a resident operation owned by this actor. */
+  cancelStudioOperation(
+    opts: { requestId: Sql; actor: Sql; resultScalar: string },
+  ): this {
+    const r = this.studioRequest({
+      type: sql.lit`CancelStudioOperation`,
+      request_id: opts.requestId,
+      actor: opts.actor,
+    });
+    this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`);
+    return this;
+  }
+
+  /** Delete a development database through the janitor's full cleanup path. */
+  deleteDevDatabase(database: Sql): this {
+    this.studioRequest({ type: sql.lit`DeleteDevDatabase`, database });
     return this;
   }
 
@@ -4281,6 +4523,19 @@ export class StudioApi {
       this.pushScalar(
         opts.orphanedFieldsScalar,
         sql`coalesce(${new Sql(r)}->'orphaned_fields', json_build_object())`,
+      );
+    }
+    if (opts.automaticBackfillFieldsScalar) {
+      const fields = sql`${new Sql(r)}->'automatic_backfill_fields'`;
+      this.pushScalar(
+        opts.automaticBackfillFieldsScalar,
+        sql`coalesce(${fields}, json_build_array())`,
+      );
+    }
+    if (opts.schemaChangesScalar) {
+      this.pushScalar(
+        opts.schemaChangesScalar,
+        sql`coalesce(${new Sql(r)}->'schema_changes', json_build_array())`,
       );
     }
     return this;
@@ -4426,14 +4681,20 @@ export class StudioApi {
     return this;
   }
 
-  getProductionPipelineHistory(
-    opts: StudioGetProductionPipelineHistoryOpts,
+  /**
+   * Record the operator's outcome for a `requires_review` production pipeline
+   * invocation, releasing production pipeline/transform admission.
+   */
+  resolveProductionPipelineReview(
+    opts: StudioResolveProductionPipelineReviewOpts,
   ): this {
     const r = this.studioRequest({
-      type: sql.lit`GetProductionPipelineHistory`,
+      type: sql.lit`ResolveProductionPipelineReview`,
       invocation_id: opts.invocationId,
+      resolution: opts.resolution,
+      note: opts.note,
     });
-    this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`);
+    this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`, true);
     return this;
   }
 
@@ -4471,6 +4732,16 @@ export class StudioApi {
       type: sql.lit`GetLiveMetrics`,
       limit: opts.limit,
       version: opts.version,
+    });
+    this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`);
+    return this;
+  }
+
+  /** Read ephemeral Studio diagnostics directly, without queueing Studio work. */
+  getStudioLive(opts: { query: Sql; resultScalar: string }): this {
+    const r = this.studioRequest({
+      type: sql.lit`GetStudioLive`,
+      query: opts.query,
     });
     this.pushScalar(opts.resultScalar, sql`${new Sql(r)}`);
     return this;

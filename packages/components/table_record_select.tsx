@@ -96,19 +96,22 @@ export function TableRecordSelect(props: TableRecordSelectProps) {
       );
       const selectColumns = [
         selectColumn(nameExpr, "label"),
-        selectColumn(sql`rank() over () - 1`, "index"),
         selectColumn(sql`id`),
         ...(selectInfo.extraSelectColumns ?? []),
         ...(props.extraSelectColumns ?? []),
       ];
       const selectPart = sql`select ${selectColumns}`;
+      // Number rows after the query's order by so keyboard navigation follows display order.
+      const withIndex = (query: Sql) =>
+        sql`select ordered_results.*, rank() over () - 1 as index from (${query}) as ordered_results`;
       const limit = selectInfo.limit ?? 50;
-      let emptyQuery =
-        sql`${selectPart} from ${tableModel.identWithDb} ${where} order by id desc limit ${limit}`;
+      let emptyQuery = withIndex(
+        sql`${selectPart} from ${tableModel.identWithDb} ${where} order by id desc limit ${limit}`,
+      );
       if (props.emptyQuery) {
-        emptyQuery = sql`${selectPart} ${props.emptyQuery}`;
+        emptyQuery = withIndex(sql`${selectPart} ${props.emptyQuery}`);
       } else if (selectInfo.emptyQuery) {
-        emptyQuery = sql`${selectPart} ${selectInfo.emptyQuery}`;
+        emptyQuery = withIndex(sql`${selectPart} ${selectInfo.emptyQuery}`);
       }
       const resetWatch = useOptionalICtx(FormICtxKey)?.resetKey;
       const initialTextWatch = [resetWatch, props.value, props.initialInputText]
@@ -231,11 +234,13 @@ export function TableRecordSelect(props: TableRecordSelectProps) {
 
                 s.modify(
                   sql`insert into ${resultTable}
-                    ${selectPart}
+                    ${
+                    withIndex(sql`${selectPart}
                     from ${tableModel.identWithDb}
                     where ${whereClause}
                     order by ${orderByExpr}, ${tableModel.primaryKeyIdent}
-                    limit ${limit}`,
+                    limit ${limit}`)
+                  }`,
                 );
               },
             });

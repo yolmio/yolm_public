@@ -3,15 +3,23 @@ import type {
   ControlledFileLifecycle,
   ControlledFilePublicationConfirmation,
 } from "blocks/drive/controlled_lifecycle";
+import { isVideoSource } from "blocks/drive/external_link";
 import type { ExternalLinkExtension } from "blocks/drive/external_link";
+import { NativeDocumentPage } from "blocks/drive/native_document";
 import type { NativeDocumentExtension } from "blocks/drive/native_document";
 import type { DriveBlockContract, DriveExtension } from "blocks/drive/types";
+import { fileViewerStateSql } from "blocks/drive/viewer_state_sql";
 import { Typography } from "components/typography";
 import { ActionButton } from "std/action_button";
 import { Data } from "std/data";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
-import type { ServerStatementsBase } from "std/statements";
+import type {
+  EndpointStatements,
+  GeneralServerStatements,
+  ServerStatementsBase,
+} from "std/statements";
+import { Show, useUniqueId } from "std/ui";
 import {
   DirectDocumentAssignmentPanel,
   initializeTrainingDocumentAssignmentState,
@@ -23,6 +31,7 @@ import {
 } from "./document_settings";
 import { trainingPermissions } from "./helpers";
 import type { TrainingBlock } from "./index.tsx";
+import { CourseStepDocument } from "./course_step_document";
 
 export interface TrainingDriveExtensionOpts {
   control: ControlledFileLifecycle;
@@ -91,6 +100,104 @@ export class TrainingDriveExtension implements DriveExtension {
     return this.config.control.revisionTable;
   }
 
+  /** Caller has authorized this exact Training version (a controlled revision). */
+  renderNativeDocument(props: {
+    versionId: Sql;
+    value: Sql;
+    pdfHref?: Sql;
+    imageSrcPrefixRewrite?: { prefix: Sql; replacement: Sql };
+  }) {
+    return (
+      <NativeDocumentPage
+        documents={this.config.nativeDocuments}
+        value={props.value}
+        controlledRevisionId={props.versionId}
+        fileVersionId={sql`(select file_version_id from db.controlled_file_revisions where id = ${props.versionId})`}
+        pdfHref={props.pdfHref}
+        imageSrcPrefixRewrite={props.imageSrcPrefixRewrite}
+        pageId={useUniqueId()}
+      />
+    );
+  }
+
+  /** Only call after Training's task/review authorization has succeeded. */
+  renderAuthorizedDocumentPdf(
+    s: GeneralServerStatements | EndpointStatements,
+    versionId: Sql,
+    intoBytes: string,
+  ) {
+    this.config.nativeDocuments.opts.renderAuthorizedPdf?.(s, {
+      controlledRevisionId: versionId,
+      fileVersionId:
+        sql`(select file_version_id from db.controlled_file_revisions where id = ${versionId})`,
+      intoBytes,
+    });
+  }
+
+  previewDocument(
+    documentId: Sql,
+    fileVersionId: Sql,
+    title: Sql,
+    revisionId: Sql,
+  ) {
+    const files = this.#requiredFiles();
+    const externalUrl = this.config.externalLinks
+      ? sql`external_link.url`
+      : sql`cast(null as string)`;
+    return (
+      <Data
+        procedure={(s) =>
+          s.defRecord(
+            "preview_document",
+            sql`select authorized.*, ${title} as title, native_content.rich_content,
+            ${externalUrl} as external_url
+            from (${
+              fileViewerStateSql(
+                files,
+                documentId,
+                fileVersionId,
+                sql`false`,
+                sql`true`,
+              )
+            }) authorized
+            left join db.${
+              sql.ref(this.config.nativeDocuments.contentTable)
+            } native_content
+              on native_content.file_version_id = authorized.file_version_id
+            ${
+              this.config.externalLinks
+                ? sql`left join db.${
+                  sql.ref(this.config.externalLinks.contentTable)
+                } external_link
+                  on external_link.file_version_id = authorized.file_version_id`
+                : sql``
+            }`,
+          )}
+      >
+        <Show
+          when={sql`preview_document.file_item_id is not null`}
+          fallback={
+            <Typography level="body-sm">
+              This document is unavailable.
+            </Typography>
+          }
+        >
+          <CourseStepDocument
+            document={sql`preview_document`}
+            content={this}
+            controlledRevisionId={revisionId}
+            language={sql`course_assignment.employee_language`}
+            fileHref={files.versionBlobUrl(
+              sql`preview_document.file_version_id`,
+              sql`preview_document.blob_hash`,
+            )}
+            externalHref={sql`preview_document.external_url`}
+          />
+        </Show>
+      </Data>
+    );
+  }
+
   validate(files: DriveBlockContract) {
     if (this.#files !== files) {
       throw new Error(
@@ -100,15 +207,16 @@ export class TrainingDriveExtension implements DriveExtension {
     const trainingSpaceTypes = files.spaceTypes.filter((type) =>
       type.extensions.includes(this)
     );
+    const externalLinks = this.config.externalLinks;
     if (
       trainingSpaceTypes.length === 0 ||
+      (externalLinks !== undefined &&
+        !trainingSpaceTypes.some((type) =>
+          type.extensions.includes(externalLinks)
+        )) ||
       trainingSpaceTypes.some((type) =>
         type.lifecycle !== this.config.control ||
-        !type.extensions.includes(this.config.nativeDocuments) ||
-        (
-          this.config.externalLinks !== undefined &&
-          !type.extensions.includes(this.config.externalLinks)
-        )
+        !type.extensions.includes(this.config.nativeDocuments)
       )
     ) {
       throw new Error(
@@ -117,12 +225,29 @@ export class TrainingDriveExtension implements DriveExtension {
     }
   }
 
+  canReadDocument(documentId: Sql, userId: Sql) {
+    const files = this.#requiredFiles();
+    return sql`exists (select 1 from db.file_items item where item.id = ${documentId}
+      and ${files.runtimeAccessSql(sql`item.file_space_id`, userId, "read")})`;
+  }
+
   trainingDocumentsQuery() {
     const files = this.#requiredFiles();
     return sql`
       select
         item.id,
         item.name as title,
+        ${
+      sql.caseWhen({
+        conditions: files.spaceTypes.filter((type) =>
+          type.extensions.includes(this)
+        ).map((type) => ({
+          condition: sql`space.space_type = ${sql.lit(type.name)}`,
+          expr: sql.lit(type.displayName ?? type.name),
+        })),
+        default: sql`space.name`,
+      })
+    } as source_name,
         item.trashed_at is null as is_active
       from db.file_items item
       join db.file_spaces space on space.id = item.file_space_id
@@ -221,6 +346,72 @@ export class TrainingDriveExtension implements DriveExtension {
         `
       ),
     );
+  }
+
+  /** Resolve live Company Files media without rewriting assignment evidence. */
+  courseSupportingDocumentDisplayVersionsQuery() {
+    return sql`
+      select snapshot.id, snapshot.training_employee_task_id,
+        snapshot.training_course_section_item_document_id,
+        case when ${
+      this.config.control.opts.publishOnUpload?.(sql`item.file_space_id`) ??
+        sql.false
+    } and (lower(version.content_type) like 'image/%'
+          or ${isVideoSource(sql`version.content_type`)})
+        then coalesce(${
+      this.resolveCourseSupportingDocumentVersion({
+        documentId: sql`item.id`,
+        assignmentLanguage: sql`assignment.training_language`,
+      })
+    }, snapshot.document_version_id)
+        else snapshot.document_version_id end as document_version_id
+      from db.training_task_item_documents snapshot
+      join db.training_employee_tasks task
+        on task.id = snapshot.training_employee_task_id
+      join db.training_assignments assignment
+        on assignment.id = task.training_assignment_id
+      join db.controlled_file_revisions revision
+        on revision.id = snapshot.document_version_id
+      join db.controlled_file_language_variants variant
+        on variant.id = revision.controlled_file_language_variant_id
+      join db.file_items item on item.id = variant.file_item_id
+      join db.file_versions version on version.id = revision.file_version_id
+    `;
+  }
+
+  /** Published media URLs remain readable after a newer version is selected. */
+  canReadCourseSupportingMediaVersion(args: {
+    taskId: Sql;
+    versionId: Sql;
+    language: Sql;
+  }) {
+    return sql`exists (
+      select 1 from db.training_task_item_documents snapshot
+      join db.controlled_file_revisions original
+        on original.id = snapshot.document_version_id
+      join db.controlled_file_language_variants original_variant
+        on original_variant.id = original.controlled_file_language_variant_id
+      join db.file_items item on item.id = original_variant.file_item_id
+      join db.controlled_file_language_variants variant
+        on variant.file_item_id = item.id
+      join db.controlled_file_revisions revision
+        on revision.controlled_file_language_variant_id = variant.id
+      join db.file_versions media_version on media_version.id = revision.file_version_id
+      where snapshot.training_employee_task_id = ${args.taskId}
+        and revision.id = ${args.versionId}
+        and revision.status in ('published', 'superseded')
+        and revision.published_at is not null
+        and revision.effective_on <= current_date()
+        and variant.language in (${args.language}, ${
+      sql.lit(this.opts.defaultLanguage)
+    })
+        and ${
+      this.config.control.opts.publishOnUpload?.(sql`item.file_space_id`) ??
+        sql.false
+    }
+        and (lower(media_version.content_type) like 'image/%'
+          or ${isVideoSource(sql`media_version.content_type`)})
+    )`;
   }
 
   trainingNativeImageQuery(args: {
@@ -356,59 +547,79 @@ export function DriveTrainingDocumentAdmin(props: {
 }) {
   const block = props.block;
   return (
-    <Data
-      local
-      procedure={(s) => {
-        s.defScalar(
-          "drive_training_document_id",
-          props.fileItemId,
-        );
-        initializeTrainingDocumentDetailState(
-          s,
-          sql`ui.drive_training_document_id`,
-        );
-        initializeTrainingDocumentAssignmentState(s, block);
-      }}
+    <AuthBlock.PermissionCheckAny
+      permissions={[
+        trainingPermissions.manageDocumentSettings,
+        trainingPermissions.assignTraining,
+      ]}
     >
-      <section className="space-y-4 rounded-xl border border-divider bg-surface p-5">
-        <div>
-          <Typography level="title-lg">Training</Typography>
-          <Typography level="body-sm" className="mt-1 text-secondary">
-            Configure who needs this controlled content and assign its exact
-            published revision.
-          </Typography>
-        </div>
-        <TrainingDocumentSettingsPanel />
-        <AuthBlock.PermissionCheck permission="can_manage_training_document_settings">
-          <div className="flex justify-end border-t border-divider pt-4">
-            <ActionButton
-              action={(s) => {
-                s.if(
-                  userHasPermission(
-                    sql.lit(
-                      trainingPermissions.manageDocumentSettings,
-                    ),
-                    sql`current_user`,
-                  ),
-                  (s) =>
-                    saveTrainingDocumentDetailSettings(
-                      s,
-                      block,
-                      sql`ui.drive_training_document_id`,
-                    ),
-                );
-              }}
-              successMessage="Training settings updated"
-            >
-              Save training settings
-            </ActionButton>
-          </div>
-        </AuthBlock.PermissionCheck>
-        <DirectDocumentAssignmentPanel
-          block={block}
-          documentId={sql`ui.drive_training_document_id`}
-        />
-      </section>
-    </Data>
+      <Data
+        procedure={(s) =>
+          s.defScalar(
+            "can_read_training_document",
+            block.opts.content.canReadDocument(
+              props.fileItemId,
+              sql`current_user`,
+            ),
+          )}
+      >
+        <Show when={sql`can_read_training_document`}>
+          <Data
+            local
+            procedure={(s) => {
+              s.defScalar(
+                "drive_training_document_id",
+                props.fileItemId,
+              );
+              initializeTrainingDocumentDetailState(
+                s,
+                sql`ui.drive_training_document_id`,
+              );
+              initializeTrainingDocumentAssignmentState(s, block);
+            }}
+          >
+            <section className="space-y-4 rounded-xl border border-divider bg-surface p-5">
+              <div>
+                <Typography level="title-lg">Training</Typography>
+                <Typography level="body-sm" className="mt-1 text-secondary">
+                  Configure who needs this controlled content and assign its
+                  exact published revision.
+                </Typography>
+              </div>
+              <TrainingDocumentSettingsPanel />
+              <AuthBlock.PermissionCheck permission="can_manage_training_document_settings">
+                <div className="flex justify-end border-t border-divider pt-4">
+                  <ActionButton
+                    action={(s) => {
+                      s.if(
+                        userHasPermission(
+                          sql.lit(
+                            trainingPermissions.manageDocumentSettings,
+                          ),
+                          sql`current_user`,
+                        ),
+                        (s) =>
+                          saveTrainingDocumentDetailSettings(
+                            s,
+                            block,
+                            sql`ui.drive_training_document_id`,
+                          ),
+                      );
+                    }}
+                    successMessage="Training settings updated"
+                  >
+                    Save training settings
+                  </ActionButton>
+                </div>
+              </AuthBlock.PermissionCheck>
+              <DirectDocumentAssignmentPanel
+                block={block}
+                documentId={sql`ui.drive_training_document_id`}
+              />
+            </section>
+          </Data>
+        </Show>
+      </Data>
+    </AuthBlock.PermissionCheckAny>
   );
 }

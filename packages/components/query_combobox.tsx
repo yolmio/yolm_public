@@ -90,6 +90,8 @@ const styles = createStyles({
 });
 
 interface QueryComboboxProps extends ComponentOpts<Size> {
+  /** Filter an already-loaded UI catalog in the browser; the query must not read db.*. */
+  local?: boolean;
   id?: Sql | string;
   error?: BooleanExpr;
   placeholder?: Sql | string;
@@ -230,6 +232,7 @@ export function QueryCombobox(props: QueryComboboxProps) {
       }}
     >
       <Data
+        local={props.local}
         pendingFallback={null}
         errorFallback={null}
         watch={mainWatch.filter((sql) => Boolean(sql)) as AnyExpr[]}
@@ -408,6 +411,9 @@ export function QueryCombobox(props: QueryComboboxProps) {
                       optionId(sql`ui.selected_index`),
                     );
                   }
+                  s.element(sql`ui.active_descendant`).scrollIntoView({
+                    block: sql.lit`nearest`,
+                  });
                   s.return();
                 });
                 s.if(sql`event.key = 'ArrowUp'`, (s) => {
@@ -422,7 +428,7 @@ export function QueryCombobox(props: QueryComboboxProps) {
                       when not exists (select index from ui.result) or (ui.selected_index = 0 and ${showingAddItem})
                           then null
                       when ui.selected_index is null or ui.selected_index = 0
-                          then (select count(*) from ui.result)
+                          then (select count(*) from ui.result) - 1
                       else ui.selected_index - 1
                   end`,
                     );
@@ -438,7 +444,7 @@ export function QueryCombobox(props: QueryComboboxProps) {
                       "ui.selected_index",
                       sql`case
                         when ui.selected_index is null or ui.selected_index = 0
-                            then (select count(*) from ui.result)
+                            then (select count(*) from ui.result) - 1
                         else ui.selected_index - 1
                     end`,
                     );
@@ -447,6 +453,9 @@ export function QueryCombobox(props: QueryComboboxProps) {
                       optionId(sql`ui.selected_index`),
                     );
                   }
+                  s.element(sql`ui.active_descendant`).scrollIntoView({
+                    block: sql.lit`nearest`,
+                  });
                   s.return();
                 });
                 s.setScalar("ui.active_descendant", sql.null);

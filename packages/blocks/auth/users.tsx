@@ -20,6 +20,7 @@ import { InlineRecordDisplay } from "components/inline_record_display";
 import { Typography } from "components/typography";
 import { CurrentRefetchICtxKey, FormICtxKey } from "std/ictx";
 import { Data } from "std/data";
+import { ActionButton } from "std/action_button";
 import { singularize } from "std/inflectors";
 import { buildSearchExpression } from "std/search_utils";
 import { sql } from "../../std/sql_utils";
@@ -43,7 +44,8 @@ import { RecordPage } from "pages/record_page";
 import { AuthBlock, getUserPermissions, userHasPermission } from "./index";
 import { PermissionFormEntries, PermissionListCard } from "./permissions";
 import { RoleSelector } from "./role_selector";
-import { accessRuleSourceLabel } from "./access_sources";
+import { accessRuleSourceHref, accessRuleSourceLabel } from "./access_sources";
+import { Link } from "components/link";
 import { UserRoles } from "./staff_roles";
 import { AccessCheck } from "./access_check";
 import {
@@ -163,7 +165,12 @@ function RuleManagedUserRoles() {
         s.defTable(
           "rule_managed_user_roles",
           sql`
-            select role.name as role_name,
+            select role.name as role_name, ${
+            accessRuleSourceHref(
+              sql`source.source`,
+              sql`source.source_record_id`,
+            )
+          } as source_href,
                    ${
             accessRuleSourceLabel(
               sql`source.source`,
@@ -202,7 +209,14 @@ function RuleManagedUserRoles() {
                 size="sm"
                 startIcon="RuleOutlined"
               >
-                {sql`sourced_role.source_label`}
+                <Show
+                  when={sql`sourced_role.source_href is not null`}
+                  fallback={sql`sourced_role.source_label`}
+                >
+                  <Link href={sql`sourced_role.source_href`}>
+                    {sql`sourced_role.source_label`}
+                  </Link>
+                </Show>
               </Chip>
             </div>
           </Each>
@@ -306,17 +320,6 @@ export function UsersList({
   backHomeButton,
   userFilter,
 }: UsersListProps) {
-  const permissionsEnum = system.enums.auth_permission;
-  const permissionDisplayCaseParts = permissionsEnum.valuesMap.values()
-    .map((p) =>
-      sql`when up.permission = ${sql.lit(p.name)} then ${
-        sql.lit(p.displayName ?? p.name)
-      }`
-    )
-    .reduce((a, b) => sql`${a} ${b}`);
-  const permissionDisplayCase =
-    sql`case ${permissionDisplayCaseParts} else cast(up.permission as string) end`;
-
   // Join each user-type table and expose its display + email fields as
   // aliased columns so DataTable can search them. Without this the search
   // input has no string columns to match against (sys_users itself doesn't
@@ -483,8 +486,6 @@ export function UsersList({
             where urs.sys_user_id = u.id
               and urs.auth_role_id = r.id
           )) as role_count,
-      (select string_agg(${permissionDisplayCase}, ', ' order by up.permission)
-        from (${getUserPermissions(sql`u.id`)}) up limit 3) as permission_names,
       (select count(*) from (${
     getUserPermissions(sql`u.id`)
   }) up) as permission_count
@@ -548,23 +549,18 @@ export function UsersList({
           b.column(
             "Permissions",
             ({ record }) => (
-              <div className="flex flex-row gap-2 flex-wrap items-center">
-                <Show when={sql`${record}.permission_count > 0`}>
-                  <Chip size="sm" variant="soft" color="neutral">
-                    {sql`${record}.permission_count`}
-                  </Chip>
-                </Show>
-                <Show when={sql`${record}.permission_names is not null`}>
-                  <span className="text-sm">
-                    {sql`${record}.permission_names`}
-                  </span>
-                </Show>
-                <Show when={sql`${record}.permission_count > 3`}>
-                  <span>&hellip;</span>
-                </Show>
-              </div>
+              <Link
+                href={sql`'/users/' || ${record}.id`}
+                className="whitespace-nowrap"
+              >
+                {sql`${record}.permission_count || case
+                  when ${record}.permission_count = 1 then ' permission'
+                  else ' permissions'
+                end`}
+                <MaterialIcon icon="ArrowOutward" />
+              </Link>
             ),
-            { field: "permission_names" },
+            { field: "permission_count" },
           );
           b.column(
             "Status",
@@ -656,6 +652,12 @@ function RuleManagedPermissionEntries() {
           "rule_managed_permission_entries",
           sql`
             select source.permission,
+                   ${
+            accessRuleSourceHref(
+              sql`source.source`,
+              sql`source.source_record_id`,
+            )
+          } as source_href,
                    source.is_allowed,
                    ${
             accessRuleSourceLabel(
@@ -715,7 +717,14 @@ function RuleManagedPermissionEntries() {
                 color="neutral"
                 startIcon="RuleOutlined"
               >
-                {sql`sourced_permission.source_label`}
+                <Show
+                  when={sql`sourced_permission.source_href is not null`}
+                  fallback={sql`sourced_permission.source_label`}
+                >
+                  <Link href={sql`sourced_permission.source_href`}>
+                    {sql`sourced_permission.source_label`}
+                  </Link>
+                </Show>
               </Chip>
               <Show when={sql`sourced_permission.is_overridden`}>
                 <Chip size="sm" variant="soft" color="warning">
@@ -1354,6 +1363,7 @@ export function UserDetailPage(
                 variant="plain"
                 color="neutral"
                 href={backButtonRef}
+                backLink
               />
             )}
             <div>
@@ -1457,6 +1467,9 @@ export function UserDetailPage(
                   allowSetPassword={passwordManagement?.allowSetPassword}
                 />
               </AccessCheck>
+              <AuthenticatorManagementCard
+                beforeUserMutation={beforeUserMutation}
+              />
               <SessionTokensCard beforeUserMutation={beforeUserMutation} />
             </AccessCheck>
             <ImpersonationLogCard />
@@ -1465,6 +1478,70 @@ export function UserDetailPage(
         </div>
       </Data>
     </RecordPage>
+  );
+}
+
+function AuthenticatorManagementCard(props: {
+  beforeUserMutation?: BeforeUserMutation;
+}) {
+  if (
+    !useBlock(AuthBlock).opts.secondFactor?.methods.totp ||
+    !props.beforeUserMutation
+  ) return null;
+  return (
+    <Card variant="outlined" size="lg">
+      <CardHeader noDivider>
+        <Typography level="title-lg">Authenticator app</Typography>
+      </CardHeader>
+      <Data
+        pendingFallback={null}
+        procedure={(s) => {
+          s.defScalar(
+            "has_authenticator",
+            sql`exists(select 1 from db.auth_second_factor_totp where sys_user_id = ui.record_id)`,
+          );
+        }}
+      >
+        <div className="py-2 flex flex-col gap-4">
+          <Typography level="body-sm">
+            Reset a lost or unavailable authenticator to let this user enroll
+            again. This also signs them out on every device.
+          </Typography>
+          <Show when={sql`not has_authenticator`}>
+            <Typography level="body-sm">
+              No authenticator configured.
+            </Typography>
+          </Show>
+          <ActionButton
+            variant="outlined"
+            color="danger"
+            size="sm"
+            startIcon="LockResetOutlined"
+            disabled={sql`not has_authenticator`}
+            confirm={{
+              description:
+                "Remove this user's authenticator and sign them out everywhere? They will need to set up an authenticator again the next time they sign in with TOTP.",
+              confirmText: "Reset authenticator",
+            }}
+            action={(s) => {
+              s.startTransaction();
+              props.beforeUserMutation?.(s, sql`ui.record_id`);
+              s.modify(
+                sql`delete from db.auth_second_factor_totp where sys_user_id = ui.record_id`,
+              );
+              // Preserve second-factor settings and each app's enrollment policy.
+              s.modify(
+                sql`delete from db.auth_session_tokens where sys_user_id = ui.record_id`,
+              );
+              s.commitTransaction();
+            }}
+            successMessage="Authenticator reset. All sessions have been signed out."
+          >
+            Reset authenticator
+          </ActionButton>
+        </div>
+      </Data>
+    </Card>
   );
 }
 
@@ -1502,11 +1579,15 @@ function SessionTokensCard(props: {
         >
           <div className="py-2 flex flex-col gap-4">
             <div className="flex items-center gap-2">
-              <Typography level="body-sm">Active Tokens:</Typography>
+              <Typography level="body-sm">Stored sessions:</Typography>
               <Chip color="neutral" variant="soft" size="sm">
                 {sql`session_token_info.token_count`}
               </Chip>
             </div>
+            <Typography level="body-sm" className="text-neutral-600">
+              Includes sessions that may have expired. Sign out everywhere to
+              require a new sign-in on every device.
+            </Typography>
             <Show when={sql`session_token_info.latest_issued is not null`}>
               <div>
                 <Typography level="body-sm">Latest Issued</Typography>
@@ -1551,11 +1632,11 @@ function SessionTokensCard(props: {
                 });
               }}
             >
-              Clear Tokens
+              Sign out everywhere
             </Button>
             <Show when={sql`clear_tokens_success`}>
               <Alert color="success" size="sm">
-                Session tokens have been cleared.
+                All sessions have been signed out.
               </Alert>
             </Show>
             <Show when={sql`clear_tokens_error is not null`}>
@@ -1937,7 +2018,7 @@ function effectivePermissionSources(user: NumericExpr) {
              role.id as role_id,
              role.extends,
              'Role · ' || role.name as source_label,
-             'role' as source_kind
+             'role' as source_kind, null::string as source_href
       from db.auth_user_roles assigned
       join db.auth_roles role on role.id = assigned.auth_role_id
       where assigned.sys_user_id = ${user}
@@ -1951,28 +2032,30 @@ function effectivePermissionSources(user: NumericExpr) {
       sql`source.source_record_id`,
     )
   } || ' · ' || role.name as source_label,
-             'rule' as source_kind
+             'rule' as source_kind, ${
+    accessRuleSourceHref(sql`source.source`, sql`source.source_record_id`)
+  } as source_href
       from db.auth_user_role_sources source
       join db.auth_roles role on role.id = source.auth_role_id
       where source.sys_user_id = ${user}
     ),
     role_hierarchy as (
-      select origin_key, role_id, extends, source_label, source_kind
+      select origin_key, role_id, extends, source_label, source_kind, source_href
       from assigned_role_origins
       union
       select child.origin_key,
              parent.id as role_id,
              parent.extends,
              child.source_label,
-             child.source_kind
+             child.source_kind, child.source_href
       from role_hierarchy child
       join db.auth_roles parent on parent.id = child.extends
     )
-    select distinct permission, source_label, source_kind
+    select distinct permission, source_label, source_kind, source_href
     from (
       select manual.permission,
              'Direct' as source_label,
-             'direct' as source_kind
+             'direct' as source_kind, null::string as source_href
       from db.auth_user_permissions manual
       where manual.sys_user_id = ${user}
         and manual.is_allowed
@@ -1984,7 +2067,9 @@ function effectivePermissionSources(user: NumericExpr) {
       sql`source.source_record_id`,
     )
   } as source_label,
-             'rule' as source_kind
+             'rule' as source_kind, ${
+    accessRuleSourceHref(sql`source.source`, sql`source.source_record_id`)
+  } as source_href
       from db.auth_user_permission_sources source
       where source.sys_user_id = ${user}
         and source.is_allowed
@@ -1997,7 +2082,7 @@ function effectivePermissionSources(user: NumericExpr) {
       union all
       select role_permission.permission,
              hierarchy.source_label,
-             hierarchy.source_kind
+             hierarchy.source_kind, hierarchy.source_href
       from role_hierarchy hierarchy
       join db.auth_role_permissions role_permission
         on role_permission.auth_role_id = hierarchy.role_id
@@ -2020,6 +2105,7 @@ function PermissionsCard({ sx }: { sx?: Style }) {
       description="Only permissions this login currently has, with every source that grants them."
       permissionsQuery={getUserPermissions(sql`ui.record_id`)}
       sourcesQuery={effectivePermissionSources(sql`ui.record_id`)}
+      sourceHref={(source) => sql`${source}.source_href`}
       emptyMessage="This login currently has no permissions."
       sx={sx}
     />

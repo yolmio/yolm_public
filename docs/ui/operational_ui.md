@@ -1,6 +1,6 @@
 ---
 title: Operational UI Components
-description: Concise guide to Yolm components and page primitives for admin apps, work queues, dialogs, exports, loading states, and dense operational screens.
+description: Guidance for dense operational screens in Yolm admin apps - work queues, CRUD lists, record actions, foreign-key selectors, exports, and loading states.
 tags:
   - ui
   - components
@@ -8,49 +8,45 @@ tags:
   - admin
   - dialogs
 related:
-  - ui/data.md
-  - ui/form.md
-  - ui/record_grid.md
+  - ui/solution_components.md
+  - ui/page_templates.md
   - ui/data_table.md
   - ui/mobile_capture_scanning.md
-  - ui/sidebar.md
   - api/files_blobs_exports.md
   - concepts/operational_systems.md
 ---
 
 # Operational UI Components
 
-Use this guide for dense internal apps: queues, review screens, admin CRUD,
-management pages, exports, and workflow actions. Use the exported TypeScript
-types for exact prop contracts.
+Guidance for dense internal screens: queues, review screens, admin CRUD, and
+exports. Imports for every component are in the
+[component catalog](./solution_components.md).
 
 For dense admin CRUD screens, combine `DataTable` record lists, generated
 `AutoInsert` / update / delete dialogs, `TableRecordSelect` or `QueryCombobox`
 for searchable foreign-key selectors, and `DownloadButton` for CSV exports.
 
-## Page Primitives
+## Pages First
 
-- `RecordPage` from `pages/record_page` for a detail route backed by one table
-  record and current-record context.
-- `InsertPage` and `UpdatePage` from `pages/insert_page` /
-  `pages/update_page` for standard CRUD pages with `Form` handling.
-- `DatagridPage` from `pages/datagrid` for configurable table views. Call
-  `system.addDataGridTablesAndEnums([...])` in `core.tsx` for tables that need
-  saved view names.
-- `DbManagementPage` from `pages/db_management` for admin database management
-  surfaces.
-- `AuthBlock` admin pages for users, roles, and auth-related management.
-- `QrScanner`, `ExpandableImage`, and `ImageGallery` for mobile scan/capture
-  workflows and photo review.
+Start from a [page template](./page_templates.md) (`DatagridPage`,
+`RecordPage`, `InsertPage` / `UpdatePage`, `AdminCrudPage`,
+`DbManagementPage`) and build custom `Data` + `Form` pages only when the
+workflow has custom state, several tables, or a task-specific layout.
 
-Use page primitives first. Build custom `Data` + `Form` pages when the workflow
-has custom state, multiple tables, or task-specific layout.
+`DatagridPage` needs its saved-view schema. Call
+`system.addDataGridTablesAndEnums([...])` in `core.tsx` with every datagrid
+name (defaults to the table name). It is an opt-in, persistent schema change:
+it adds the system db tables `datagrid_views`, `datagrid_view_columns`, and
+`datagrid_view_filter_terms` and the `datagrid_name` enum, and adds each name
+as a variant. `DatagridPage` throws at generation time when the tables or its
+name are missing (`pages/datagrid_internals/db_state.ts`).
 
 ## WorkQueue
 
-Import `WorkQueue` from `components/work_queue` for a split queue/detail
-workflow with row selection in the URL, keyboard navigation, sortable columns,
-and an optional footer detail panel.
+`WorkQueue` (`components/work_queue`) is a split queue/detail workflow: the
+selected row lives in the URL (`wq_selected_id`), with keyboard navigation
+(Up/Down move, Escape clears; ignored while focus is on an interactive element),
+click-to-sort column headers, and an optional footer detail panel.
 
 ```tsx
 <WorkQueue.Root
@@ -62,6 +58,9 @@ and an optional footer detail panel.
   `}
   rowKey="id"
   emptyMessage="No work is waiting"
+  conditionalFilters={[
+    { when: sql`ui.assigned_only`, clause: sql`assigned_to = ui.current_user_id` },
+  ]}
 >
   <WorkQueue.Header>
     {(_selected, count) => <Typography level="title-md">{count} open</Typography>}
@@ -76,40 +75,27 @@ and an optional footer detail panel.
 </WorkQueue.Root>
 ```
 
-The query must include `rowKey`. WorkQueue infers columns from the query; add
-`WorkQueue.Column` children when you need custom labels, formatting, widths, or
-ordering. Use `conditionalFilters` for optional predicates that should be
-appended only when their `when` expression is true. Filter clauses are
-predicates over the projected query columns and scoped SQL values.
+- The query must select `rowKey`; the selection query param is a `BigInt`.
+- Only declared `WorkQueue.Column` entries render, in declaration order;
+  fields missing from the query are skipped. `format` is `date`, `datetime`,
+  `currency`, `decimal`, or `percent`; a function child renders the cell.
+- `conditionalFilters` clauses are appended only while `when` is true; they are
+  predicates over the projected columns and scoped SQL values.
+- Query inputs are watched automatically (`autoWatch`, default true). With
+  `autoWatch={false}`, list every UI input in `watch`.
+- `WorkQueue.Footer` defaults to height 280; `resizable` uses `minHeight` 100
+  and `maxHeight` 600 unless set.
+- In an action handler, call `WorkQueue.advanceToNext(s)` after completing the
+  current item to remove it locally and select the next row;
+  `WorkQueue.showAlert(s, message, color?)` (`success` default, `danger`,
+  `warning`) writes to the queue's status bar.
 
-```tsx
-conditionalFilters={[
-  {
-    when: sql`ui.assigned_only`,
-    clause: sql`assigned_to = ui.current_user_id`,
-  },
-]}
-```
+## Record Actions And Menus
 
-## Record Actions
-
-Use context-aware actions inside record pages, datagrids, menus, and detail
-panels:
-
-- `AutoInsertDialog`, `AutoInsertButton`, `AutoInsertIconButton`, and
-  `AutoInsertMenuItem` from `components/auto_insert_dialog`.
-- `DeleteRecordDialog`, `DeleteRecordButton`, `DeleteRecordIconButton`, and
-  `DeleteRecordMenuItem` from `components/delete_record_dialog`.
-- `DownloadButton` from `components/download_button` for CSV exports from a
-  SQL query.
-
-These components can resolve current table/record context. Pass `table`,
-`recordId`, parent fields, or values explicitly when the action is outside a
-record context.
-
-## Menus And Compact Actions
-
-Use `Menu` from `components/menu` for grouped row actions:
+Use the generated CRUD dialogs and their button/icon/menu-item triggers
+([Auto dialogs](./auto_dialogs.md), `DeleteRecord*`), and
+[ActionButton](./action_button.md) for commands such as approve or archive.
+Group row actions in a `Menu`:
 
 ```tsx
 <Menu>
@@ -123,35 +109,40 @@ Use `Menu` from `components/menu` for grouped row actions:
 </Menu>
 ```
 
-Use icon buttons with tooltips for repeated table actions. Keep destructive
-actions behind confirmation dialogs.
+These resolve the current table/record context; pass `table`, `recordId`, or
+parent fields explicitly outside it.
 
-## Inputs For Operational Forms
+## Operational Forms
 
-- `EnumSelect` from `components/enum_select` renders enum variants with labels
-  and colors from `system.enum_`.
-- `TableRecordSelect` and `QueryCombobox` are the default foreign-key and lookup
-  controls.
-- `FieldFormControl`, `LabelOnTopFormField`, and
-  `LabelOnLeftFormField` are useful inside `Form.Field` when generated field
-  metadata should drive labels, errors, and default input selection.
-- `InlineRecordDisplay` and `InlineFieldDisplay` render record references and
-  typed field values in compact summaries.
+`TableRecordSelect` and `QueryCombobox` are the default foreign-key and lookup
+controls; `EnumSelect` renders enum labels and colors from `system.enum_`.
+Inside `Form.Field`, `FieldFormControl`, `LabelOnTopFormField`, and
+`LabelOnLeftFormField` let field metadata drive labels, errors, and the input
+type. Use `InlineRecordDisplay` / `InlineFieldDisplay` for compact summaries.
 
 ## Loading And Progressive Disclosure
 
-- `Skeleton` from `components/skeleton` is the preferred pending UI for dense
-  dashboards and cards.
-- `CollapseControl` from `components/collapse_component` hides optional detail
-  sections without adding route state.
-- `Progress` indicators or compact status chips work well for step-by-step
-  physical workflows where users need to see the current phase.
-- `Tabs`, `Card`, `Sheet`, `Table`, `DataTable`, and `StatRow` compose dense
-  management screens. Prefer `DataTable` for record lists and `Table` for fully
-  custom markup.
+- `Data` shows a `CircularProgress` (size `sm`) while loading by default. For
+  dense dashboards and cards, pass a sized `Skeleton` from
+  `components/skeleton` as `pendingFallback` so the layout does not jump.
+  `Skeleton` takes `variant` (`rectangular` default, `circular`, `text`),
+  `animation` (`pulse` default, `wave`), and `level` to match a typography
+  line height. `pendingFallback={null}` renders nothing.
+- `CollapseControl` hides optional detail sections without route state.
+- Prefer `DataTable` for record lists and `Table` for fully custom markup.
+
+```tsx
+<Data
+  procedure={(s) => s.defScalar("open_count", sql`(select count(*) from db.tasks)`)}
+  pendingFallback={<Skeleton className="h-24 w-full rounded-md" />}
+>
+  {/* card content */}
+</Data>
+```
 
 ## Navigation Shells
 
-Use `Sidebar` for multi-section operational apps and `Navbar` for simpler admin
-or utility apps. Keep route registration in `AppRoutes`, and put app-specific
-permissions in the auth wrapper rather than inside individual page components.
+Use [Sidebar](./sidebar.md) for multi-section operational apps and
+[Navbar](./navbar.md) for simpler ones. Keep route registration in
+`AppRoutes`, and put app permissions in the auth wrapper rather than inside
+individual page components.

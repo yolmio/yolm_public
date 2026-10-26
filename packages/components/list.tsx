@@ -7,8 +7,13 @@ import type { Variant } from "std/theme";
 import { Show, useApp, useICtx, usePhase } from "std/ui";
 import type { Node } from "std/ui";
 import type { Color, ComponentOpts, Size } from "./types";
-import { createGatherSafeSlot, singleElementComponent } from "./utils";
+import {
+  backLinkAttrs,
+  createGatherSafeSlot,
+  singleElementComponent,
+} from "./utils";
 import type {
+  BackLinkOpts,
   OverridableComponent,
   SingleElementComponentProps,
 } from "./utils";
@@ -192,7 +197,7 @@ export const List: OverridableComponent<{
 
 /** Props for {@link ListItemButton}. */
 export interface ListItemButtonProps
-  extends ComponentOpts<Size>, SingleElementComponentProps {
+  extends ComponentOpts<Size>, SingleElementComponentProps, BackLinkOpts {
   variant?: Variant;
   color?: Color;
   /** Set when the parent list is horizontal so trailing margins use the row gap instead of the column gap. */
@@ -230,6 +235,7 @@ export const ListItemButton: OverridableComponent<{
     size,
     inRow = false,
     href,
+    backLink,
     children,
     component,
     ...rest
@@ -242,6 +248,7 @@ export const ListItemButton: OverridableComponent<{
     internalProps: {
       tabIndex: 0,
       href,
+      ...backLinkAttrs(href, backLink),
       type: component === "button" ? "button" : undefined,
     },
   });

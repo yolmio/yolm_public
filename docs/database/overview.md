@@ -61,12 +61,16 @@ db.enableTransactionQueries = true;
 Every table automatically gets:
 - `id` - Primary key (auto-generated)
 
-If you need creation or modification timestamps, define them as explicit physical fields:
+Add provenance fields such as `created_at`, `last_modified_at`, `created_by`,
+or `modified_by` only when the UI or workflow logic reads them. For forensics
+alone, read change times and users from
+[transaction queries](../sql/transaction_queries.md) instead, unless the table
+compacts its history with `autoCompact`. When a field is
+needed, make it nullable or defaulted:
 
 ```ts
 db.table("orders", (table) => {
-  table.timestampUtc("created_at").notNull().default(sql`now()`);
-  table.timestampUtc("last_modified_at").notNull().default(sql`now()`);
+  table.timestampUtc("created_at").default(sql`now()`);
 });
 ```
 
@@ -86,7 +90,6 @@ db.table("events", (table) => {
   table.autoCompact();
 
   table.uuid("external_id").notNull().unique();
-  table.timestampUtc("created_at").notNull().default(sql`now()`);
 });
 ```
 

@@ -13,10 +13,14 @@ import { MaterialIcon } from "./material_icon";
 import type { IconName } from "./material_icon_names";
 import { Tooltip } from "./tooltip";
 import type { Color, ComponentOpts, Size } from "./types";
-import { mergeEventHandler, singleElementComponent } from "./utils";
-import type { OverridableComponent } from "./utils";
+import {
+  backLinkAttrs,
+  mergeEventHandler,
+  singleElementComponent,
+} from "./utils";
+import type { BackLinkOpts, OverridableComponent } from "./utils";
 
-interface IconButtonBaseProps extends ComponentOpts<Size> {
+interface IconButtonBaseProps extends ComponentOpts<Size>, BackLinkOpts {
   component?: ElementType;
   /** expression for if the button is disabled */
   disabled?: BooleanExpr;
@@ -138,6 +142,7 @@ export type IconButtonProps =
  @param props.icon - The icon to display in the button.
  @param props.component - The component used for the root node. Defaults to 'button' or 'a' if href is provided.
  @param props.href - The URL to link to when the button is clicked.
+ @param props.backLink - With `href`, returns to the most recent earlier history entry for that path, restoring its filters and scroll.
 
  @examples
  [Example](../table_blocks/attachments/attachments_card.tsx)
@@ -155,8 +160,10 @@ export const IconButton: OverridableComponent<{
     component = props.href ? "a" : "button",
     tooltip,
     tooltipProps,
+    backLink,
     ...rest
   } = props;
+  Object.assign(rest, backLinkAttrs(props.href, backLink));
   const buttonGroupContext = useOptionalICtx(DefaultButtonVariantICtxKey);
   if (buttonGroupContext) {
     variant = props.variant ?? buttonGroupContext.defaultVariant ?? "solid";

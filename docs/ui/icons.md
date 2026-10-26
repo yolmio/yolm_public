@@ -9,19 +9,21 @@ tags:
 
 # Icons
 
-Yolm uses Material Design icons via the `MaterialIcon` component. Icons are SVG-based and integrate with the theme system.
-
-## Import
+`MaterialIcon` renders a Material Design icon as an inline SVG. The icon's SVG
+is loaded at generation time from `packages/components/material-icons/<name>.json`.
 
 ```tsx
 import { MaterialIcon } from "components/material_icon";
+
+<MaterialIcon icon="CheckCircle" color="success" />
+<MaterialIcon icon="Search" className="text-4xl" />
 ```
 
-### `IconName` type
+## Icon Names
 
-The `icon` prop is typed as `IconName` — a union of every Material
-Symbol that ships with Yolm. Autocomplete lists every available value;
-unknown names fail at generation time.
+The `icon` prop is typed as `IconName`, a union of every Material Symbol that
+ships with Yolm; autocomplete lists them and unknown names fail at generation
+time. Use the type for your own icon props:
 
 ```tsx
 import type { IconName } from "components/material_icon_names";
@@ -31,166 +33,49 @@ interface MyButtonProps {
 }
 ```
 
-Suffixed variants (`Outlined`, `Rounded`, `Sharp`, `TwoTone`) are
-exposed as separate values; the unsuffixed name is the filled
-"default" symbol.
+Names are PascalCase. The unsuffixed name is the filled default; `Outlined`,
+`Rounded`, `Sharp`, and `TwoTone` variants are separate values
+(`Delete`, `DeleteOutlined`, `DeleteRounded`, ...).
 
-## Basic Usage
-
-```tsx
-<MaterialIcon icon="Delete" />
-<MaterialIcon icon="Search" />
-<MaterialIcon icon="Add" />
-<MaterialIcon icon="Settings" />
-```
+Common names: `Add`, `Edit`, `Delete`, `Save`, `Search`, `Close`, `Menu`,
+`MoreVert`, `ArrowBack`, `ArrowForward`, `ExpandMore`, `FilterList`,
+`Download`, `Upload`, `Check`, `CheckCircle`, `Error`, `Warning`, `Info`,
+`Person`, `Settings`, `Notifications`, `CalendarToday`, `Schedule`,
+`Dashboard`, `Visibility`, `VisibilityOff`.
 
 ## Props
 
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `icon` | `IconName` | (required) | Material Design icon name |
-| `color` | `SvgIconColor` | `"inherit"` | "primary", "neutral", "danger", "success", "warning", "harmonize", "inherit" |
-| `fontSize` | `SvgIconFontSize` | - | Theme font size or "inherit" |
-| `title` | `Sql` | - | Accessible title text |
-| `className` | `string` | - | Tailwind classes |
+- `icon` is a static string. To switch icons at runtime, render each static
+  icon inside `Show` / `Switch` / `Match`:
 
-## Icon Names
+  ```tsx
+  <Show
+    when={sql`task.is_completed`}
+    fallback={<MaterialIcon icon="RadioButtonUnchecked" color="neutral" />}
+  >
+    <MaterialIcon icon="CheckCircle" color="success" />
+  </Show>
+  ```
 
-Icons use PascalCase names from Material Design. Each icon has style variants:
+- `color` (default `"inherit"`, i.e. `currentColor`): a palette color
+  (uses its plain-variant text color), `"harmonize"`, or `"inherit"`.
+- `fontSize` (default `"inherit"`): a theme font-size token such as `"lg"`.
+  Tailwind text-size classes in `className` also work.
+- `title` (`Sql`): when set, the icon is exposed as `role="img"` with an SVG
+  `<title>`; otherwise it is `aria-hidden`.
 
-- Base: `"Add"`, `"Delete"`, `"Search"`
-- Outlined: `"AddOutlined"`, `"DeleteOutlined"`
-- Rounded: `"AddRounded"`, `"DeleteRounded"`
-- Sharp: `"AddSharp"`, `"DeleteSharp"`
-- TwoTone: `"AddTwoTone"`, `"DeleteTwoTone"`
+See `SvgIconBaseProps` in `components/svg_icon` for the shared SVG icon
+contract.
 
-### Common Icon Names
+## Icons In Other Components
 
-**Navigation**: `ArrowBack`, `ArrowForward`, `Menu`, `Close`, `ExpandMore`, `ExpandLess`, `ChevronLeft`, `ChevronRight`, `MoreVert`, `MoreHoriz`
+Many components (`Button`, `Typography`, `Alert`, `Chip`, `Snackbar`, ...)
+take `startIcon` / `endIcon` icon names directly. Use `startDecorator` /
+`endDecorator` with a `MaterialIcon` when the icon needs its own `color` or
+other props. `Button`, `Alert`, and `Chip` throw if an icon and a decorator are
+given for the same side; `Typography` and `Snackbar` use the icon and ignore
+the decorator. `IconButton` takes `icon` directly; see
+[IconButton](./tooltip.md#iconbutton).
 
-**Actions**: `Add`, `Delete`, `Edit`, `Save`, `Search`, `Refresh`, `Download`, `Upload`, `Share`, `Print`, `FilterList`, `Sort`
-
-**Content**: `Notes`, `Article`, `Description`, `Folder`, `AttachFile`, `Link`, `Image`, `VideoLibrary`
-
-**Communication**: `Email`, `Phone`, `Chat`, `Forum`, `Comment`, `Notifications`
-
-**Status**: `Check`, `CheckCircle`, `Error`, `Warning`, `Info`, `Help`, `Block`, `Cancel`
-
-**People**: `Person`, `People`, `Groups`, `AccountCircle`, `PersonAdd`
-
-**Business**: `Business`, `Work`, `ShoppingCart`, `AttachMoney`, `Receipt`, `Inventory`, `Analytics`, `TrendingUp`, `Dashboard`
-
-**Time**: `Schedule`, `CalendarToday`, `Event`, `History`, `Timer`, `AccessTime`
-
-**Toggle**: `LightMode`, `DarkMode`, `Visibility`, `VisibilityOff`, `Star`, `StarBorder`, `Favorite`, `FavoriteBorder`
-
-## Using Icons in Components
-
-### startIcon / endIcon Props
-
-Many components accept `startIcon` and `endIcon` props directly — no need to wrap `MaterialIcon` manually:
-
-```tsx
-// Button
-<Button startIcon="Add" variant="solid" color="primary">
-  Add Item
-</Button>
-
-<Button endIcon="ArrowForward">
-  Next
-</Button>
-
-// Typography
-<Typography level="title-lg" startIcon="Notes">
-  Notes Section
-</Typography>
-
-// IconButton (use MaterialIcon as child)
-<IconButton variant="plain" color="danger">
-  <MaterialIcon icon="Delete" />
-</IconButton>
-```
-
-### startDecorator / endDecorator Props
-
-For custom icon styling or non-icon content, use decorator props:
-
-```tsx
-// Custom styled icon
-<Button startDecorator={<MaterialIcon icon="Add" color="success" />}>
-  Add Item
-</Button>
-
-// Icon in Select
-<Select
-  placeholder="Choose..."
-  startDecorator={<MaterialIcon icon="Article" />}
->
-  {/* options */}
-</Select>
-```
-
-**Note:** You cannot use both `startIcon` and `startDecorator` at the same time.
-
-## Standalone Icons
-
-```tsx
-// With color
-<MaterialIcon icon="CheckCircle" color="success" />
-<MaterialIcon icon="Error" color="danger" />
-<MaterialIcon icon="Warning" color="warning" />
-
-// With size via className
-<MaterialIcon icon="Search" className="text-4xl" />
-<MaterialIcon icon="Dashboard" className="text-2xl text-primary-500" />
-
-// With fontSize prop
-<MaterialIcon icon="Info" fontSize="lg" />
-```
-
-## Dynamic Icons (Show/Switch Pattern)
-
-Since icon names are generation-time strings, use Show/Switch for dynamic icons:
-
-```tsx
-<Show when={sql`is_completed`}>
-  <MaterialIcon icon="CheckCircle" color="success" />
-</Show>
-<Show when={sql`not is_completed`}>
-  <MaterialIcon icon="RadioButtonUnchecked" color="neutral" />
-</Show>
-```
-
-## Common Patterns
-
-### Icon in a Header Row
-
-```tsx
-<div className="flex items-center gap-2">
-  <MaterialIcon icon="Inventory" className="text-neutral-400" />
-  <Typography level="title-md">Inventory</Typography>
-</div>
-```
-
-### Icon in List Items
-
-```tsx
-<ListItemButton>
-  <ListItemDecorator>
-    <MaterialIcon icon="Settings" />
-  </ListItemDecorator>
-  Settings
-</ListItemButton>
-```
-
-### Icon Button with Tooltip
-
-```tsx
-<IconButton
-  icon="Delete"
-  variant="plain"
-  color="danger"
-  tooltip={sql.lit`Delete this record`}
-  onClick={(s) => { /* delete logic */ }}
-/>
-```
+Brand logos (GitHub, Google, Gmail, OpenAI, Zoom, ...) are separate components
+in `components/icons/`, e.g. `GithubIcon` from `components/icons/github`.

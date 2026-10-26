@@ -30,7 +30,6 @@ interface ScheduleInterfaceProps {
   ) => void;
   insertValues?: Record<string, AnyExpr>;
   form: Node;
-  backgroundColorOverride?: string;
 }
 
 export function ScheduleInterface(props: ScheduleInterfaceProps) {
@@ -45,20 +44,8 @@ export function ScheduleInterface(props: ScheduleInterfaceProps) {
   if (!eventType) {
     throw new Error(`DevDefinedEventType ${props.type} not found`);
   }
-  const createsMeeting = (schedulingBlock.opts.meetingIntegrations ?? []).some(
-    (integration) => {
-      const block = system.block(integration.integration);
-      return integration.addToMeeting &&
-        block.integrationName.toLowerCase().replaceAll(" ", "_") ===
-          eventType.meetingLocation;
-    },
-  );
   return (
-    <Data
-      local
-      noRefetch
-      procedure={(_s) => {}}
-    >
+    <Data local noRefetch>
       <div
         sx={{
           display: "flex",
@@ -112,43 +99,26 @@ export function ScheduleInterface(props: ScheduleInterfaceProps) {
               sql`last_record_id(db.${sql.ref(eventType.tableName)})`,
             );
             beforeTransactionCommit?.(s, sql`created_appointment_id`, ctx);
+            schedulingBlock.enqueueDevDefinedAppointmentTasks(s, {
+              eventType,
+              appointmentId: sql`created_appointment_id`,
+              change: "booked",
+              insideTransaction: true,
+            });
           }}
           afterTransactionCommit={(s, ctx) => {
             s.setScalar("show_success_message", true);
-            if (schedulingBlock.opts.calendarIntegrations.length > 0) {
-              schedulingBlock.enqueueBackgroundTask(s, {
-                taskType: "calendar_add",
-                appointmentTable: eventType.tableName,
-                appointmentId: sql`created_appointment_id`,
-              });
-            }
-            if (
-              createsMeeting
-            ) {
-              schedulingBlock.enqueueBackgroundTask(s, {
-                taskType: "meeting_create",
-                appointmentTable: eventType.tableName,
-                appointmentId: sql`created_appointment_id`,
-              });
-            }
             afterTransactionCommit?.(s, sql`created_appointment_id`, ctx);
           }}
         >
           <Form.Insert
             table={eventType.tableName}
             values={{
-              sys_user_id: sql`selected_user`,
-              status: eventType.meetingLocation === "custom" ||
-                  eventType.meetingLocation === "phone" ||
-                  (eventType.meetingLocation !== "google_meet" &&
-                    !createsMeeting)
-                ? sql`'scheduled'`
-                : sql`'creating'`,
-              start_time: sql`selected_time at time zone user_timezone`,
-              duration: eventType.duration,
-              buffer_before: eventType.bufferBefore,
-              buffer_after: eventType.bufferAfter,
-              public_id: sql`random.uuid()`,
+              ...schedulingBlock.devDefinedBookingValues(
+                eventType,
+                sql`selected_user`,
+                sql`selected_time at time zone user_timezone`,
+              ),
               ...props.insertValues,
             }}
           >

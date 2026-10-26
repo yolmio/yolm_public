@@ -11,251 +11,110 @@ tags:
 
 # RecordPage
 
-RecordPage is a self-routing page component that handles displaying a single database record. It provides automatic routing, record fetching, loading states, error handling, and a built-in data context for child components.
-
-## Import
+`RecordPage` is a self-routing detail page for one record: it registers the
+route, loads the record, handles loading and not-found states, and exposes the
+row to its children.
 
 ```tsx
 import { RecordPage, RecordPageContent } from "pages/record_page";
-import { Data } from "std/data";
 ```
 
-## Basic Usage
-
-```tsx
-<RecordPage table="contacts">
-  <div className="p-4">
-    <Typography level="h3">{sql`record.name`}</Typography>
-    <div>
-      <Typography level="body-sm">Email</Typography>
-      <Typography>{sql`record.email`}</Typography>
-    </div>
-    <div>
-      <Typography level="body-sm">Phone</Typography>
-      <Typography>{sql`record.phone`}</Typography>
-    </div>
-    <Typography>{sql`format.date(record.created_at, '%b %d, %Y')`}</Typography>
-  </div>
-</RecordPage>
-```
-
-RecordPage is **self-routing** -- it generates its own route automatically. Do NOT wrap it in a `<Route>` component.
-
-**Default path:** `/{table}/{record_id:id}` (e.g., `/contacts/123`)
-
-`RecordPageContent` is the route-less form used by higher-level pages such as
-`DatagridPage recordPage`. It supplies the same record query and contexts but
-requires an enclosing route that defines `ui.record_id`. Application code
-should normally choose `RecordPage` or the integrated datagrid API instead of
-assembling that route manually.
-
-## Props
-
-| Prop | Type | Default | Description |
-|------|------|---------|-------------|
-| `table` | `string` | (required) | Database table name |
-| `path` | `string` | `/{table}/{record_id:id}` | Custom route path |
-| `routeState` | `StateStatementsOrFn` | - | Additional state initialization |
-| `children` | `Node` | (required) | Page content |
-| `sx` | `Style` | - | Styling |
-| `queryParams` | `QueryParam[]` | - | URL query parameters |
-| `pendingFallback` | `Node \| null` | - | Custom loading fallback |
-| `errorFallback` | `Node \| null` | - | Custom error fallback |
-| `statusScalar` | `string` | - | Scalar name for the underlying data status |
-| `wrapper` | `(children: Node) => Node` | - | Wraps the routed page content |
-| `recordWhere` | `Sql` | - | Additional condition applied when loading the record |
-
-## Key Concepts
-
-### Built-in Data Context
-
-RecordPage wraps children in a data context scoped to the current record. The record fields are accessible via SQL expressions. Use Data components and standard UI elements to display record data.
-
-```tsx
-<RecordPage table="contacts">
-  <div className="p-4">
-    <Typography level="h3">{sql`record.name`}</Typography>
-    <div>
-      <Typography level="body-sm">Email</Typography>
-      <Typography>{sql`record.email`}</Typography>
-    </div>
-    <div>
-      <Typography level="body-sm">Phone</Typography>
-      <Typography>{sql`record.phone`}</Typography>
-    </div>
-
-    {/* FK dot notation -- auto-joins related tables */}
-    <div>
-      <Typography level="body-sm">Company</Typography>
-      <Typography>{sql`record.company.name`}</Typography>
-    </div>
-
-    {/* Formatted fields */}
-    <Typography>{sql`format.date(record.created_at, '%b %d, %Y')`}</Typography>
-    <Typography>{sql`'$' || cast(record.lifetime_value as string)`}</Typography>
-
-    {/* Conditional display */}
-    <Show when={sql`record.is_vip`}>
-      <Chip color="primary">VIP</Chip>
-    </Show>
-  </div>
-</RecordPage>
-```
-
-### record_id Scalar
-
-RecordPage exposes `record_id` (accessible as `ui.record_id`) for the current record's ID. This is useful in Data queries and server procedures:
+## Example
 
 ```tsx
 <RecordPage table="customers">
-  {/* Use Data to fetch related records */}
-  <Data procedure={(s) => {
-    s.defTable("orders", sql`select * from db.orders where customer_id = ui.record_id order by created_at desc limit 5`);
-  }}>
-    <Each table="orders" recordName="order">
-      {sql`order.order_number`}
-      {sql`'$' || cast(order.total as string)`}
-    </Each>
-  </Data>
-
-  {/* Use ui.record_id for server procedures */}
-  <Button onClick={(s) => {
-    s.tryServer({
-      body: (s) => {
-        s.modify(sql`update db.customers set status = 'active' where id = ui.record_id`);
-      },
-    });
-  }}>
-    Activate
-  </Button>
-</RecordPage>
-```
-
-### Automatic Error Handling
-
-RecordPage handles three states automatically:
-- **Loading**: Shows a spinner while fetching
-- **Not Found**: Shows an error if the record doesn't exist
-- **Error**: Shows an alert if the fetch fails
-
-You only need to provide the success-state UI as children.
-
-## Common Patterns
-
-### Detail Page with Related Data
-
-Use Data components and standard UI elements for record display and related data:
-
-```tsx
-<RecordPage table="clients">
-  <div className="grid grid-cols-12 w-full mx-auto p-2 sm:px-4 md:gap-4 lg:px-10 xl:max-w-7xl py-4 gap-3">
+  <div className="grid grid-cols-12 gap-4 p-4">
     <PageHeader>
       <Typography level="h4">{sql`record.name`}</Typography>
       <PageHeader.Grow />
+      <ActionButton
+        variant="outlined"
+        successMessage="Customer activated"
+        action={(s) => {
+          s.startTransaction();
+          s.modify(sql`update db.customers set status = 'active' where id = ui.record_id`);
+          s.commitTransaction();
+        }}
+      >
+        Activate
+      </ActionButton>
       <PageHeader.DefaultActions />
     </PageHeader>
 
-    {/* Client details */}
-    <Card variant="outlined" className="col-span-12 lg:col-span-6">
-      <CardContent>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <Typography level="body-sm">Name</Typography>
-            <Typography>{sql`record.name`}</Typography>
-          </div>
-          <div>
-            <Typography level="body-sm">Email</Typography>
-            <Typography>{sql`record.email`}</Typography>
-          </div>
-          <div>
-            <Typography level="body-sm">Phone</Typography>
-            <Typography>{sql`record.phone`}</Typography>
-          </div>
-          <div>
-            <Typography level="body-sm">Industry</Typography>
-            <Typography>{sql`record.industry`}</Typography>
-          </div>
-          <div>
-            <Typography level="body-sm">Website</Typography>
-            <Typography>{sql`record.website`}</Typography>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <StaticTableCard
+      className="col-span-12 lg:col-span-6"
+      rows={["name", "email", "phone", "company_id"]}
+    />
 
-    {/* Related orders as a data table */}
-    <div className="col-span-12">
-      <Data procedure={(s) => {
-        s.defTable("client_orders", sql`select * from db.orders where client_id = ui.record_id order by created_at desc`);
-      }}>
-        <Table stickyHeader hoverRow>
-          <thead>
+    <Data
+      procedure={(s) => {
+        s.defTable("recent_orders", sql`
+          select id, order_number, format.currency(total, 'USD') as total_label, created_at
+          from db.orders
+          where customer_id = ui.record_id
+          order by created_at desc
+          limit 10
+        `);
+      }}
+    >
+      <Table hoverRow className="col-span-12 lg:col-span-6">
+        <tbody>
+          <Each table="recent_orders" recordName="order">
             <tr>
-              <th>Order #</th>
-              <th>Amount</th>
-              <th>Status</th>
-              <th>Date</th>
+              <td>{sql`order.order_number`}</td>
+              <td>{sql`order.total_label`}</td>
+              <td>{sql`format.date(order.created_at, '%b %d, %Y')`}</td>
             </tr>
-          </thead>
-          <tbody>
-            <Each table="client_orders" recordName="order">
-              <tr>
-                <td>{sql`order.order_number`}</td>
-                <td>{sql`format.currency(order.total, 'USD')`}</td>
-                <td>{sql`order.status`}</td>
-                <td>{sql`format.date(order.created_at, '%b %d, %Y')`}</td>
-              </tr>
-            </Each>
-          </tbody>
-        </Table>
-      </Data>
-    </div>
+          </Each>
+        </tbody>
+      </Table>
+    </Data>
   </div>
 </RecordPage>
 ```
 
-### Detail Page with Related Records
+## Contract
 
-```tsx
-<RecordPage table="customers">
-  <Card variant="outlined">
-    <CardHeader>
-      <Typography level="h3">{sql`record.name`}</Typography>
-    </CardHeader>
-    <CardContent>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <Typography level="body-sm">Email</Typography>
-          <Typography>{sql`record.email`}</Typography>
-        </div>
-        <div>
-          <Typography level="body-sm">Phone</Typography>
-          <Typography>{sql`record.phone`}</Typography>
-        </div>
-        <div>
-          <Typography level="body-sm">Company</Typography>
-          <Typography>{sql`record.company.name`}</Typography>
-        </div>
-      </div>
+- **Route**: `/{table_base_url}/{record_id:id}` (e.g. `/contacts/123`). Do not
+  wrap it in a `Route`; pass `path` (containing `{record_id:id}`) only when the
+  default is wrong, for example `path="/people/{record_id:id}"`.
+- **`ui.record_id`**: the current id. Use it in child `Data` queries, server
+  bodies, and props such as `where={sql\`contact_id = ui.record_id\`}`. Do not
+  use `current_record_id()` here.
+- **`record`**: the row from `select * from db.<table>` (plus `display_name`
+  when the table has a record display name), readable as `sql\`record.field\``.
+  It contains only the table's own columns; fetch related-table values
+  (customer name for `customer_id`, related lists) with a subquery or a child
+  `Data` query keyed on `ui.record_id`.
+- **States**: loading uses `Data`'s default `CircularProgress` (override with
+  `pendingFallback`, or `null` to disable); fetch errors use `errorFallback`; a
+  missing record shows an "Unable to get <Table>" alert. Children render only
+  when the record exists. `statusScalar` exposes the fetch status.
+- **Title**: the document title is the record display name when configured,
+  otherwise `title` if given.
+- **Refresh**: `ActionButton` and `Form` refetch the enclosing `Data` on
+  success, which reloads `record`. In raw handlers call `s.refetch()`.
+- **Back to list**: a link from a record page to its list should set
+  `backLink` (see [Routing](./routing.md#returning-to-a-list)) so the list's
+  filters and scroll are restored.
+- **Table context**: children such as `StaticTableCard`, `Form.InlineEdit`,
+  `PageHeader.DefaultActions`, and `NotesCard` read the current table and
+  record id from the page.
 
-      <Typography level="title-md" className="mt-4">Recent Orders</Typography>
-      <Data procedure={(s) => {
-        s.defTable("recent_orders", sql`select * from db.orders where customer_id = ui.record_id order by created_at desc limit 10`);
-      }}>
-        <Each table="recent_orders" recordName="order">
-          <div className="flex justify-between py-2 border-b border-divider">
-            {sql`order.order_number`}
-            {sql`'$' || cast(order.total as string)`}
-            {sql`format.date(order.created_at, '%b %d, %Y')`}
-          </div>
-        </Each>
-      </Data>
-    </CardContent>
-  </Card>
-</RecordPage>
-```
+Other props: `recordWhere` adds a SQL condition to the record fetch (a record
+outside it shows as not found), `routeState` adds statements to the page's
+state procedure, `queryParams` declares URL params, `sx` wraps children, and
+`wrapper` wraps the route content (e.g. a layout with sidebar). See
+`RecordPageProps` in `pages/record_page`.
 
-### Detail Page with Tabs
+`RecordPageContent` is the route-less form used by `DatagridPage`
+[`recordPage`](./datagrid.md#integrated-record-pages). It requires an enclosing
+route that defines `ui.record_id`; application code should use `RecordPage` or
+the datagrid API instead of assembling that route.
+
+## Tabbed Detail Pages
+
+`RecordWithTabsAndDetailPage` composes a header, detail card, and tabs:
 
 ```tsx
 import { RecordWithTabsAndDetailPage } from "pages/record_with_tabs_and_detail";
@@ -269,124 +128,20 @@ import { RecordWithTabsAndDetailPage } from "pages/record_with_tabs_and_detail";
       <PageHeader.DefaultActions />
     </PageHeader>
   }
-  details={
-    <StaticTableCard rows={["name", "email", "phone", "company"]} />
-  }
+  details={<StaticTableCard rows={["name", "email", "phone", "company_id"]} />}
   tabs={[
-    {
-      header: "Orders",
-      content: (
-        <Data procedure={(s) => {
-          s.defTable("orders", sql`select * from db.orders where contact_id = ui.record_id order by created_at desc`);
-        }}>
-          <Each table="orders" recordName="order">
-            <div className="flex justify-between py-2">
-              {sql`order.order_number`}
-              {sql`'$' || cast(order.total as string)`}
-            </div>
-          </Each>
-        </Data>
-      ),
-    },
-    {
-      header: "Notes",
-      content: <NotesCard recordId={sql`ui.record_id`} />,
-    },
-  ]}
-/>
-```
-
-### Custom Path
-
-```tsx
-{/* Override default path */}
-<RecordPage table="users" path="/people/{record_id:id}">
-  <UserDetail />
-</RecordPage>
-
-{/* Custom path with pipeline items */}
-<RecordPage table="pipeline_items" path="/pipeline-items/{record_id:id}">
-  <PipelineItemDetail />
-</RecordPage>
-```
-
-### Inline Editing
-
-RecordPage works with Form inline editing components:
-
-```tsx
-<RecordPage table="customers">
-  <div className="grid grid-cols-2 gap-4 p-4">
-    <div>
-      <Typography level="body-sm" className="text-secondary">Name</Typography>
-      <Form.InlineEdit field="name" />
-    </div>
-    <div>
-      <Typography level="body-sm" className="text-secondary">Email</Typography>
-      <Form.InlineEdit field="email" />
-    </div>
-  </div>
-</RecordPage>
-```
-
-### With Kanban or Custom Components
-
-```tsx
-<RecordPage table="contacts">
-  <div className="grid grid-cols-12 gap-3 p-4">
-    <PageHeader>
-      <Typography level="h4">{sql`record.name`}</Typography>
-      <PageHeader.Grow />
-      <PageHeader.DefaultActions />
-    </PageHeader>
-
-    <div className="col-span-12">
+    { header: "Tickets", content: (
       <AutoKanban
         table="tickets"
         field="ticket_status"
         where={sql`contact_id = ui.record_id`}
-        initializeValues={{
-          contact_id: sql`ui.record_id`,
-        }}
+        initializeValues={{ contact_id: sql`ui.record_id` }}
       />
-    </div>
-  </div>
-</RecordPage>
+    ) },
+    { header: "Notes", content: <NotesCard /> },
+  ]}
+/>
 ```
 
-## Refreshing Data
-
-Use `s.refetch()` after a mutation when the page should reload its record data:
-
-```tsx
-<RecordPage table="customers">
-  <Button onClick={(s) => {
-    s.tryServer({
-      body: (s) => {
-        s.modify(sql`update db.customers set status = 'active' where id = ui.record_id`);
-      },
-      finally: (s) => {
-        s.refetch();
-      },
-    });
-  }}>
-    Activate
-  </Button>
-</RecordPage>
-```
-
-## Best Practices
-
-1. **Use Data components and SQL expressions for display.** RecordPage provides a data context -- use SQL expressions like `sql\`record.field\`` to display fields. Use `Data` for fetching related records and `Each` for iteration.
-
-2. **Use Data + Table for tabular related data.** When showing related records in a table, use a `Data` component to fetch records and a `Table` with `Each` for rendering.
-
-3. **Use FK dot notation.** `sql\`record.customer.name\`` auto-joins -- no manual queries needed.
-
-4. **Use Data for related records.** For related data, use `Data` with a query referencing `ui.record_id`. Only use `ui.record_id` directly in custom components like Kanban.
-
-## See Also
-
-- [Data Component](./data.md) - Declarative data fetching
-- [Routing](./routing.md) - Self-routing page components
-- [Timeline Pattern](./timeline_pattern.md) - Activity timelines in RecordPage
+See also [Timeline Pattern](./timeline_pattern.md) and
+[Choosing page primitives](./record_grid.md).

@@ -15,19 +15,14 @@ related:
 
 # API Keys Block
 
-`ApiKeyBlock` adds API key management to a system: an encrypted `api_keys`
-table, a self-contained management UI, and a `validateApiKey` helper that
-authenticates external API requests by a request header. Use it when you
-expose API endpoints (`system.api(...)`) that third parties call with a
-shared key, instead of hand-rolling a key table and validation logic.
-
-```ts
-import { ApiKeyBlock, useApiKeyBlock } from "blocks/api_keys";
-```
+`ApiKeyBlock` issues keys that third parties send to your `system.api(...)`
+endpoints. It adds an encrypted `api_keys` table, a management UI, and a
+`validateApiKey` helper, so you do not hand-roll key storage or validation.
 
 ## Minimal Setup
 
-Register the block once in `core.tsx`. It takes no constructor options.
+Register the block once in `core.tsx`. It takes no constructor options and
+owns its encryption key name (`api_key_encryption`).
 
 ```tsx
 import { ApiKeyBlock } from "blocks/api_keys";
@@ -36,32 +31,19 @@ import { system } from "std/system";
 system.addBlock(new ApiKeyBlock());
 ```
 
-This creates the `api_keys` table and registers the `ApiKeyManager`
-component dependency. No encryption-key configuration is required — the block
-owns its own encryption key name (`api_key_encryption`).
+## Owned Tables
 
-## Tables Created
+| Table      | Purpose                                                                 |
+| ---------- | ----------------------------------------------------------------------- |
+| `api_keys` | Issued keys. `active = false` revokes a key without deleting the row. |
 
-| Table      | Purpose                                 |
-| ---------- | --------------------------------------- |
-| `api_keys` | Stores issued keys (encrypted at rest). |
-
-Columns on `api_keys`:
-
-| Column       | Type           | Notes                                                                          |
-| ------------ | -------------- | ------------------------------------------------------------------------------ |
-| `name`       | `string(100)`  | Required. Human label for the key. Used as the record display name.            |
-| `key_value`  | `secret(1000)` | Required. Encrypted secret. Defaults to the encrypted form of a random 32-byte hex value. |
-| `active`     | `bool`         | Required. Defaults to `true`. Set `false` to revoke without deleting.          |
-| `created_at` | `timestamp`    | Required. Defaults to `now()`.                                                 |
-
-`key_value` is stored **encrypted (reversible)**, not hashed — the UI decrypts
-it for display and copy. Treat the table as sensitive.
+`key_value` is stored **encrypted (reversible)**, not hashed: the UI decrypts
+it for display and copy. Guard access to the table and management page.
 
 ## Authenticating API Requests
 
-Call `validateApiKey(s)` at the top of an endpoint procedure. It is a method on
-the block instance, obtained with `useApiKeyBlock()`.
+Call `validateApiKey(s)` at the top of an endpoint procedure, passing the `s`
+your `procedure` receives.
 
 ```ts
 import { useApiKeyBlock } from "blocks/api_keys";
@@ -73,42 +55,24 @@ api.post("/contacts", {
   procedure: (s) => {
     useApiKeyBlock().validateApiKey(s);
     // Reached only when the key is present and active.
-    // ... endpoint logic ...
   },
 });
 ```
 
-Behavior of `validateApiKey(s)`:
-
-- Reads the key from the **`yolm-api-key`** request header.
-- If the header is missing: sets HTTP status `401` and returns a JSON error
-  (`error: "Missing API key"`), short-circuiting the procedure.
-- If no active `api_keys` row matches the supplied value: sets HTTP `401` and
-  returns a JSON error (`error: "Invalid API key"`), short-circuiting the
-  procedure.
-- On success, execution falls through to the rest of your procedure, and a
-  `key_info` record (with the matching key's `id`) is available in procedure
-  scope under that fixed name.
-
-`validateApiKey` is generic over the endpoint statement builder
-(`EndpointStatements`); pass the `s` your `procedure` receives. You do not
-import `EndpointStatements` yourself.
+- Reads the key from the **`yolm-api-key`** request header, not
+  `Authorization` (the built-in error message mentioning "Authorization" is
+  misleading).
+- Missing header: HTTP `401` with JSON `error: "Missing API key"`.
+- No active matching row: HTTP `401` with JSON `error: "Invalid API key"`.
+- On success, a `key_info` record holding the matching key's `id` is in
+  procedure scope under that fixed name.
 
 ## Components
 
-### `ApiKeyManager`
-
-A full-page UI for creating, copying, revoking, reactivating, and deleting
-keys. It is not re-exported from the package index. Reach it two ways:
-
-```tsx
-import { ApiKeyBlock } from "blocks/api_keys";
-// or:
-import { ApiKeyManager } from "blocks/api_keys/pages/manager";
-```
-
-It takes **no props**. It is **not self-routing** — place it inside your own
-`<Route>` (or other layout):
+`ApiKeyManager` (no props) creates, copies, revokes, reactivates, and deletes
+keys; a new key's value is shown once in a dialog after creation. It is not
+exported from the package index: use `ApiKeyBlock.ApiKeyManager` or import it
+from `blocks/api_keys/pages/manager`. It is not self-routing:
 
 ```tsx
 <Route path="/api-keys">
@@ -116,30 +80,5 @@ It takes **no props**. It is **not self-routing** — place it inside your own
 </Route>
 ```
 
-The component lets a user create a key (entering only a `name`), see the
-generated value once in a dialog, copy any active key, toggle a key between
-active/revoked, and delete keys.
-
-## Exports
-
-| Export              | Kind            | Purpose                                                              |
-| ------------------- | --------------- | ------------------------------------------------------------------- |
-| `ApiKeyBlock`       | class           | The block. Register with `system.addBlock(new ApiKeyBlock())`.      |
-| `useApiKeyBlock()`  | function        | Returns the registered block instance (`system.block(ApiKeyBlock)`). |
-| `validateApiKey(s)` | instance method | Authenticates an endpoint request by the `yolm-api-key` header.     |
-| `ApiKeyManager`     | component       | The management UI (also `ApiKeyBlock.ApiKeyManager`).               |
-
-## Common Mistakes
-
-- Sending the key in the `Authorization` header. The block reads the
-  **`yolm-api-key`** header (the built-in error message text mentioning
-  "Authorization" is misleading).
-- Calling `useApiKeyBlock()` or rendering `ApiKeyManager` without first
-  registering `new ApiKeyBlock()` in `core.tsx`.
-- Importing `ApiKeyManager` from `blocks/api_keys` — it is only available from
-  `blocks/api_keys/pages/manager` or as `ApiKeyBlock.ApiKeyManager`.
-- Wrapping `ApiKeyManager` as if it were self-routing — it is a plain
-  component and must be placed inside a `<Route>` or layout you provide.
-- Expecting one-way hashed keys. Values are stored encrypted and can be
-  decrypted/re-copied from the UI; guard access to the page and table
-  accordingly.
+`useApiKeyBlock()` returns the registered instance; it and `ApiKeyManager`
+require `new ApiKeyBlock()` to be registered first.

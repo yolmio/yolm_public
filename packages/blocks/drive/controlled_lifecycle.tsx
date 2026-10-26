@@ -10,6 +10,7 @@ import { MaterialIcon } from "components/material_icon";
 import { ModalDialog } from "components/modal";
 import { Textarea } from "components/textarea";
 import { Typography } from "components/typography";
+import { isPlayableVideoMime } from "components/video_player";
 import { ActionButton } from "std/action_button";
 import { Data } from "std/data";
 import { useJsModule } from "std/js_modules";
@@ -20,11 +21,12 @@ import type {
   HelperProcField,
   ServerStatementsBase,
 } from "std/statements";
-import { system } from "std/system";
+import { system, TableBuilder } from "std/system";
 import { Each, Show } from "std/ui";
 import type { Node } from "std/ui";
 import type {
   DriveBlockContract,
+  DriveExtension,
   DriveLifecycle,
   DriveSpaceType,
   FileCreateAccessContext,
@@ -71,6 +73,8 @@ export interface ControlledFileLifecycleOpts {
   };
   /** Omit to retain `can_manage_controlled_files` publication authority. */
   canPublish?: (sysUserId: Sql) => Sql;
+  /** Spaces where PDF, image, and video uploads publish immediately, without review. */
+  publishOnUpload?: (spaceId: Sql) => Sql;
 }
 
 export interface ControlledFilePanelProps {
@@ -83,6 +87,7 @@ export interface ControlledFilePanelProps {
 export type ControlledFileWorkspaceProps = ControlledFilePanelProps;
 
 export interface ControlledFileReviewSurfaceProps {
+  controlledRevisionId: Sql;
   files: DriveBlockContract;
   fileItemId: Sql;
   fileVersionId: Sql;
@@ -227,6 +232,7 @@ export class ControlledFileLifecycle implements DriveLifecycle {
   #publicationConsumers: ControlledFilePublicationConsumer[] = [];
   #workflowConsumers: ControlledFileWorkflowConsumer[] = [];
   #reviewSurfaces: ControlledFileReviewSurface[] = [];
+  #reviewerTargetFields = ["controlled_file_revision_id"];
 
   constructor(readonly opts: ControlledFileLifecycleOpts) {
     if (!opts.languages.length) {
@@ -456,6 +462,43 @@ export class ControlledFileLifecycle implements DriveLifecycle {
     }
   }
 
+  /**
+   * Share the ordered reviewer records with another versioned workflow.
+   * The caller owns its request lifecycle and authorization; each reviewer
+   * record belongs to exactly one registered target.
+   */
+  registerReviewerTarget(field: string, table: string) {
+    if (this.#reviewerTargetFields.includes(field)) {
+      throw new Error(`Reviewer target ${field} is already registered.`);
+    }
+    const reviewers = system.db.tables[this.reviewerTable];
+    if (!reviewers) {
+      throw new Error("Initialize the controlled-file lifecycle first.");
+    }
+    const extension = new TableBuilder(this.reviewerTable);
+    extension.fk(field, table).onDelete("Restrict");
+    extension.unique([field, "step_number"]);
+    extension.unique([field, "reviewer_actor_id"]);
+    const added = extension.finish();
+    Object.assign(reviewers.fields, added.fields);
+    reviewers.uniqueConstraints.push(...added.uniqueConstraints);
+    reviewers.fields.controlled_file_revision_id.notNull = false;
+    this.#reviewerTargetFields.push(field);
+    if (this.#reviewerTargetFields.length === 2) {
+      reviewers.checks.push({
+        fields: this.#reviewerTargetFields,
+        errorMessage: () =>
+          sql.lit`A reviewer must belong to exactly one review.`,
+        check: (fields) =>
+          sql`(${
+            fields.map((value) =>
+              sql`case when ${value} is null then 0 else 1 end`
+            ).reduce((a, b) => sql`${a} + ${b}`)
+          }) = 1`,
+      });
+    }
+  }
+
   registerPublicationConsumer(consumer: ControlledFilePublicationConsumer) {
     if (
       this.#publicationConsumers.some((candidate) =>
@@ -623,11 +666,16 @@ export class ControlledFileLifecycle implements DriveLifecycle {
   }
 
   canReadVersion(context: FileVersionAccessContext) {
-    return this.canReadVersionPolicy(
+    const policy = this.canReadVersionPolicy(
       sql`${context.itemRecord}.id`,
       sql`${context.versionRecord}.id`,
       context.sysUserId,
     );
+    return this.opts.publishOnUpload
+      ? sql`(${
+        this.opts.publishOnUpload(sql`${context.spaceRecord}.id`)
+      }) or (${policy})`
+      : policy;
   }
 
   private canReadVersionPolicy(
@@ -791,11 +839,112 @@ export class ControlledFileLifecycle implements DriveLifecycle {
     )`;
   }
 
+  versionUploadMetadataError(context: {
+    spaceId: Sql;
+    contentType: Sql;
+    externalUrl: Sql;
+  }): Sql {
+    return sql`case when ${
+      this.opts.publishOnUpload?.(context.spaceId) ?? sql.false
+    }
+      and ${context.contentType} not in ('application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp')
+      and not ${isPlayableVideoMime(context.contentType)}
+      and not (${context.contentType} = 'application/vnd.yolm.video-link'
+        and ${context.externalUrl} is not null)
+      then 'Upload a PDF, image (JPG, PNG, GIF, WebP), or video (MP4, WebM, Ogg, MOV).' end`;
+  }
+
   onVersionCreated(
     s: ServerStatementsBase<any>,
     event: FileVersionCreatedEvent,
   ) {
-    this.applyVersionToControl(s, event);
+    if (this.opts.publishOnUpload) {
+      s.defScalar("dc_uploaded_revision_created", sql.false);
+      s.if(this.opts.publishOnUpload(event.spaceId), (s) => {
+        s.throwErrorIf(
+          sql`not coalesce(${
+            this.#requiredFiles().runtimeAccessSql(
+              event.spaceId,
+              event.sysUserId,
+              "write",
+            )
+          }, false)`,
+          sql.lit`You cannot upload files to this workspace.`,
+        );
+        s.throwErrorUnless(
+          sql`${event.language ?? sql.null} is null or ${
+            sql.inList(
+              event.language ?? sql.null,
+              this.opts.languages.map((language) => sql.lit(language.code)),
+            )
+          }`,
+          sql.lit`Select a supported document language.`,
+        );
+        s.throwErrorIf(
+          sql`${event.language ?? sql.null} <> ${
+            sql.lit(this.opts.defaultLanguage)
+          }
+            and not exists (select 1 from db.controlled_file_language_variants where file_item_id = ${event.itemId})`,
+          sql.lit`Add the default-language video before adding a translation.`,
+        );
+        s.if(
+          sql`exists (
+          select 1 from db.controlled_file_language_variants
+          where file_item_id = ${event.itemId}
+        ) and (${event.language ?? sql.null} is not null or not exists (
+          select 1 from db.controlled_file_revisions revision
+          join db.controlled_file_language_variants variant
+            on variant.id = revision.controlled_file_language_variant_id
+          where variant.file_item_id = ${event.itemId}
+            and revision.status in ('draft', 'proposed', 'in_review', 'approved')
+        ))`,
+          (s) => {
+            this.createRevision(s, {
+              fileItemId: event.itemId,
+              language: sql`coalesce(${event.language ?? sql.null}, ${
+                sql.lit(this.opts.defaultLanguage)
+              })`,
+              revisionLabel: sql`${event.versionNumber}::string`,
+              effectiveOn: sql`current_date()`,
+              changeSummary: sql.lit`Uploaded file replacement.`,
+              actingUser: event.sysUserId,
+              uploadedVersionId: event.versionId,
+            });
+            s.setScalar("dc_uploaded_revision_created", sql.true);
+          },
+        );
+      });
+    }
+    if (this.opts.publishOnUpload) {
+      s.if(
+        sql`not dc_uploaded_revision_created`,
+        (s) => this.applyVersionToControl(s, event),
+      );
+    } else {
+      this.applyVersionToControl(s, event);
+    }
+    if (this.opts.publishOnUpload) {
+      s.if(this.opts.publishOnUpload(event.spaceId), (s) => {
+        s.defRecord(
+          "publishing_controlled_revision",
+          sql`
+          select revision.id, revision.controlled_file_language_variant_id,
+                 revision.file_version_id, variant.file_item_id, variant.language
+          from db.controlled_file_revisions revision
+          join db.controlled_file_language_variants variant
+            on variant.id = revision.controlled_file_language_variant_id
+          where revision.file_version_id = ${event.versionId}
+            and variant.file_item_id = ${event.itemId}
+            and revision.status = 'draft'
+        `,
+        );
+        s.throwErrorIf(
+          sql`publishing_controlled_revision.id is null`,
+          sql.lit`The uploaded revision is unavailable.`,
+        );
+        this.completePublication(s, event.sysUserId, sql`false`);
+      });
+    }
   }
 
   private applyVersionToControl(
@@ -943,11 +1092,26 @@ export class ControlledFileLifecycle implements DriveLifecycle {
       changeSummary: Sql;
       actingUser?: Sql;
       into?: string;
+      /** Attach an already-created upload without an insert-then-update cycle. */
+      uploadedVersionId?: Sql;
     },
   ) {
     const files = this.#requiredFiles();
     const actingUser = opts.actingUser ?? sql`current_user`;
     const result = opts.into ?? "created_controlled_revision_id";
+    if (this.opts.publishOnUpload) {
+      s.throwErrorIf(
+        sql`exists (
+        select 1 from db.file_items item
+        join db.file_versions version on version.id = item.current_file_version_id
+        where item.id = ${opts.fileItemId}
+          and ${this.opts.publishOnUpload(sql`item.file_space_id`)}
+          and lower(version.content_type) like 'image/%'
+          and ${opts.language} != ${sql.lit(this.opts.defaultLanguage)}
+      )`,
+        sql.lit`Images are shared across languages.`,
+      );
+    }
     s.if(
       sql`trim(${opts.revisionLabel}) = ''`,
       (s) => s.throwError(sql.lit`Enter a controlled revision label.`),
@@ -1056,6 +1220,37 @@ export class ControlledFileLifecycle implements DriveLifecycle {
             .lit`Publish the default-language revision before starting a translation.`,
         ),
     );
+    s.defScalar(
+      "dc_start_version_id",
+      sql`(
+          select coalesce(
+            (
+              select current_revision.file_version_id
+              from db.controlled_file_language_variants current_variant
+              join db.controlled_file_revisions current_revision
+                on current_revision.id =
+                  current_variant.current_controlled_file_revision_id
+              where current_variant.id = dc_work_variant_id
+            ),
+            (
+              select default_revision.file_version_id
+              from db.controlled_file_language_variants default_variant
+              join db.controlled_file_revisions default_revision
+                on default_revision.id =
+                  default_variant.current_controlled_file_revision_id
+              where default_variant.file_item_id =
+                ${opts.fileItemId}
+                and default_variant.language =
+                  ${sql.lit(this.opts.defaultLanguage)}
+            ),
+            (
+              select item.current_file_version_id
+              from db.file_items item
+              where item.id = ${opts.fileItemId}
+            )
+          )
+        )`,
+    );
     s.modify(sql`
       insert into db.controlled_file_revisions (
         controlled_file_language_variant_id,
@@ -1084,50 +1279,32 @@ export class ControlledFileLifecycle implements DriveLifecycle {
           from db.controlled_file_language_variants variant
           where variant.id = dc_work_variant_id
         ),
-        (
-          select coalesce(
-            (
-              select current_revision.file_version_id
-              from db.controlled_file_language_variants current_variant
-              join db.controlled_file_revisions current_revision
-                on current_revision.id =
-                  current_variant.current_controlled_file_revision_id
-              where current_variant.id = dc_work_variant_id
-            ),
-            (
-              select default_revision.file_version_id
-              from db.controlled_file_language_variants default_variant
-              join db.controlled_file_revisions default_revision
-                on default_revision.id =
-                  default_variant.current_controlled_file_revision_id
-              where default_variant.file_item_id =
-                ${opts.fileItemId}
-                and default_variant.language =
-                  ${sql.lit(this.opts.defaultLanguage)}
-            ),
-            (
-              select item.current_file_version_id
-              from db.file_items item
-              where item.id = ${opts.fileItemId}
-            )
-          )
-        ),
+        ${opts.uploadedVersionId ?? sql`dc_start_version_id`},
         ${opts.effectiveOn},
         nullif(trim(${opts.changeSummary}), ''),
         ${this.opts.actor.actorIdForSysUserId(actingUser)}
       )
     `);
-    s.defScalar(result, sql`last_record_id(db.controlled_file_revisions)`);
+    s.defScalar(
+      result,
+      opts.uploadedVersionId
+        ? sql`(select id from db.controlled_file_revisions
+          where controlled_file_language_variant_id = dc_work_variant_id
+            and file_version_id = ${opts.uploadedVersionId} and status = 'draft')`
+        : sql`last_record_id(db.controlled_file_revisions)`,
+    );
+    // This creator owns both the starting snapshot and the uploaded checkpoint.
+    // Ordinary draft edits add their later checkpoints in applyVersionToControl.
     s.modify(sql`
       insert into db.controlled_file_revision_file_versions (
-        controlled_file_revision_id,
-        file_version_id
+        controlled_file_revision_id, file_version_id
       )
-      select
-        ${sql.ref(result)},
-        item.current_file_version_id
-      from db.file_items item
-      where item.id = ${opts.fileItemId}
+      select ${sql.ref(result)}, dc_start_version_id
+      ${
+      opts.uploadedVersionId
+        ? sql`union select ${sql.ref(result)}, ${opts.uploadedVersionId}`
+        : sql``
+    }
     `);
   }
 
@@ -1527,7 +1704,7 @@ export class ControlledFileLifecycle implements DriveLifecycle {
       (s) =>
         s.throwError(
           sql
-            .lit`An approval review can only be stopped before a reviewer has decided. Disregard the proposal instead to preserve completed decisions.`,
+            .lit`An approval review can only be stopped before a reviewer has decided. Cancel the proposal instead to preserve completed decisions.`,
         ),
     );
     s.defScalar("stopped_controlled_review_id", { type: "BigInt" });
@@ -1568,13 +1745,18 @@ export class ControlledFileLifecycle implements DriveLifecycle {
     const files = this.#requiredFiles();
     this.assertRevisionAccess(s, revisionId, files, "read", actingUser);
     s.if(
-      sql`not ${this.canConfigureReview(actingUser)}`,
-      (s) => s.throwError(sql.lit`You cannot disregard controlled proposals.`),
+      sql`not ${this.canConfigureReview(actingUser)} and not exists (
+        select 1 from db.controlled_file_revisions
+        where id = ${revisionId}
+          and initiated_by_actor_id = ${
+        this.opts.actor.actorIdForSysUserId(actingUser)
+      }
+      )`,
+      (s) => s.throwError(sql.lit`You cannot cancel this proposal.`),
     );
     s.if(
       sql`nullif(trim(${reason}), '') is null`,
-      (s) =>
-        s.throwError(sql.lit`Enter a reason for disregarding this proposal.`),
+      (s) => s.throwError(sql.lit`Enter a reason for canceling this proposal.`),
     );
     s.if(
       sql`${this.opts.actor.actorIdForSysUserId(actingUser)} is null`,
@@ -1595,13 +1777,13 @@ export class ControlledFileLifecycle implements DriveLifecycle {
         disregarded_at = now(),
         disregard_reason = trim(${reason})
       where id = ${revisionId}
-        and status in ('proposed', 'in_review', 'approved')
+        and status in ('draft', 'proposed', 'in_review', 'approved')
       returning id into disregarded_controlled_proposal_id
     `);
     s.if(sql`disregarded_controlled_proposal_id is null`, (s) =>
       s.throwError(
         sql
-          .lit`Only a proposed, in-review, or approved proposal can be disregarded.`,
+          .lit`Only a draft, proposed, in-review, or approved proposal can be canceled.`,
       ));
     for (const consumer of this.#workflowConsumers) {
       consumer.onProposalDisregarded?.(s, this.workflowEvent(revisionId));
@@ -1613,6 +1795,25 @@ export class ControlledFileLifecycle implements DriveLifecycle {
     s: ServerStatementsBase<any>,
     revisionId: Sql,
     decision: "approved" | "rejected",
+    notes: Sql,
+    actingUser: Sql = sql`current_user`,
+  ) {
+    s.startTransaction();
+    s.callStoredProcedure("controlled_file_apply_review_decision", {
+      inputScalars: {
+        p_revision_id: revisionId,
+        p_decision: sql.lit(decision),
+        p_notes: notes,
+        p_user_id: actingUser,
+      },
+    });
+    s.commitTransaction();
+  }
+
+  private applyReviewDecision(
+    s: ServerStatementsBase<any>,
+    revisionId: Sql,
+    decision: Sql,
     notes: Sql,
     actingUser: Sql = sql`current_user`,
   ) {
@@ -1628,7 +1829,6 @@ export class ControlledFileLifecycle implements DriveLifecycle {
       "current_controlled_file_actor_id",
       this.opts.actor.actorIdForSysUserId(actingUser),
     );
-    s.startTransaction();
     s.defScalar(
       "assigned_controlled_reviewer_id",
       sql`(
@@ -1640,13 +1840,6 @@ export class ControlledFileLifecycle implements DriveLifecycle {
           and reviewer.reviewer_actor_id = current_controlled_file_actor_id
           and reviewer.decision is null
           and revision.status = 'in_review'
-          and not exists (
-            select 1
-            from db.controlled_file_reviewers earlier
-            where earlier.controlled_file_revision_id = reviewer.controlled_file_revision_id
-              and earlier.step_number < reviewer.step_number
-              and earlier.decision is null
-          )
       )`,
     );
     s.if(sql`assigned_controlled_reviewer_id is null`, (s) => {
@@ -1654,50 +1847,38 @@ export class ControlledFileLifecycle implements DriveLifecycle {
         sql.lit`This review is not currently assigned to you.`,
       );
     });
-    s.modify(sql`
-      update db.controlled_file_reviewers
-      set
-        decision = ${sql.lit(decision)},
-        notes = nullif(trim(${notes}), ''),
-        decided_at = now()
-      where id = assigned_controlled_reviewer_id
-    `);
-    if (decision === "rejected") {
-      s.modify(sql`
-        update db.controlled_file_revisions
-        set status = 'rejected'
-        where id = ${revisionId}
-      `);
-    } else {
-      s.if(
-        sql`
-          not exists (
-            select 1
-            from db.controlled_file_reviewers reviewer
-            where reviewer.controlled_file_revision_id = ${revisionId}
-              and reviewer.decision is null
-          )
-        `,
-        (s) => {
-          s.modify(sql`
-            update db.controlled_file_revisions
-            set
-              status = 'approved',
-              approved_by_actor_id = current_controlled_file_actor_id,
-              approved_at = now()
-            where id = ${revisionId}
-          `);
-        },
-      );
-    }
-    for (const consumer of this.#workflowConsumers) {
-      consumer.onReviewDecided?.(s, {
-        ...this.workflowEvent(revisionId),
-        decision,
-        decidedByActorId: sql`current_controlled_file_actor_id`,
+    s.callStoredProcedure("controlled_file_record_review_decision", {
+      inputScalars: {
+        p_reviewer_id: sql`assigned_controlled_reviewer_id`,
+        p_actor_id: sql`current_controlled_file_actor_id`,
+        p_decision: decision,
+        p_notes: notes,
+      },
+    });
+    s.if(sql`${decision} = 'rejected'`, (s) => {
+      s.modify(sql`update db.controlled_file_revisions
+        set status = 'rejected' where id = ${revisionId}`);
+    });
+    s.if(
+      sql`not exists (select 1 from db.controlled_file_reviewers
+      where controlled_file_revision_id = ${revisionId} and decision is distinct from 'approved')`,
+      (s) => {
+        s.modify(sql`update db.controlled_file_revisions
+        set status = 'approved', approved_by_actor_id = current_controlled_file_actor_id,
+          approved_at = now() where id = ${revisionId}`);
+      },
+    );
+    for (const outcome of ["approved", "rejected"] as const) {
+      s.if(sql`${decision} = ${sql.lit(outcome)}`, (s) => {
+        for (const consumer of this.#workflowConsumers) {
+          consumer.onReviewDecided?.(s, {
+            ...this.workflowEvent(revisionId),
+            decision: outcome,
+            decidedByActorId: sql`current_controlled_file_actor_id`,
+          });
+        }
       });
     }
-    s.commitTransaction();
   }
 
   publish(
@@ -1751,6 +1932,145 @@ export class ControlledFileLifecycle implements DriveLifecycle {
           sql.lit`This revision cannot be published before its effective date.`,
         ),
     );
+    this.completePublication(s, actingUser, publicationActionConfirmed);
+    s.commitTransaction();
+  }
+
+  /**
+   * Imports the first revision of an existing approved document or translation.
+   * The caller owns the transaction, including the draft and uploaded bytes.
+   * Any external approval reference is recorded in the summary; no internal
+   * reviewer or approval timestamp is fabricated. Later revisions use the normal
+   * workflow.
+   */
+  importPublishedRevision(
+    s: ServerStatementsBase<any>,
+    opts: {
+      fileItemId: Sql;
+      language: Sql;
+      /** Required for translations: the exact published default-language revision on this item. */
+      sourceRevisionId?: Sql;
+      revisionLabel: Sql;
+      effectiveOn: Sql;
+      approvalReference: Sql;
+      actingUser: Sql;
+    },
+  ) {
+    const files = this.#requiredFiles();
+    const sourceRevisionId = opts.sourceRevisionId ?? sql`null::bigint`;
+    s.throwErrorIf(
+      sql`not coalesce(${this.canPublish(opts.actingUser)}, false)`,
+      sql.lit`You cannot import published policies.`,
+    );
+    s.throwErrorIf(
+      sql`nullif(trim(${opts.revisionLabel}), '') is null
+        or ${opts.effectiveOn} is null
+        or ${opts.effectiveOn} > current_date()`,
+      sql
+        .lit`Enter a revision and an effective date on or before today.`,
+    );
+    s.throwErrorIf(
+      sql`not coalesce(${
+        sql.inList(
+          opts.language,
+          this.opts.languages.map((language) => sql.lit(language.code)),
+        )
+      }, false)`,
+      sql.lit`Select a supported document language.`,
+    );
+    s.throwErrorIf(
+      sql`case when ${opts.language} = ${sql.lit(this.opts.defaultLanguage)}
+        then ${sourceRevisionId} is not null
+        else not exists (
+          select 1 from db.controlled_file_revisions source
+          join db.controlled_file_language_variants source_variant
+            on source_variant.id = source.controlled_file_language_variant_id
+          where source.id = ${sourceRevisionId}
+            and source_variant.file_item_id = ${opts.fileItemId}
+            and source_variant.language = ${sql.lit(this.opts.defaultLanguage)}
+            and source.status in ('published', 'superseded')
+            and source.published_at is not null
+        ) end`,
+      sql
+        .lit`Select the published default-language revision this translation belongs to.`,
+    );
+    s.defRecord(
+      "publishing_controlled_revision",
+      sql`
+        select revision.id, revision.controlled_file_language_variant_id,
+          revision.file_version_id, variant.file_item_id,
+          ${opts.language} as language
+        from db.controlled_file_revisions revision
+        join db.controlled_file_language_variants variant
+          on variant.id = revision.controlled_file_language_variant_id
+        join db.file_items item on item.id = variant.file_item_id
+        where item.id = ${opts.fileItemId}
+          and item.trashed_at is null
+          and revision.status = 'draft'
+          and variant.language = ${opts.language}
+          and revision.initiated_by_actor_id = ${
+        this.opts.actor.actorIdForSysUserId(opts.actingUser)
+      }
+          and revision.approved_at is null
+          and revision.published_at is null
+          and ${files.extensionEnabledSql(sql`item.file_space_id`, this.name)}
+          and ${
+        files.runtimeAccessSql(sql`item.file_space_id`, opts.actingUser, "read")
+      }
+          and ${
+        files.runtimeAccessSql(
+          sql`item.file_space_id`,
+          opts.actingUser,
+          "write",
+        )
+      }
+          and (case when ${opts.language} = ${
+        sql.lit(this.opts.defaultLanguage)
+      } then
+            revision.source_controlled_file_revision_id is null
+            and (select count(*) from db.file_versions version
+              where version.file_item_id = item.id) = 1
+            and (
+            select count(*) from db.controlled_file_revisions other_revision
+            join db.controlled_file_language_variants other_variant
+              on other_variant.id = other_revision.controlled_file_language_variant_id
+            where other_variant.file_item_id = item.id
+            ) = 1
+          else
+            revision.source_controlled_file_revision_id is not null
+            and (select count(*) from db.controlled_file_revisions other_revision
+              where other_revision.controlled_file_language_variant_id = variant.id) = 1
+            and (select count(*) from db.controlled_file_revision_file_versions checkpoint
+              where checkpoint.controlled_file_revision_id = revision.id) = 2
+          end)
+          and not exists (
+            select 1 from db.controlled_file_reviewers reviewer
+            where reviewer.controlled_file_revision_id = revision.id
+          )
+      `,
+    );
+    s.throwErrorIf(
+      sql`publishing_controlled_revision.id is null`,
+      sql
+        .lit`Only a newly uploaded initial revision with no review history can be imported as published.`,
+    );
+    s.modify(sql`
+      update db.controlled_file_revisions
+      set revision_label = trim(${opts.revisionLabel}),
+        source_controlled_file_revision_id = ${sourceRevisionId},
+        effective_on = ${opts.effectiveOn},
+        change_summary = 'Imported as an already-approved policy.' || coalesce(
+          ' Approval reference: ' || nullif(trim(${opts.approvalReference}), ''), '')
+      where id = publishing_controlled_revision.id
+    `);
+    this.completePublication(s, opts.actingUser, sql`false`);
+  }
+
+  private completePublication(
+    s: ServerStatementsBase<any>,
+    actingUser: Sql,
+    publicationActionConfirmed: Sql,
+  ) {
     s.modify(sql`
       update db.controlled_file_revisions
       set status = 'superseded'
@@ -1791,7 +2111,6 @@ export class ControlledFileLifecycle implements DriveLifecycle {
         publicationActionConfirmed,
       });
     }
-    s.commitTransaction();
   }
 
   private assertRevisionAccess<T extends ServerStatementsBase<any>>(
@@ -1849,7 +2168,233 @@ export class ControlledFileLifecycle implements DriveLifecycle {
     };
   }
 
+  private canUploadPublishedVersion(itemId: Sql, userId: Sql) {
+    const files = this.#requiredFiles();
+    return sql`exists (
+      select 1 from db.file_items item
+      where item.id = ${itemId} and item.item_kind = 'file'
+        and item.trashed_at is null
+        and ${files.extensionEnabledSql(sql`item.file_space_id`, this.name)}
+        and ${this.opts.publishOnUpload?.(sql`item.file_space_id`) ?? sql.false}
+        and ${files.runtimeAccessSql(sql`item.file_space_id`, userId, "write")}
+    )`;
+  }
+
+  registerApi(
+    context: Parameters<NonNullable<DriveExtension["registerApi"]>>[0],
+  ) {
+    if (!this.opts.publishOnUpload) return;
+    context.api.post("/files/items/{item_id:id}/published/{language}/upload", {
+      query: [
+        { name: "file_name", type: { type: "String", maxLength: 500 } },
+        { name: "content_type", type: { type: "String", maxLength: 255 } },
+      ],
+      blobBody: {
+        scalar: "published_blob_hash",
+        sizeScalar: "published_upload_size",
+        maxSize: this.#requiredFiles().opts.maxUploadBytes ??
+          2 * 1024 * 1024 * 1024,
+        authorize: (s) => {
+          context.authenticate(s);
+          s.setHeader(sql.lit`Content-Type`, sql.lit`application/json`);
+          s.if(
+            sql`not coalesce(${
+              this.canUploadPublishedVersion(sql`item_id`, sql`auth_user_id`)
+            }, false)`,
+            (s) => {
+              s.setHttpStatus(403);
+              s.return(
+                sql`json_build_object('error', 'You cannot upload to this workspace.')`,
+              );
+            },
+          );
+          s.defScalar("published_upload_content_type", sql`content_type`);
+          s.defScalar(
+            "published_upload_metadata_error",
+            this.#requiredFiles().versionUploadMetadataErrorSql({
+              itemId: sql`item_id`,
+              fileName: sql`file_name`,
+              contentType: sql`published_upload_content_type`,
+            }),
+          );
+          s.if(sql`published_upload_metadata_error is not null`, (s) => {
+            s.setHttpStatus(400);
+            s.return(
+              sql`json_build_object('error', published_upload_metadata_error)`,
+            );
+          });
+          s.if(
+            sql`not coalesce(${
+              sql.inList(
+                sql`language`,
+                this.opts.languages.map((language) => sql.lit(language.code)),
+              )
+            }, false)`,
+            (s) => {
+              s.setHttpStatus(400);
+              s.return(
+                sql`json_build_object('error', 'Select a supported document language.')`,
+              );
+            },
+          );
+          s.if(
+            sql`language <> ${sql.lit(this.opts.defaultLanguage)}
+              and exists (select 1 from db.file_versions
+                where file_item_id = item_id and version_number = 1
+                  and lower(content_type) like 'image/%')`,
+            (s) => {
+              s.setHttpStatus(400);
+              s.return(
+                sql`json_build_object('error', 'Images are shared across languages.')`,
+              );
+            },
+          );
+          s.if(sql`published_upload_size = 0`, (s) => {
+            s.setHttpStatus(400);
+            s.return(sql`json_build_object('error', 'Empty file upload')`);
+          });
+        },
+      },
+      procedure: (s) => {
+        context.authenticate(s);
+        s.try({
+          body: (s) => {
+            s.startTransaction();
+            s.callStoredProcedure("controlled_file_upload_published_version", {
+              inputScalars: {
+                p_item_id: sql`item_id`,
+                p_language: sql`language`,
+                p_file_name: sql`file_name`,
+                p_content_type: sql`content_type`,
+                p_blob_hash: sql`published_blob_hash`,
+                p_byte_length: sql`published_upload_size`,
+                p_user_id: sql`auth_user_id`,
+              },
+              outputScalars: { version_id: "published_version_id" },
+            });
+            s.commitTransaction();
+            s.setHttpStatus(201);
+            s.setHeader(sql.lit`Content-Type`, sql.lit`application/json`);
+            s.return(sql`json_build_object(
+              'success', true, 'itemId', item_id, 'versionId', published_version_id
+            )`);
+          },
+          errorName: "published_upload_error",
+          catch: (s) => {
+            s.rollbackIfInTransaction();
+            s.setHttpStatus(400);
+            s.setHeader(sql.lit`Content-Type`, sql.lit`application/json`);
+            s.return(
+              sql`json_build_object('error', published_upload_error.message)`,
+            );
+          },
+        });
+      },
+    });
+  }
+
   registerStoredProcedures() {
+    // Both policy and training decisions use this compiled boundary. The
+    // owning workflow validates access and its editable state in the same tx.
+    const sameReview = (alias: string) =>
+      sql.or(this.#reviewerTargetFields.map(
+        (field) =>
+          sql`${sql.ref(alias, field)} = review_step.${sql.ref(field)}`,
+      ));
+    system.storedProcedure({
+      name: "controlled_file_record_review_decision",
+      transaction: "caller",
+      inputScalars: [
+        { name: "p_reviewer_id", type: "BigInt" },
+        { name: "p_actor_id", type: "BigInt" },
+        { name: "p_decision", type: { type: "String", maxLength: 30 } },
+        { name: "p_notes", type: { type: "String", maxLength: 2000 } },
+      ],
+      procedure: (s) => {
+        s.defRecord(
+          "review_step",
+          sql`select * from db.controlled_file_reviewers where id = p_reviewer_id`,
+        );
+        s.throwErrorUnless(
+          sql`review_step.id is not null
+          and review_step.reviewer_actor_id = p_actor_id and review_step.decision is null
+          and not exists (select 1 from db.controlled_file_reviewers earlier
+            where (${
+            sameReview("earlier")
+          }) and earlier.step_number < review_step.step_number
+              and earlier.decision is distinct from 'approved')`,
+          sql.lit`This review is not currently assigned to you.`,
+        );
+        s.throwErrorUnless(
+          sql`p_decision in ('approved', 'rejected')`,
+          sql.lit`Choose approve or request changes.`,
+        );
+        s.modify(sql`update db.controlled_file_reviewers
+          set decision = p_decision, notes = nullif(trim(p_notes), ''), decided_at = now()
+          where id = review_step.id`);
+      },
+    });
+    system.storedProcedure({
+      name: "controlled_file_apply_review_decision",
+      transaction: "caller",
+      inputScalars: [
+        { name: "p_revision_id", type: "BigInt" },
+        { name: "p_decision", type: { type: "String", maxLength: 30 } },
+        { name: "p_notes", type: { type: "String", maxLength: 2000 } },
+        { name: "p_user_id", type: "BigInt" },
+      ],
+      procedure: (s) =>
+        this.applyReviewDecision(
+          s,
+          sql`p_revision_id`,
+          sql`p_decision`,
+          sql`p_notes`,
+          sql`p_user_id`,
+        ),
+    });
+    if (this.opts.publishOnUpload) {
+      system.storedProcedure({
+        name: "controlled_file_upload_published_version",
+        transaction: "caller",
+        inputScalars: [
+          { name: "p_item_id", type: "BigInt" },
+          { name: "p_language", type: { type: "String", maxLength: 20 } },
+          { name: "p_file_name", type: { type: "String", maxLength: 500 } },
+          { name: "p_content_type", type: { type: "String", maxLength: 255 } },
+          { name: "p_blob_hash", type: { type: "Bytes", maxLength: 32 } },
+          { name: "p_byte_length", type: "BigInt" },
+          { name: "p_user_id", type: "BigInt" },
+        ],
+        outputScalars: [{ name: "version_id", type: "BigInt" }],
+        procedure: (s) => {
+          s.throwErrorIf(
+            sql`not coalesce(${
+              this.canUploadPublishedVersion(sql`p_item_id`, sql`p_user_id`)
+            }, false)`,
+            sql.lit`You cannot upload to this workspace.`,
+          );
+          s.throwErrorIf(
+            sql`p_byte_length is null or p_byte_length <= 0
+              or p_byte_length > ${
+              this.#requiredFiles().opts.maxUploadBytes ??
+                2 * 1024 * 1024 * 1024
+            }`,
+            sql.lit`Choose a non-empty file within the workspace upload limit.`,
+          );
+          // Rebuild the version and its revision linkage together on every replay.
+          this.#requiredFiles().createFileVersion(s, {
+            itemId: sql`p_item_id`,
+            fileName: sql`p_file_name`,
+            contentType: sql`p_content_type`,
+            byteLength: sql`p_byte_length`,
+            blobHash: sql`p_blob_hash`,
+            sysUserId: sql`p_user_id`,
+            intoVersion: "version_id",
+            language: sql`p_language`,
+          });
+        },
+      });
+    }
     system.storedProcedure({
       name: "controlled_file_create_revision",
       transaction: "standalone",
@@ -2026,6 +2571,7 @@ export class ControlledFileLifecycle implements DriveLifecycle {
           fields: [
             { name: "current_file_version_id", type: "BigInt" },
             { name: "displayed_file_version_id", type: "BigInt" },
+            { name: "displayed_controlled_revision_id", type: "BigInt" },
             { name: "can_fork_working_version", type: "Bool" },
           ],
         },
@@ -2056,7 +2602,7 @@ export class ControlledFileLifecycle implements DriveLifecycle {
         s.defRecord(
           "controlled_document_workspace_open_revision",
           sql`
-            select revision.status, revision.initiated_by_actor_id,
+            select revision.id, revision.status, revision.initiated_by_actor_id,
               revision.file_version_id
             from db.controlled_file_revisions revision
             where revision.controlled_file_language_variant_id =
@@ -2091,14 +2637,10 @@ export class ControlledFileLifecycle implements DriveLifecycle {
             limit 1
           `,
         );
-        s.modify(sql`
-          insert into controlled_document_workspace
-          select
-            controlled_document_workspace_item.current_file_version_id,
-            coalesce(
-              controlled_document_workspace_open_revision.file_version_id,
-              (
-                select exact_revision.file_version_id
+        s.defRecord(
+          "controlled_document_workspace_published_revision",
+          sql`
+                select exact_revision.id, exact_revision.file_version_id
                 from db.controlled_file_language_variants exact_variant
                 join db.controlled_file_revisions exact_revision
                   on exact_revision.id =
@@ -2114,14 +2656,22 @@ export class ControlledFileLifecycle implements DriveLifecycle {
                   and exact_revision.status = 'published'
                   and exact_revision.effective_on <= current_date()
                   and ${
-          files.canReadVersionSql({
-            spaceRecord: sql`exact_space`,
-            itemRecord: sql`exact_item`,
-            versionRecord: sql`exact_version`,
-            sysUserId: sql`current_user`,
-          })
-        }
-              ),
+            files.canReadVersionSql({
+              spaceRecord: sql`exact_space`,
+              itemRecord: sql`exact_item`,
+              versionRecord: sql`exact_version`,
+              sysUserId: sql`current_user`,
+            })
+          }
+`,
+        );
+        s.modify(sql`
+          insert into controlled_document_workspace
+          select
+            controlled_document_workspace_item.current_file_version_id,
+            coalesce(
+              controlled_document_workspace_open_revision.file_version_id,
+              controlled_document_workspace_published_revision.file_version_id,
               case
                 when not (${
           files.extensionEnabledSql(
@@ -2141,6 +2691,8 @@ export class ControlledFileLifecycle implements DriveLifecycle {
                 else null
               end
             ) as displayed_file_version_id,
+            coalesce(controlled_document_workspace_open_revision.id,
+              controlled_document_workspace_published_revision.id) as displayed_controlled_revision_id,
             coalesce(
               controlled_document_workspace_open_revision.status = 'draft'
                 and controlled_document_workspace_open_revision.initiated_by_actor_id =
@@ -2150,6 +2702,63 @@ export class ControlledFileLifecycle implements DriveLifecycle {
         `);
       },
     });
+    // Keeps the publication confirmation query out of every panel route.
+    const publicationConfirmation = this.publicationConfirmation({
+      fileItemId: sql`controlled_file.file_item_id`,
+      revisionId: sql`p_revision_id`,
+      language: sql`p_language`,
+    });
+    if (publicationConfirmation) {
+      system.storedProcedure({
+        name: "controlled_file_publication_confirmation_check",
+        transaction: "caller",
+        inputScalars: [
+          { name: "p_revision_id", type: "BigInt" },
+          { name: "p_language", type: { type: "String", maxLength: 20 } },
+        ],
+        inputRecords: [
+          {
+            name: "controlled_file",
+            fields: [
+              { name: "file_item_id", type: "BigInt" },
+              { name: "name", type: { type: "String", maxLength: 500 } },
+              { name: "file_space_id", type: "BigInt" },
+              { name: "current_file_version_id", type: "BigInt" },
+              { name: "variant_id", type: "BigInt" },
+              { name: "current_controlled_file_revision_id", type: "BigInt" },
+            ],
+          },
+        ],
+        outputScalars: [
+          { name: "p_required", type: "Bool" },
+          { name: "p_description", type: "String" },
+        ],
+        procedure: (s) => {
+          s.setScalar("p_required", false);
+          s.setScalar("p_description", sql.lit``);
+          s.if(publicationConfirmation.appliesWhen, (s) => {
+            s.defRecord(
+              "control_publication_confirmation_result",
+              publicationConfirmation.query,
+            );
+            s.setScalar(
+              "p_required",
+              sql`coalesce(
+                control_publication_confirmation_result.required,
+                false
+              )`,
+            );
+            s.setScalar(
+              "p_description",
+              sql`coalesce(
+                control_publication_confirmation_result.description,
+                ''
+              )`,
+            );
+          });
+        },
+      });
+    }
     system.storedProcedure({
       name: "controlled_file_panel_state",
       transaction: "caller",
@@ -2582,6 +3191,8 @@ export function ControlledFileWorkspace(
     : sql.lit(props.control.opts.defaultLanguage);
   const languageName = controlledLanguageName(props.control, language);
   const reviewSurfaceProps: ControlledFileReviewSurfaceProps = {
+    controlledRevisionId:
+      sql`controlled_document_workspace.displayed_controlled_revision_id`,
     files: props.files,
     fileItemId: sql`${props.fileItemId}`,
     fileVersionId: sql`controlled_document_workspace.displayed_file_version_id`,
@@ -2639,6 +3250,7 @@ export function ControlledFileWorkspace(
               files={props.files}
               fileItemId={props.fileItemId}
               fileVersionId={sql`controlled_document_workspace.displayed_file_version_id`}
+              controlledRevisionId={sql`controlled_document_workspace.displayed_controlled_revision_id`}
               readOnly={sql`
                 controlled_document_workspace.displayed_file_version_id is null
                 or (
@@ -3436,28 +4048,40 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                             s.setScalar("control_error", sql.lit``);
                             s.tryServer({
                               body: (s) => {
-                                s.if(
-                                  publicationConfirmation.appliesWhen,
-                                  (s) => {
-                                    s.defRecord(
-                                      "control_publication_confirmation_result",
-                                      publicationConfirmation.query,
-                                    );
-                                    s.setScalar(
-                                      "control_publication_confirmation_required",
-                                      sql`coalesce(
-                                        control_publication_confirmation_result.required,
-                                        false
-                                      )`,
-                                    );
-                                    s.setScalar(
-                                      "control_publication_confirmation_description",
-                                      sql`coalesce(
-                                        control_publication_confirmation_result.description,
-                                        ''
-                                      )`,
-                                    );
+                                s.defScalar(
+                                  "control_publication_confirmation_check_required",
+                                  { type: "Bool" },
+                                );
+                                s.defScalar(
+                                  "control_publication_confirmation_check_description",
+                                  { type: "String" },
+                                );
+                                s.callStoredProcedure(
+                                  "controlled_file_publication_confirmation_check",
+                                  {
+                                    inputScalars: {
+                                      p_revision_id:
+                                        sql`open_controlled_revision.id`,
+                                      p_language: language,
+                                    },
+                                    inputRecords: {
+                                      controlled_file: "controlled_file",
+                                    },
+                                    outputScalars: {
+                                      p_required:
+                                        "control_publication_confirmation_check_required",
+                                      p_description:
+                                        "control_publication_confirmation_check_description",
+                                    },
                                   },
+                                );
+                                s.setScalar(
+                                  "control_publication_confirmation_required",
+                                  sql`control_publication_confirmation_check_required`,
+                                );
+                                s.setScalar(
+                                  "control_publication_confirmation_description",
+                                  sql`control_publication_confirmation_check_description`,
                                 );
                                 s.setScalar(
                                   "control_publication_confirmation_checked",
@@ -3505,11 +4129,13 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                     <Show
                       when={sql`
                         open_controlled_revision.status in (
+                          'draft',
                           'proposed',
                           'in_review',
                           'approved'
                         )
-                        and can_manage_controlled_revision
+                        and (can_manage_controlled_revision
+                          or open_controlled_revision.initiated_by_actor_id = current_controlled_file_actor_id)
                       `}
                     >
                       <Button
@@ -3525,7 +4151,7 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                           );
                         }}
                       >
-                        Disregard proposal
+                        Cancel proposal
                       </Button>
                     </Show>
                     <ConfirmDangerDialog
@@ -3565,7 +4191,7 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                             level="title-lg"
                             startIcon="WarningRounded"
                           >
-                            Disregard proposal
+                            Cancel proposal
                           </Typography>
                           <Typography
                             level="body-sm"
@@ -3580,11 +4206,12 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                         <FormControl>
                           <FormLabel required>Reason</FormLabel>
                           <Textarea
+                            aria-label="Reason"
                             bindScalar="control_disregard_reason"
                             minRows={3}
                             maxLength={2000}
                             required
-                            placeholder="Explain why this proposal is being disregarded"
+                            placeholder="Explain why this proposal is being canceled"
                           />
                         </FormControl>
                         <div className="flex justify-end gap-2">
@@ -3622,7 +4249,7 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                               s.refetch();
                             }}
                           >
-                            Disregard proposal
+                            Cancel proposal
                           </ActionButton>
                         </div>
                       </div>
@@ -3832,7 +4459,7 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                             {sql`'Revision ' || controlled_revision.revision_label`}
                           </span>
                           <Chip size="sm">
-                            {sql`replace(controlled_revision.status, '_', ' ')`}
+                            {sql`case when controlled_revision.disregarded_at is not null then 'canceled' else replace(controlled_revision.status, '_', ' ') end`}
                           </Chip>
                         </div>
                         <Show
@@ -3842,7 +4469,7 @@ export function ControlledFilePanel(props: ControlledFilePanelProps) {
                           <div className="mt-2 rounded-md bg-level1 p-2">
                             <p className="font-medium">
                               {sql`
-                                'Disregarded by ' || coalesce(
+                                'Canceled by ' || coalesce(
                                   controlled_revision.disregarded_by_name,
                                   ${
                                 sql.lit(

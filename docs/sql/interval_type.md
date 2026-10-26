@@ -13,8 +13,10 @@ The `interval` type represents a duration of time. Yolm implements PostgreSQL-st
 
 ## Interval Literals
 
-Use interval literals or `make_interval(...)` to create intervals. The compiler
-does not support casts to `interval`; use one of these constructors instead.
+Create intervals with interval literals, [`make_interval(...)`](#makeinterval),
+or a cast from text. Casts (`cast(value as interval)`, `value::interval`,
+`try_cast`) accept the same text forms as interval literals, including
+non-literal text such as `cast(('2' || ' days') as interval)`.
 
 ### PostgreSQL Format
 
@@ -23,6 +25,7 @@ select interval '1 day';
 select interval '2 hours 30 minutes';
 select interval '1 year 2 months 3 days';
 select interval '1 week';
+select interval '7 weeks';
 select interval '-5 days';
 select interval '1 day 2 hours 30 minutes';  -- 1 day, 2 hours, 30 minutes
 ```
@@ -42,12 +45,12 @@ select interval '3:30:00';            -- 3 hours, 30 minutes
 select interval '1:30:45.123456';     -- with microseconds
 ```
 
-### Additional Interval Literals
+### Casts From Text
 
 ```sql
-select interval '2 hours';
-select interval 'P1DT2H';
-select interval '7 weeks';
+select cast('2 hours' as interval);  -- 02:00:00
+select cast('P1DT2H' as interval);   -- 1 day 02:00:00
+select try_cast('not an interval' as interval);  -- null
 ```
 
 ## Interval Components
@@ -144,7 +147,24 @@ Applies both justify_days and justify_hours.
 ```sql
 select justify_interval(interval '1 month 35 days 27 hours');
 -- 2 months 6 days 3 hours
+
+select justify_interval(interval '1 day 25 hours');
+-- 2 days 1 hour
 ```
+
+### make_interval
+
+Builds an interval from positional or named numeric arguments.
+
+```sql
+select make_interval(days => 2);
+select make_interval(1, 2, 0, 3, 4, 5, 6);
+```
+
+Named arguments accepted by `make_interval` are `years`, `months`, `weeks`,
+`days`, `hours`, `minutes`, and `seconds` plus singular/abbreviated forms such
+as `year`, `mon`, `day`, `hour`, `min`, and `sec`. Positional arguments are, in
+order: years, months, weeks, days, hours, minutes, seconds.
 
 ### extract / date_part
 
@@ -159,23 +179,19 @@ select extract(day from interval '5 days 12 hours');
 
 select date_part('month', interval '1 year 3 months');
 -- 3
+
+select extract(minute from interval '1 hour 30 minutes');
+-- 30
 ```
 
-Available fields: `year`, `month`, `day`, `hour`, `minute`, `second`
+Available fields: `year`, `month`, `day`, `hour`, `minute`, `second`. Each
+field reads one component (`month` is the months component modulo 12, `hour`
+is whole hours of the time component); they are not totals.
 
 ## Common Patterns
 
-### Date Ranges
-
-```sql
--- Records from the last 30 days
-select * from orders
-where created_at > current_timestamp - interval '30 days';
-
--- Records from the last 3 months
-select * from reports
-where report_date > current_date - interval '3 months';
-```
+For date-range filters and age calculations, see
+[Date and Time Functions](./date_functions.md#common-patterns).
 
 ### Scheduling
 
@@ -190,13 +206,9 @@ from tasks
 where deadline > current_timestamp;
 ```
 
-### Age Calculations
+### Older Than a Duration
 
 ```sql
--- User ages in years
-select name, extract(year from age(current_timestamp, birth_date)) as age
-from users;
-
 -- Items older than 1 year
 select * from inventory
 where age(current_timestamp, received_date) > interval '1 year';
@@ -212,21 +224,6 @@ select
 from support_tickets;
 ```
 
-## Constructing and Extracting
-
-```sql
--- Create intervals with literals or make_interval
-select interval '2 hours 30 minutes';
-select interval 'P1D';
-select make_interval(days => 2);
-
--- Extract components from interval
-select extract(hour from interval '1 hour 30 minutes');
--- 1
-select extract(minute from interval '1 hour 30 minutes');
--- 30
-```
-
 ## Comparison
 
 Intervals can be compared:
@@ -236,7 +233,6 @@ select interval '2 days' > interval '1 day';
 -- true
 ```
 
-Avoid comparing calendar-month intervals to day/hour intervals as if
-they were simple total-hour values; month lengths depend on context.
-
-Note: Comparisons involving months may have unexpected results since months have variable lengths. For precise comparisons, use intervals with only day/time components.
+Avoid comparing calendar-month intervals to day/hour intervals as if they were
+simple total-hour values; month lengths depend on context. For precise
+comparisons, use intervals with only day/time components.

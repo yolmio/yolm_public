@@ -40,33 +40,26 @@ Set `primaryTable` when rows come from one table. It enables table metadata,
 field display names, `InlineFieldDisplay`, inline editing, and generated row
 actions.
 
-## Common Options
+## Non-Obvious Options
 
 | Need | Use |
 | --- | --- |
-| Explicit columns | `columns={(b) => { ... }}` |
-| Search box | `searchable` or `searchable={{ placeholder: "Search..." }}` |
-| Density | `size="xs"`, `size="sm"`, `size="md"`, or `size="lg"` |
-| Sortable headers | `sortable`, `defaultSort` |
-| Column filters | `filterable` |
-| Pagination | `pageSize` |
-| CSV export | `download="orders.csv"` |
-| Checkbox selection | `selectable`, `bulkActions={(selectedTable) => ...}` |
-| Externally named selection table | `selectionTable="selected_orders"` |
-| Inline editing | `editable` with `primaryTable` and row `id` |
-| Row menu actions | `actions={(b) => { b.edit(); b.delete(); ... }}` |
+| Search | `searchable` (`true`, field list, or `{ placeholder }`); `searchDebounceMs` defaults to 250, `0`/`false` searches immediately |
+| Sort / filter | `sortable`, `defaultSort`; `filterable`, `filterVariant` (`"inline"` or `"panel"`), `defaultFilters` |
+| Large result sets | `defaultPagedQuery` and `defaultCountQuery` together, so the table fetches one page plus its total |
+| Selection | `selectable`, `bulkActions={(selectedTable) => ...}`, `selectionTable`, `selectAllFilteredResults` (bulk selection covers the filtered query, not only loaded rows) |
+| Inline editing | `editable` with `primaryTable` and row `id` in the query |
 | Row navigation | `recordName`, `onRowClick` |
-| Dynamic filter | `where`, `watch` |
+| Runtime filter | `where` (SQL predicate) with `watch` |
+| Toolbar | `toolbarStart` sits beside search; `toolbar` sits at the right end |
+| CSV export | `download="orders.csv"` or `{ fileName, label }` |
 
-For large result sets, provide `defaultPagedQuery` and
-`defaultCountQuery` together so the table can fetch a page and its total
-count. `filterVariant` and `defaultFilters` choose the filter UI and initial
-filters. `selectAllFilteredResults` lets bulk selection cover the filtered
-query rather than only loaded rows. Use `header`, `footer`, `emptyState`, and
-`loadingState` for surrounding states; `scrollable`, `toolbar`,
-`analysisScalars`, and `minColumnWidth` control table layout and analysis.
-
-Use the exported props for full prop/builder signatures.
+`variant` is `"default"`, `"outlined"`, or `"plain"`; `size` follows the
+shared [styling props](./styling.md#color-variant-and-size). See
+`DataTableProps`, `ColumnsBuilder`, and `ActionsBuilder` in
+`components/data_table` for the full contract (including `header`, `footer`,
+`emptyState`, `loadingState`, `scrollable`, `analysisScalars`,
+`minColumnWidth`, and `tableProps`).
 
 ## Columns
 
@@ -94,27 +87,11 @@ Useful builder methods include `field`, `simpleColumn`, `column`,
 `minutesDurationColumn`, `checkColumn`, `enumColumn`, `formatColumn`, and
 `recordDisplayColumn`.
 
-## Selection State
+## Selection and Mutations
 
-Pass `selectable` to enable checkbox selection. By default selected rows are
-stored in the procedure-scope table `dt_selected`; pass `selectionTable` to
-choose a stable table name when another component or action needs to refer to
-the same selection state.
-
-## Mutation Patterns
-
-Inline editing is best for direct field updates on the `primaryTable`. The
-query must include the source row `id`.
-
-```tsx
-<DataTable
-  query={sql`select id, name, active from db.products`}
-  primaryTable="products"
-  editable
-/>
-```
-
-For multi-step mutations, prefer row actions or bulk actions:
+With `selectable`, selected rows live in the procedure-scope table
+`dt_selected` unless `selectionTable` names a stable table that another
+component or action refers to. `bulkActions` receives that table's name:
 
 ```tsx
 <DataTable
@@ -122,59 +99,48 @@ For multi-step mutations, prefer row actions or bulk actions:
   primaryTable="invoices"
   selectable
   bulkActions={(selectedTable) => (
-    <Button
+    <ActionButton
       size="sm"
-      onClick={(s) => {
-        s.tryServer({
-          body: (s) => {
-            s.startTransaction();
-            s.modify(sql`
-              update db.invoices
-              set status = 'sent'
-              where id in (select id from ${sql.ref(selectedTable)})
-            `);
-            s.commitTransaction();
-            s.refetch();
-          },
-        });
+      successMessage="Invoices sent"
+      action={(s) => {
+        s.startTransaction();
+        s.modify(sql`
+          update db.invoices
+          set status = 'sent'
+          where id in (select id from ${sql.ref(selectedTable)})
+        `);
+        s.commitTransaction();
       }}
     >
       Send Selected
-    </Button>
+    </ActionButton>
   )}
 />
 ```
 
-Use `s.refetch()` after mutations when the displayed query should refresh.
+`ActionButton` (from `std/action_button`) refetches the enclosing `Data` on
+success; see [Data vs Form](./data_vs_form.md#when-to-use-actionbutton).
 
-### Row action builder
-
-The `actions` callback receives `ActionsBuilder`:
+The `actions` callback builds the row menu:
 
 ```tsx
-import { DataTable, type ActionsBuilder } from "components/data_table";
-
 function orderActions(b: ActionsBuilder) {
   b.edit({ ignoreFields: ["created_at"] });
   b.delete({ confirmText: "Delete this order?" });
-  b.custom("Archive", { icon: "Archive" }, (s) => {
-    s.tryServer({
-      body: (s) => {
-        s.startTransaction();
-        s.modify(sql`update db.orders set archived = true where id = record_id`);
-        s.commitTransaction();
-        s.refetch();
-      },
-    });
+  b.action("Archive", { icon: "Archive", successMessage: "Archived" }, (s, recordId) => {
+    s.startTransaction();
+    s.modify(sql`update db.orders set archived = true where id = ${recordId}`);
+    s.commitTransaction();
   });
 }
 ```
 
 | Method | Effect |
 |--------|--------|
-| `edit(opts?)` | Opens an auto-generated update dialog for the row. `opts.ignoreFields` hides fields; form lifecycle hooks can run before/after transaction start/commit and after client success/server error. |
-| `delete(opts?)` | Opens a confirmation dialog and deletes the row. `opts.confirmText` customizes the prompt; delete lifecycle hooks are supported. |
-| `custom(label, opts, onClick)` | Adds a custom row-menu action. `opts.icon` sets the menu icon; `onClick` receives DOM statements. |
+| `edit(opts?)` | Auto-generated update dialog. `ignoreFields`, `temporaryFields`, and form lifecycle hooks (`beforeTransactionCommit`, `afterSubmitClientSuccess`, ...). |
+| `delete(opts?)` | Confirmation dialog, then delete. `confirmText` plus delete lifecycle hooks. |
+| `action(label, opts, action)` | Guarded server action with the row id; `opts` mirrors `ActionMenuItem` (`when`, `confirm`, `successMessage`, `errorDisplay`, `refetch`, `onSuccess`, `afterSuccessClient`). |
+| `custom(label, { icon }, handler)` | Client-only menu item; `handler` receives DOM statements. |
 
 ## Dynamic Filters
 

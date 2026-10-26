@@ -375,33 +375,31 @@ export function activeVersionLanguageMatchesSql(
   });
 }
 
-export function activeCourseVersionSql(courseId: Sql) {
-  return sql`(
-    select v.id
-    from db.training_courses c
-    join db.training_course_versions v
-      on v.id = c.current_training_course_version_id
-    where c.id = ${courseId}
-      and v.training_course_id = c.id
-      and v.status = 'published'
-    order by v.effective_at desc nulls last, v.id desc
-    limit 1
-  )`;
+/** Requested published language, falling back to the existing default pointer. */
+export function activeCourseVersionSql(
+  courseId: Sql,
+  language?: Sql,
+  exact = false,
+): Sql {
+  const fallback =
+    sql`(select resolved_version.id from db.training_courses resolved_course join db.training_course_versions resolved_version on resolved_version.id = resolved_course.current_training_course_version_id where resolved_course.id = ${courseId} and resolved_version.training_course_id = resolved_course.id and resolved_version.status = 'published')`;
+  if (!language) return fallback;
+  const preferred =
+    sql`(select resolved_version.id from db.training_course_versions resolved_version where resolved_version.training_course_id = ${courseId} and resolved_version.language = ${language} and resolved_version.status = 'published' order by resolved_version.published_at desc nulls last, resolved_version.id desc limit 1)`;
+  return exact ? preferred : sql`coalesce(${preferred}, ${fallback})`;
 }
 
-/** Published version an attempt would pin: the assessment's current version
- * when it is published, like {@link activeCourseVersionSql} for courses. */
-export function activeAssessmentVersionSql(assessmentId: Sql) {
-  return sql`(
-    select v.id
-    from db.training_assessments assessment
-    join db.training_assessment_versions v
-      on v.id = assessment.current_training_assessment_version_id
-    where assessment.id = ${assessmentId}
-      and v.training_assessment_id = assessment.id
-      and v.status = 'published'
-    limit 1
-  )`;
+export function activeAssessmentVersionSql(
+  assessmentId: Sql,
+  language?: Sql,
+  exact = false,
+): Sql {
+  const fallback =
+    sql`(select resolved_version.id from db.training_assessments resolved_assessment join db.training_assessment_versions resolved_version on resolved_version.id = resolved_assessment.current_training_assessment_version_id where resolved_assessment.id = ${assessmentId} and resolved_version.training_assessment_id = resolved_assessment.id and resolved_version.status = 'published')`;
+  if (!language) return fallback;
+  const preferred =
+    sql`(select resolved_version.id from db.training_assessment_versions resolved_version where resolved_version.training_assessment_id = ${assessmentId} and resolved_version.language = ${language} and resolved_version.status = 'published' order by resolved_version.published_at desc nulls last, resolved_version.id desc limit 1)`;
+  return exact ? preferred : sql`coalesce(${preferred}, ${fallback})`;
 }
 
 /**
@@ -411,10 +409,13 @@ export function activeAssessmentVersionSql(assessmentId: Sql) {
  * section_ordinal, item_order_path, course_path, depth.
  * Use as: sql`with recursive ${expandedCourseItemsCteSql(anchor)} ...`
  */
-function expandedCourseItemsCteSql(anchorWhere: Sql) {
+export function expandedCourseItemsCteSql(
+  anchorWhere: Sql,
+  language?: Sql,
+) {
   return sql`expanded_items(
       root_course_id, item_id, parent_item_id, section_ordinal,
-      item_order_path, course_path, depth
+      item_order_path, course_path, depth, language, root_version_id
     ) as (
       select version.training_course_id as root_course_id_value,
              i.id as item_id_value,
@@ -424,7 +425,9 @@ function expandedCourseItemsCteSql(anchorWhere: Sql) {
                lpad(cast(i.id as string), 20, '0') as item_order_path_value,
              ',' || cast(version.training_course_id as string) || ','
                as course_path_value,
-             0 as depth_value
+             0 as depth_value, ${
+    language ?? sql`version.language`
+  } as language_value, version.id as root_version_id_value
       from db.training_course_section_items i
       join db.training_course_sections section
         on section.id = i.training_course_section_id
@@ -441,7 +444,7 @@ function expandedCourseItemsCteSql(anchorWhere: Sql) {
                lpad(cast(nested.id as string), 20, '0') as item_order_path_value,
              expanded.course_path || cast(nested_version.training_course_id as string) ||
                ',' as course_path_value,
-             expanded.depth + 1 as depth_value
+             expanded.depth + 1 as depth_value, expanded.language as language_value, expanded.root_version_id as root_version_id_value
       from expanded_items expanded
       join db.training_course_section_items parent
         on parent.id = expanded.item_id
@@ -451,7 +454,9 @@ function expandedCourseItemsCteSql(anchorWhere: Sql) {
       join db.training_course_sections nested_section
         on nested_section.id = nested.training_course_section_id
        and nested_section.training_course_version_id =
-         ${activeCourseVersionSql(sql`parent.other_course_id`)}
+         ${
+    activeCourseVersionSql(sql`parent.other_course_id`, sql`expanded.language`)
+  }
       join db.training_course_versions nested_version
         on nested_version.id = nested_section.training_course_version_id
       where expanded.depth < 50
@@ -460,26 +465,15 @@ function expandedCourseItemsCteSql(anchorWhere: Sql) {
     )`;
 }
 
-/**
- * Query behind the `training_expanded_course_items` view: the recursive
- * expansion of {@link expandedCourseItemsCteSql} anchored on every course's
- * current published version. Callers filter with
- * `where root_course_id = <courseId>`.
- */
-export function expandedCourseItemsViewQuery() {
-  return sql`
-    with recursive ${
-    expandedCourseItemsCteSql(
-      sql`version.id =
-        ${activeCourseVersionSql(sql`version.training_course_id`)}`,
-    )
-  }
-    select * from expanded_items
-  `;
+function requestedCourseLanguageSql(courseId: Sql, language?: Sql) {
+  return language ??
+    sql`(select language from db.training_course_versions where id = ${
+      activeCourseVersionSql(courseId)
+    })`;
 }
 
 /** Items a trainee can actually receive as tasks. */
-function assignableCourseItemWhereSql() {
+export function assignableCourseItemWhereSql() {
   return sql`i.type != 'other_checklist'
     and (
       (
@@ -734,12 +728,24 @@ export function cloneCourseVersionItemDocumentsSql(args: {
   `;
 }
 
-export function missingActiveVersionCountSql(courseId: Sql) {
+export function missingActiveVersionCountSql(courseId: Sql, language?: Sql) {
   return sql`(
+    with recursive ${
+    expandedCourseItemsCteSql(
+      sql`version.id = ${activeCourseVersionSql(courseId, language)}`,
+      requestedCourseLanguageSql(courseId, language),
+    )
+  }
     select count(*)
-    from db.training_expanded_course_items expanded
+    from expanded_items expanded
     join db.training_course_section_items i on i.id = expanded.item_id
     where expanded.root_course_id = ${courseId}
+      and expanded.language = ${
+    language ??
+      sql`(select language from db.training_course_versions where id = ${
+        activeCourseVersionSql(courseId)
+      })`
+  }
       and (
       (
         i.type = 'external_link'
@@ -747,21 +753,42 @@ export function missingActiveVersionCountSql(courseId: Sql) {
       )
       or (
         i.type = 'other_checklist'
-        and ${activeCourseVersionSql(sql`i.other_course_id`)} is null
+        and (${
+    activeCourseVersionSql(sql`i.other_course_id`, sql`expanded.language`)
+  } is null
+          or not exists (select 1 from db.training_courses linked_course
+            where linked_course.id = i.other_course_id and linked_course.is_active))
       )
       or (
         i.type = 'assessment'
-        and ${activeAssessmentVersionSql(sql`i.training_assessment_id`)} is null
+        and ${
+    activeAssessmentVersionSql(
+      sql`i.training_assessment_id`,
+      sql`expanded.language`,
+    )
+  } is null
       )
     )
   )`;
 }
-export function assignableCourseItemCountSql(courseId: Sql) {
+export function assignableCourseItemCountSql(courseId: Sql, language?: Sql) {
   return sql`(
+    with recursive ${
+    expandedCourseItemsCteSql(
+      sql`version.id = ${activeCourseVersionSql(courseId, language)}`,
+      requestedCourseLanguageSql(courseId, language),
+    )
+  }
     select count(*)
-    from db.training_expanded_course_items expanded
+    from expanded_items expanded
     join db.training_course_section_items i on i.id = expanded.item_id
     where expanded.root_course_id = ${courseId}
+      and expanded.language = ${
+    language ??
+      sql`(select language from db.training_course_versions where id = ${
+        activeCourseVersionSql(courseId)
+      })`
+  }
       and ${assignableCourseItemWhereSql()}
   )`;
 }
@@ -811,17 +838,26 @@ export function insertCourseTasksForAssignmentSql(args: {
     insert into db.training_employee_tasks
       (training_assignment_id, training_course_section_item_id,
        parent_training_course_section_item_id, due_date)
+    with recursive ${
+    expandedCourseItemsCteSql(
+      sql`version.id = (select coalesce(training_course_version_id, ${
+        activeCourseVersionSql(args.courseId, sql`training_language`)
+      }) from db.training_assignments where id = ${args.assignmentId})`,
+      sql`(select training_language from db.training_assignments where id = ${args.assignmentId})`,
+    )
+  }
     select ${args.assignmentId} as assignment_id_value,
            i.id as course_item_id_value,
            expanded.parent_item_id as parent_item_id_value,
            ${args.dueDate} as due_date_value
-    from db.training_expanded_course_items expanded
+    from expanded_items expanded
     join db.training_course_section_items i on i.id = expanded.item_id
     join db.training_assignments assignment
       on assignment.id = ${args.assignmentId}
      and assignment.training_course_id = ${args.courseId}
      and assignment.document_id is null
     where expanded.root_course_id = ${args.courseId}
+      and expanded.language = assignment.training_language
       and ${assignableCourseItemWhereSql()}
     order by expanded.section_ordinal, expanded.item_order_path
   `;
@@ -829,6 +865,7 @@ export function insertCourseTasksForAssignmentSql(args: {
 
 export function replaceOpenCourseAssignmentTasksSql(args: {
   courseId: Sql;
+  versionId?: Sql;
 }) {
   return sql`
     update db.training_employee_tasks
@@ -837,6 +874,11 @@ export function replaceOpenCourseAssignmentTasksSql(args: {
         select a.id
         from db.training_assignments a
         where a.training_course_id = ${args.courseId}
+          ${
+    args.versionId
+      ? sql`and a.training_course_version_id = ${args.versionId}`
+      : sql``
+  }
           and a.document_id is null
           and a.status in ('pending', 'in_progress')
       )
@@ -847,6 +889,7 @@ export function replaceOpenCourseAssignmentTasksSql(args: {
 export function cancelOpenAssessmentAttemptsForCourseAssignmentsSql(args: {
   courseId: Sql;
   cancelledById: Sql;
+  versionId?: Sql;
 }) {
   return sql`
     update db.training_assessment_attempts
@@ -861,6 +904,11 @@ export function cancelOpenAssessmentAttemptsForCourseAssignmentsSql(args: {
         join db.training_assignments assignment
           on assignment.id = task.training_assignment_id
         where assignment.training_course_id = ${args.courseId}
+          ${
+    args.versionId
+      ? sql`and assignment.training_course_version_id = ${args.versionId}`
+      : sql``
+  }
           and assignment.document_id is null
           and assignment.status in ('pending', 'in_progress')
           and task.status in ('assigned', 'in_progress')
@@ -868,16 +916,11 @@ export function cancelOpenAssessmentAttemptsForCourseAssignmentsSql(args: {
   `;
 }
 
-/**
- * Keeps the inline recursive CTE instead of the
- * `training_expanded_course_items` view: it anchors on the explicitly
- * passed `newCourseVersionId`, which is not necessarily the course's
- * current published version pointer (the view only expands current
- * published versions).
- */
+/** Expand one assignment language and snapshot version per publication batch. */
 export function insertCurrentCourseAssignmentTasksSql(args: {
   courseId: Sql;
   newCourseVersionId: Sql;
+  language: Sql;
 }) {
   return sql`
     insert into db.training_employee_tasks
@@ -885,12 +928,8 @@ export function insertCurrentCourseAssignmentTasksSql(args: {
        parent_training_course_section_item_id, due_date)
     with recursive ${
     expandedCourseItemsCteSql(
-      sql`exists (
-        select 1
-        from db.training_course_sections current_section
-        where current_section.id = i.training_course_section_id
-          and current_section.training_course_version_id = ${args.newCourseVersionId}
-      )`,
+      sql`version.id = ${args.newCourseVersionId}`,
+      args.language,
     )
   }
     select a.id as assignment_id_value,
@@ -899,8 +938,10 @@ export function insertCurrentCourseAssignmentTasksSql(args: {
            a.due_date as due_date_value
     from db.training_assignments a
     join expanded_items expanded on expanded.root_course_id = a.training_course_id
+      and expanded.language = a.training_language and expanded.root_version_id = ${args.newCourseVersionId}
     join db.training_course_section_items i on i.id = expanded.item_id
     where a.training_course_id = ${args.courseId}
+      and a.training_course_version_id = ${args.newCourseVersionId}
       and a.document_id is null
       and a.status in ('pending', 'in_progress')
       and ${assignableCourseItemWhereSql()}
@@ -992,6 +1033,7 @@ export function trainingCompletionAttestation(opts: TrainingBlockOpts) {
 export function updateAssignmentStatusAfterTaskCompletionSql(args: {
   opts: TrainingBlockOpts;
   assignmentId: Sql;
+  submitCourse?: boolean;
 }) {
   const validationLabels = trainingValidationLabels(args.opts);
   const secondaryByPermission = secondaryValidatorSignoffByPermission(
@@ -1000,6 +1042,10 @@ export function updateAssignmentStatusAfterTaskCompletionSql(args: {
   return sql`
     update db.training_assignments
     set status = case
+          when training_course_id is not null and ${
+    args.submitCourse ? sql`false` : sql`true`
+  }
+            then case when status = 'pending' then 'in_progress' else status end
           when not exists (
             select 1
             from db.training_employee_tasks t

@@ -11,6 +11,7 @@ import { EmailTemplateListPage } from "./email_template_list";
 import { BasicEmailEditorLexical } from "./lexical_basic_editor";
 import { AdvancedEmailEditorLexical } from "./lexical_advanced_editor";
 import { generateAdvancedTemplateMjml } from "./advanced_template_mjml";
+import { registerDuplicateEmailTemplate } from "./duplicate";
 import { ensureLexicalRichTextFunctions } from "components/lexical/components/lexical_scalar_functions";
 
 export interface EmailTemplatesBlockOptions {
@@ -235,6 +236,7 @@ export class EmailTemplatesBlock implements Block {
       // text
       table.json("text_content");
     });
+    registerDuplicateEmailTemplate();
     this.componentDependencies = ["EmailTemplatesPage"];
     this.description = "Provides a way to create and manage email templates.";
   }

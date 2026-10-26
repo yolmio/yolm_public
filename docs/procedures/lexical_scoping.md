@@ -157,7 +157,9 @@ diagnostics and fixes.
 ## Reusable Helper Pattern
 
 Reusable helpers should not leak generic temporary names into the caller's
-block when the helper can be used more than once.
+block when the helper can be used more than once. A helper expands inline at
+every call site; share runtime logic through a
+[stored procedure](../concepts/stored_procedures.md) instead.
 
 Use a private `s.block` when all helper temporaries are local to the helper:
 

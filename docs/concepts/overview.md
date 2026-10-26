@@ -31,7 +31,7 @@ semantics.
 
 ## Build Sequence For Agents
 
-1. Read the project's actual `core.tsx` or `system.tsx` before changing schema,
+1. Read the project's actual `core.tsx` before changing schema,
    enums, blocks, functions, or shared system state.
 2. Choose existing blocks/components before adding new schema or UI.
 3. Define persistent state in `db.*`, transient screen state in `ui.*`, and
@@ -49,7 +49,7 @@ Projects can arrange these files differently. Inspect the actual project tree
 before assuming a path:
 
 ```text
-core.tsx or system.tsx     # tables, enums, blocks, functions, shared config
+core.tsx                   # tables, enums, blocks, functions, shared config
 apps/<domain>.tsx         # system.app(...) definitions
 apis/<domain>.ts          # system.api(...) definitions
 components/*.tsx          # solution-specific reusable UI
@@ -95,7 +95,7 @@ TypeScript. See [Execution Phases](./execution_phases.md) for the details.
 
 | Scope | Lifetime | Use for |
 | --- | --- | --- |
-| `db.*` | persistent | business data, users, workflow state, audit logs |
+| `db.*` | persistent | business data, users, workflow state (history comes from transaction queries) |
 | `ui.*` | in-memory UI state | filters, forms, selected rows, temporary screen state |
 | procedure scope | one execution | local scalars, records, temporary tables |
 
@@ -108,6 +108,7 @@ table with `Data`, then persist changes through `Form` or an event handler.
 | --- | --- |
 | Add tables, fields, search, foreign keys | [Database Overview](../database/overview.md) |
 | Write SQL expressions or queries | [SQL Overview](../sql/overview.md) |
+| Classify, route, or score with AI | [AI Decisions](../sql/ai_decisions.md) |
 | Build query-backed UI state | [Data Component](../ui/data.md) |
 | Build mutations/forms | [Form Component](../ui/form.md) |
 | Build app routes/layouts | [Apps](./apps.md), [Routing](../ui/routing.md) |
@@ -124,5 +125,5 @@ table with `Data`, then persist changes through `Form` or an event handler.
 - Storing filters or edit buffers in `db.*` instead of `ui.*`.
 - Using TypeScript conditionals inside SQL expressions instead of SQL `case`.
 - Recreating existing blocks/components.
-- Guessing table shape instead of reading the actual `core.tsx` or `system.tsx`.
+- Guessing table shape instead of reading the actual `core.tsx`.
 - Changing package internals when the task only needs solution code.

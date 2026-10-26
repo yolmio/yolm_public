@@ -1,3 +1,4 @@
+import type { WebhookManagementPage } from "./outgoing_webhooks_page";
 import { sql } from "../../std/sql_utils";
 import type { NumericExpr, Sql } from "../../std/sql_utils";
 import type {
@@ -65,6 +66,7 @@ function makeRequest(
     },
     errorName: "error",
     catch: (s) => {
+      s.rollbackIfInTransaction();
       s.startTransaction();
       s.modify(
         sql`insert into outgoing_webhook_attempts
@@ -115,7 +117,7 @@ export class OutgoingWebhooksBlock implements Block {
   componentDependencies: string[] = [];
   description: string | undefined;
   /** Page component for the user-facing webhook management UI. */
-  static WebhookManagementPage: any;
+  static WebhookManagementPage: typeof WebhookManagementPage;
   constructor(opts: OutgoingWebhooksOpts = {}) {
     this.types = opts.types ?? [];
   }

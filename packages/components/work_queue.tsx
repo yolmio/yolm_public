@@ -124,6 +124,9 @@ const styles = createStyles({
     left: 0,
     right: 0,
     zIndex: 60,
+    // Status feedback must not swallow the user's next header action while
+    // its dismissal timer runs (for example Done -> Process All in Auto Review).
+    pointerEvents: "none",
   },
   tableContainer: {
     flex: 1,
@@ -525,6 +528,12 @@ export interface WorkQueueRootProps {
   rowKey: string;
   /** Watch expressions to trigger refresh */
   watch?: AnyExpr | AnyExpr[];
+  /**
+   * Automatically watch query inputs (default: true). When false, the caller must
+   * include every UI query and conditional-filter input in watch. Sorting and
+   * global refetch remain watched internally.
+   */
+  autoWatch?: boolean;
   /** Message to show when queue is empty */
   emptyMessage?: Node;
   /** Children: WorkQueue.Header, WorkQueue.Table, WorkQueue.Footer */
@@ -592,7 +601,9 @@ WorkQueue.Root = function Root(props: WorkQueueRootProps) {
     watchExprs.push(props.watch);
   }
 
-  useQueryParams([{ name: "wq_selected_id", type: "BigInt" }]);
+  useQueryParams([
+    { name: "wq_selected_id", type: "BigInt", history: "push" },
+  ]);
 
   // Footer config from gather phase
   const footerConfig = gatherCtx.footerConfig;
@@ -678,6 +689,7 @@ WorkQueue.Root = function Root(props: WorkQueueRootProps) {
 
         {/* Inner Data: server query through dynamicQuery */}
         <Data
+          autoWatch={props.autoWatch}
           procedure={(s) => {
             // Declare table shape (columns inferred from queryWithRowNum)
             s.defTable(queryName, { inferQuery: queryWithRowNum });

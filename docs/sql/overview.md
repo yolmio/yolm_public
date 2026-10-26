@@ -4,6 +4,8 @@ description: Overview of the Yolm SQL dialect, including accepted statement type
 tags:
   - sql
   - overview
+related:
+  - sql/ai_decisions.md
 ---
 
 # Yolm SQL Overview
@@ -81,6 +83,14 @@ Many functions are available in namespaced form under `date`, `string`, `json`, 
 select date_trunc('month', date_time) from events;  -- PostgreSQL syntax
 select date.trunc(month, date_time) from events;    -- Yolm namespaced syntax
 ```
+
+### AI Decisions
+
+Use `ai_probability`, `ai_choice`, `ai_score`, and `ai_decide` for server-side
+probability filters, classification, numeric scoring, and grouped judgments.
+They are external model calls, not deterministic rules or client-side SQL.
+See [AI Decisions](./ai_decisions.md) for profiles, result fields, procedure
+bindings, blob images, and failure handling.
 
 ### Auto Join
 

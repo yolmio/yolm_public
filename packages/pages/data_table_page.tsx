@@ -2,7 +2,11 @@ import { DeleteRecordsDialog } from "components/delete_record_dialog";
 import { IconButton } from "components/icon_button";
 import { Snackbar } from "components/snackbar";
 import { DataTable } from "components/data_table";
-import type { ActionsBuilder, ColumnsBuilder } from "components/data_table";
+import type {
+  ActionsBuilder,
+  ColumnsBuilder,
+  DataTableProps,
+} from "components/data_table";
 import { singularize } from "std/inflectors";
 import {
   getHrefToRecord,
@@ -42,6 +46,8 @@ export interface DataTablePageProps {
   actions?: (b: ActionsBuilder) => void;
   toolbar?: Node;
   searchable?: boolean | string[] | { placeholder?: string };
+  /** Search delay in milliseconds; defaults to 250. Use `0` or `false` for immediate search. */
+  searchDebounceMs?: DataTableProps["searchDebounceMs"];
   filterable?: boolean;
   sortable?: boolean;
   defaultSort?: { column: string; direction?: "asc" | "desc" };
@@ -77,6 +83,7 @@ export interface DataTablePageProps {
  * @prop [actions] - Row actions builder callback (edit, delete, custom).
  * @prop [toolbar] - Custom toolbar content rendered alongside search/download.
  * @prop [searchable] - Enable search bar.
+ * @prop [searchDebounceMs] - Search delay in milliseconds (default 250); `0` or `false` disables the delay.
  * @prop [filterable] - Enable per-column filters.
  * @prop [sortable] - Enable column sorting.
  * @prop [defaultSort] - Default sort column and direction.
@@ -234,6 +241,7 @@ function DataTablePageInner(props: DataTablePageProps) {
         actions={props.actions}
         toolbar={props.toolbar}
         searchable={props.searchable}
+        searchDebounceMs={props.searchDebounceMs}
         filterable={props.filterable}
         sortable={props.sortable}
         defaultSort={props.defaultSort}

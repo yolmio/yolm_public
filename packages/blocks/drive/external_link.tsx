@@ -1,6 +1,11 @@
 import { Button } from "components/button";
 import { Input } from "components/input";
 import { Typography } from "components/typography";
+import {
+  EmbeddedVideo,
+  ensureVideoEmbedFunction,
+} from "components/embedded_video";
+import { isPlayableVideoMime } from "components/video_player";
 import { ActionButton } from "std/action_button";
 import { Data } from "std/data";
 import { sql } from "std/sql_utils";
@@ -11,10 +16,18 @@ import { Show } from "std/ui";
 import type {
   DriveBlockContract,
   DriveExtension,
+  FileVersionCreatedEvent,
   FileViewerContribution,
 } from "./types.ts";
 
 export const externalLinkContentType = "application/vnd.yolm.external-link";
+export const videoLinkContentType = "application/vnd.yolm.video-link";
+
+/** Both uploaded videos and provider links belong to the same video item. */
+export function isVideoSource(contentType: Sql): Sql {
+  return sql`(${isPlayableVideoMime(contentType)}
+    or ${contentType} = ${sql.lit(videoLinkContentType)})`;
+}
 
 export interface ExternalLinkViewerProps {
   links: ExternalLinkExtension;
@@ -104,10 +117,36 @@ export class ExternalLinkExtension implements DriveExtension {
   readonly contentTable = "external_link_file_versions";
   #files?: DriveBlockContract;
 
+  constructor(readonly opts: { videoSpaceTypes?: readonly string[] } = {}) {}
+
+  supportsVideoSpace(typeName: string) {
+    return this.opts.videoSpaceTypes?.includes(typeName) ?? false;
+  }
+
+  private videoSpaceSql(spaceId: Sql): Sql {
+    const types = this.opts.videoSpaceTypes ?? [];
+    return types.length
+      ? sql`exists (select 1 from db.file_spaces video_space
+          where video_space.id = ${spaceId}
+            and ${
+        sql.inList(
+          sql`video_space.space_type`,
+          types.map((type) => sql.lit(type)),
+        )
+      })`
+      : sql.false;
+  }
+
+  canChangeVersionContentType = (spaceId: Sql, previous: Sql, next: Sql) =>
+    sql`${this.videoSpaceSql(spaceId)}
+      and ${isVideoSource(previous)} and ${isVideoSource(next)}`;
+
   readonly viewer: FileViewerContribution = {
     name: "external_link",
     canView: (version) =>
-      sql`${version}.content_type = ${sql.lit(externalLinkContentType)}`,
+      sql`${version}.content_type in (${sql.lit(externalLinkContentType)}, ${
+        sql.lit(videoLinkContentType)
+      })`,
     render: (props) => (
       <ExternalLinkViewer
         links={this}
@@ -120,6 +159,7 @@ export class ExternalLinkExtension implements DriveExtension {
 
   initialize(files: DriveBlockContract) {
     this.#files = files;
+    ensureVideoEmbedFunction();
     system.db.table(this.contentTable, (table) => {
       table.fk("file_version_id", files.versionTable).notNull().unique()
         .onDelete("Cascade");
@@ -128,7 +168,110 @@ export class ExternalLinkExtension implements DriveExtension {
     });
   }
 
+  validate(files: DriveBlockContract) {
+    for (const name of this.opts.videoSpaceTypes ?? []) {
+      if (
+        !files.spaceTypes.some((type) =>
+          type.name === name && type.extensions.includes(this)
+        )
+      ) {
+        throw new Error(
+          `Video space "${name}" must install ExternalLinkExtension.`,
+        );
+      }
+    }
+  }
+
+  writeVersionContent = (
+    s: ServerStatementsBase<any>,
+    event: FileVersionCreatedEvent,
+  ) => {
+    const url = event.externalUrl ?? sql.null;
+    s.if(
+      sql`${event.contentType} in (${sql.lit(externalLinkContentType)}, ${
+        sql.lit(videoLinkContentType)
+      })`,
+      (s) => {
+        s.throwErrorUnless(
+          sql`${event.byteLength} = 0 and not (${invalidExternalLinkUrl(url)})`,
+          sql.lit`Enter a valid HTTPS URL.`,
+        );
+        s.if(
+          sql`${event.contentType} = ${sql.lit(videoLinkContentType)}
+            or ${this.videoSpaceSql(event.spaceId)}`,
+          (s) =>
+            s.throwErrorUnless(
+              sql`${event.contentType} = ${sql.lit(videoLinkContentType)}
+              and ${this.videoSpaceSql(event.spaceId)}
+              and fn.video_embed_url(${url}) is not null`,
+              sql.lit`Enter a supported YouTube or Vimeo video link.`,
+            ),
+        );
+        s.modify(
+          sql`insert into db.external_link_file_versions (file_version_id, url)
+          values (${event.versionId}, trim(${url}))`,
+        );
+      },
+    );
+  };
+
   registerStoredProcedures = () => {
+    if (this.opts.videoSpaceTypes?.length) {
+      system.storedProcedure({
+        name: "external_video_save",
+        transaction: "caller",
+        inputScalars: [
+          { name: "p_item_id", type: "BigInt" },
+          { name: "p_space_id", type: "BigInt" },
+          { name: "p_parent_id", type: "BigInt" },
+          { name: "p_name", type: { type: "String", maxLength: 500 } },
+          { name: "p_url", type: { type: "String", maxLength: 2000 } },
+          { name: "p_language", type: { type: "String", maxLength: 20 } },
+          { name: "p_user_id", type: "BigInt" },
+        ],
+        outputScalars: [{ name: "item_id", type: "BigInt" }],
+        procedure: (s) => {
+          s.throwErrorUnless(
+            sql`${this.videoSpaceSql(sql`p_space_id`)}
+              and coalesce(${
+              this.#requiredFiles().runtimeAccessSql(
+                sql`p_space_id`,
+                sql`p_user_id`,
+                "write",
+              )
+            }, false)`,
+            sql.lit`You cannot add videos to this workspace.`,
+          );
+          s.throwErrorUnless(
+            sql`fn.video_embed_url(p_url) is not null`,
+            sql.lit`Enter a supported YouTube or Vimeo video link.`,
+          );
+          s.if(sql`p_item_id is null`, (s) =>
+            this.createLink(s, {
+              spaceId: sql`p_space_id`,
+              parentItemId: sql`p_parent_id`,
+              name: sql`p_name`,
+              url: sql`trim(p_url)`,
+              sysUserId: sql`p_user_id`,
+              language: sql`p_language`,
+              intoItem: "item_id",
+            })).else((s) => {
+              s.throwErrorUnless(
+                sql`exists (select 1 from db.file_items
+                  where id = p_item_id and file_space_id = p_space_id)`,
+                sql.lit`This video is unavailable.`,
+              );
+              this.saveLink(s, {
+                fileItemId: sql`p_item_id`,
+                url: sql`trim(p_url)`,
+                sysUserId: sql`p_user_id`,
+                language: sql`p_language`,
+              });
+              s.setScalar("item_id", sql`p_item_id`);
+            });
+        },
+      });
+    }
     system.storedProcedure({
       name: "external_link_save",
       transaction: "standalone",
@@ -159,6 +302,7 @@ export class ExternalLinkExtension implements DriveExtension {
       sysUserId: Sql;
       intoItem?: string;
       intoVersion?: string;
+      language?: Sql;
     },
   ) {
     const files = this.#requiredFiles();
@@ -197,20 +341,16 @@ export class ExternalLinkExtension implements DriveExtension {
     files.createFileVersion(s, {
       itemId: sql.ref(itemResult),
       fileName: opts.name,
-      contentType: sql.lit(externalLinkContentType),
+      contentType: sql`case when ${this.videoSpaceSql(opts.spaceId)}
+        then ${sql.lit(videoLinkContentType)} else ${
+        sql.lit(externalLinkContentType)
+      } end`,
       byteLength: sql`0`,
       sysUserId: opts.sysUserId,
       intoVersion: versionResult,
+      externalUrl: opts.url,
+      language: opts.language,
     });
-    s.modify(sql`
-      insert into db.external_link_file_versions (
-        file_version_id,
-        url
-      ) values (
-        ${sql.ref(versionResult)},
-        trim(${opts.url})
-      )
-    `);
   }
 
   saveLink<T extends ServerStatementsBase<any>>(
@@ -221,6 +361,7 @@ export class ExternalLinkExtension implements DriveExtension {
       sysUserId: Sql;
       note?: Sql;
       intoVersion?: string;
+      language?: Sql;
     },
   ) {
     const files = this.#requiredFiles();
@@ -238,7 +379,10 @@ export class ExternalLinkExtension implements DriveExtension {
           where item.id = ${opts.fileItemId}
             and item.item_kind = 'file'
             and item.trashed_at is null
-            and version.content_type = ${sql.lit(externalLinkContentType)}
+            and (version.content_type = ${sql.lit(externalLinkContentType)}
+              or (${this.videoSpaceSql(sql`item.file_space_id`)} and ${
+        isVideoSource(sql`version.content_type`)
+      }))
             and ${
         files.extensionEnabledSql(
           sql`item.file_space_id`,
@@ -267,21 +411,21 @@ export class ExternalLinkExtension implements DriveExtension {
       itemId: opts.fileItemId,
       fileName:
         sql`(select name from db.file_items where id = ${opts.fileItemId})`,
-      contentType: sql.lit(externalLinkContentType),
+      contentType: sql`case when ${
+        this.videoSpaceSql(
+          sql`(select file_space_id from db.file_items where id = ${opts.fileItemId})`,
+        )
+      }
+        then ${sql.lit(videoLinkContentType)} else ${
+        sql.lit(externalLinkContentType)
+      } end`,
       byteLength: sql`0`,
       note: opts.note,
       sysUserId: opts.sysUserId,
       intoVersion: versionResult,
+      externalUrl: opts.url,
+      language: opts.language,
     });
-    s.modify(sql`
-      insert into db.external_link_file_versions (
-        file_version_id,
-        url
-      ) values (
-        ${sql.ref(versionResult)},
-        trim(${opts.url})
-      )
-    `);
   }
 
   #requiredFiles() {
@@ -302,6 +446,7 @@ export function ExternalLinkViewer(props: ExternalLinkViewerProps) {
             select
               item.id as file_item_id,
               item.name,
+              version.content_type,
               link.url
             from db.file_items item
             join db.file_versions version
@@ -324,15 +469,31 @@ export function ExternalLinkViewer(props: ExternalLinkViewerProps) {
               {sql`external_link_document.url`}
             </Typography>
           </div>
-          <Button
-            component="a"
-            href={sql`external_link_document.url`}
-            target="_blank"
-            startIcon="OpenInNew"
+          <Show
+            when={sql`external_link_document.content_type = ${
+              sql.lit(videoLinkContentType)
+            }`}
+            fallback={
+              <Button
+                component="a"
+                href={sql`external_link_document.url`}
+                target="_blank"
+                startIcon="OpenInNew"
+              >
+                Open link
+              </Button>
+            }
           >
-            Open link
-          </Button>
-          <Show when={sql`not (${props.readOnly})`}>
+            <EmbeddedVideo
+              url={sql`external_link_document.url`}
+              title={sql`external_link_document.name`}
+            />
+          </Show>
+          <Show
+            when={sql`not (${props.readOnly}) and external_link_document.content_type <> ${
+              sql.lit(videoLinkContentType)
+            }`}
+          >
             <Data
               local
               procedure={(s) => {

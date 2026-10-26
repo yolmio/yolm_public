@@ -12,23 +12,10 @@ These functions are available globally without namespace prefixes.
 
 ## Date and Time
 
-### Current Date/Time
-
-```sql
--- Current date
-select current_date;      -- 2023-09-17
-select current_date();    -- 2023-09-17
-select today();           -- 2023-09-17
-
--- Current timestamp
-select current_timestamp; -- 2023-09-17T14:30:00+00:00
-select current_timestamp();
-select now();
-
--- Relative dates
-select tomorrow();        -- 2023-09-18
-select yesterday();       -- 2023-09-16
-```
+`current_date`, `today()`, `current_timestamp`, `now()`, `tomorrow()`, and
+`yesterday()` are documented in
+[Date and Time Functions](./date_functions.md#current-datetime-functions).
+Interval literals are documented in [Interval Type](./interval_type.md).
 
 ### Date Literals
 
@@ -37,7 +24,6 @@ select date '2023-09-17';
 select time '14:30:00';
 select timestamp '2023-09-17 14:30:00';
 select timestamptz '2023-09-17 14:30:00+00:00';
-select interval '1 day 2 hours';
 ```
 
 ## Null Handling
@@ -54,13 +40,18 @@ select coalesce(nickname, name, 'Anonymous') from users;
 
 ### nullif
 
-Returns NULL if the two arguments are equal, otherwise returns the first argument.
+Returns null if the two arguments are equal, otherwise returns the first argument.
 
 ```sql
 select nullif(10, 10);       -- null
 select nullif(10, 20);       -- 10
-select 100 / nullif(0, 0);   -- null (avoids division by zero)
+select nullif(status, 'unknown') as clean_status from tasks;
 ```
+
+Division or modulo by zero already returns null rather than raising an error
+(see [Numeric Type Behavior](./math_functions.md#numeric-type-behavior)), so
+`value / nullif(divisor, 0)` is not required to avoid an error; use it only to
+make the intent explicit.
 
 ### least / greatest
 
@@ -94,17 +85,20 @@ PostgreSQL-style casting:
 select '123'::int;
 select 123::text;
 select '2023-09-17'::date;
+select price::decimal(10,2);
 ```
 
-### try_cast
+### try_cast / safe_cast
 
-Attempts to convert, returning NULL if conversion fails (instead of error).
+Attempts to convert, returning null if conversion fails (instead of an error).
+`safe_cast` is an alias.
 
 ```sql
 select try_cast('not a number' as int);  -- null
 select try_cast('123' as int);           -- 123
 select try_cast('2023-09-17' as date);   -- 2023-09-17
 select try_cast('invalid date' as date); -- null
+select safe_cast('123' as int);          -- 123
 ```
 
 ### Supported Types
@@ -123,7 +117,8 @@ select try_cast('invalid date' as date); -- null
 - `interval`
 
 String-to-interval casts accept the same interval text forms as interval
-literals, including PostgreSQL-style text and ISO 8601 duration text.
+literals, including PostgreSQL-style text and ISO 8601 duration text. See
+[Interval Type](./interval_type.md#interval-literals).
 
 ## Conditional Functions
 
@@ -234,32 +229,35 @@ where match(product, query => 'electronic', record_id => id);
 The search uses the match config defined on the table. See
 [Search Configuration](../database/search_config.md) for setup.
 
-## Dynamic Query Functions
-
-These functions are for dynamic queries (used in `dynamicQuery` statements).
+## Dynamic Field Access
 
 ### dynamic_field(record, index)
 
-Accesses a field in a row dynamically by index.
+Reads the column at a runtime index from a record whose columns are named
+`field_0`, `field_1`, and so on. Such records come from the result table of a
+`dynamicQuery` statement (see
+[Server Statements](../procedures/server_statements.md#dynamic-sql)) and from
+row-import table functions such as `csv.rows` (see
+[Table Functions](./table_functions.md#csvrows)).
+
+- `record` must be a bare record or cursor name, not an arbitrary expression.
+- `index` is a numeric expression and is 0-based (`0` reads `field_0`).
+- The result is nullable `text`; cast it when you need another type.
 
 ```sql
+-- csv.rows treats the first line as a header row
 select dynamic_field(row, 1 + 1), ordinal
-from csv.rows('cat,dog,chicken\na,b,c\nd,e,f') as row;
+from csv.rows('cat,dog,chicken
+a,b,c
+d,e,f') as row;
 -- c, 0
 -- f, 1
-
-select dynamic_field(book, 2) as second_field
-from books;
 ```
 
-### dynamic_ordinal
-
-Returns the ordinal position when iterating.
-
-```sql
-select dynamic_field(row, 0), ordinal
-from csv.rows('a,b\nc,d') as row;
-```
+There is no `dynamic_ordinal` function. Row-import table functions return an
+ordinary `ordinal` column, as above, and a `dynamicQuery` column meta table
+provides each column's `name`, `index`, and `type`, which pairs with
+`dynamic_field(record, column.index)`.
 
 ## Global UI Tables
 

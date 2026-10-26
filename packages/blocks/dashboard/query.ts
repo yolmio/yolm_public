@@ -5,6 +5,7 @@ import {
   defQueryWhitelists,
   effectiveCapabilitiesJsonExpr,
 } from "blocks/spark/query_policy";
+import { validateFormats } from "./format";
 import { resolveParameters, validateBindings } from "./parameters";
 import type { DashboardBlock } from "./index";
 
@@ -34,12 +35,18 @@ function executeWidgetProcedure<T extends IServerBaseStatements>(
     sql.lit`Choose a supported widget type and configuration object.`,
   );
   s.throwErrorIf(
-    sql`coalesce(widget_config->>'format', 'number') not in ('number','number_thousands','currency','percentage','duration')
-    or coalesce(widget_config->>'height','medium') not in ('small','medium','large')
+    sql`coalesce(widget_config->>'height','medium') not in ('small','medium','large')
     or coalesce(widget_config->>'missingValues','gap') not in ('gap','zero')
-    or (widget_config->'inverse' is not null and json_typeof(widget_config->'inverse') != 'boolean')`,
-    sql.lit`Invalid widget format, height, missing-value policy or direction.`,
+    or coalesce(widget_config->>'weekEnding','sunday') not in ('sunday','monday','tuesday','wednesday','thursday','friday','saturday')
+    or (widget_config->'inverse' is not null and json_typeof(widget_config->'inverse') != 'boolean')
+    or (widget_config->'series2Inverse' is not null and json_typeof(widget_config->'series2Inverse') != 'boolean')
+    or (widget_config->'series2Label' is not null and json_typeof(widget_config->'series2Label') != 'string')
+    or (widget_config->'ownerHeader' is not null and json_typeof(widget_config->'ownerHeader') != 'string')
+    or (widget_config->'ownerLabel' is not null and json_typeof(widget_config->'ownerLabel') != 'string')
+    or exists(select 1 from (values(widget_config->'graphLow'),(widget_config->'graphDivision'),(widget_config->'series2GraphLow'),(widget_config->'series2GraphDivision')) candidate(value) where value is not null and try_cast(value #>> '{}' as double) is null)`,
+    sql.lit`Invalid widget display configuration.`,
   );
+  validateFormats(s, sql`widget_config`);
   s.defScalar(
     "widget_effective_capabilities",
     effectiveCapabilitiesJsonExpr(
@@ -134,12 +141,22 @@ function executeWidgetProcedure<T extends IServerBaseStatements>(
       sql
         .lit`This widget returns more than 1,000 rows. Aggregate or narrow the query.`,
     );
+    s.throwErrorIf(
+      sql`exists(select 1 from json.object_each(coalesce(widget_config->'columnFormats','{}'::json)) c
+        where (json_array_length(executed_widget_rows)>0 and not exists(select 1 from json.object_each(executed_widget_rows->0) f where f.key=c.key))
+        or (c.value->>'type' != 'text' and exists(select 1 from json.array_each(executed_widget_rows) r
+          where r.value->>c.key is not null and not coalesce(try_cast(r.value->>c.key as double) between cast('-1e308' as double) and cast('1e308' as double),false))))`,
+      sql
+        .lit`Column formats must refer to returned columns; numeric formats require numeric JSON values.`,
+    );
     // Fixed renderer contract: chart queries return x, value; number returns value.
     // A table may return any approved columns. Null numbers remain gaps.
     s.throwErrorIf(
       sql`widget_type != 'table' and exists(select 1 from json.array_each(executed_widget_rows) r where
       not exists(select 1 from json.object_each(r.value) f where f.key = 'value')
+      or (widget_config->>'series2Label' is not null and not exists(select 1 from json.object_each(r.value) f where f.key = 'value2'))
       or (r.value->>'value' is not null and not coalesce(try_cast(r.value->>'value' as double) between cast('-1e308' as double) and cast('1e308' as double),false))
+      or (r.value->>'value2' is not null and not coalesce(try_cast(r.value->>'value2' as double) between cast('-1e308' as double) and cast('1e308' as double),false))
       or (widget_type != 'number' and r.value->>'x' is null)
       or (widget_type in ('wise','line') and try_cast(r.value->>'x' as date) is null))`,
       sql
@@ -154,8 +171,8 @@ function executeWidgetProcedure<T extends IServerBaseStatements>(
       sql.lit`Duplicate chart points. Aggregate to one row per x value.`,
     );
     s.throwErrorIf(
-      sql`widget_type = 'wise' and exists(select 1 from json.array_each(executed_widget_rows) r where cast(r.value->>'x' as date) != date.end_of_week(cast(r.value->>'x' as date)))`,
-      sql.lit`WISE charts require Sunday week-ending dates.`,
+      sql`widget_type = 'wise' and exists(select 1 from json.array_each(executed_widget_rows) r where extract(dow from cast(r.value->>'x' as date)) != case coalesce(widget_config->>'weekEnding','sunday') when 'sunday' then 0 when 'monday' then 1 when 'tuesday' then 2 when 'wednesday' then 3 when 'thursday' then 4 when 'friday' then 5 else 6 end)`,
+      sql.lit`WISE chart dates must match the configured week-ending day.`,
     );
   });
   s.defScalar(

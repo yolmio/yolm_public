@@ -57,6 +57,8 @@ const { t } = createTranslator({
       pushDescription:
         "Enable notifications for this browser and device. Inbox unread state remains authoritative if a notification is ignored or dismissed.",
       pushEnabled: "Push notifications are enabled on this device.",
+      pushPermissionRequired:
+        "Notification permission has not been granted. Click Enable and allow notifications in your browser.",
       pushDenied:
         "Notifications are blocked in this browser. Allow them in the site settings before trying again.",
       pushUnsupported:
@@ -115,6 +117,8 @@ const { t } = createTranslator({
         "Active las notificaciones para este navegador y dispositivo. El estado de la bandeja de entrada seguirá siendo la referencia si se ignora o descarta una notificación.",
       pushEnabled:
         "Las notificaciones push están activadas en este dispositivo.",
+      pushPermissionRequired:
+        "No se ha concedido permiso para las notificaciones. Pulse Activar y permita las notificaciones en su navegador.",
       pushDenied:
         "Las notificaciones están bloqueadas en este navegador. Permítalas en la configuración del sitio antes de volver a intentarlo.",
       pushUnsupported:
@@ -158,8 +162,8 @@ function NotificationFilterButton(
           color="neutral"
           aria-pressed={sql`false`}
           onClick={(s) => {
-            s.setQueryParam("notification_filter", valueLiteral, sql`true`);
-            s.setQueryParam("notification_page", sql`1`, sql`true`);
+            s.setQueryParam("notification_filter", valueLiteral);
+            s.setQueryParam("notification_page", sql`1`);
           }}
         >
           {label}
@@ -172,8 +176,8 @@ function NotificationFilterButton(
         color="primary"
         aria-pressed={sql`true`}
         onClick={(s) => {
-          s.setQueryParam("notification_filter", valueLiteral, sql`true`);
-          s.setQueryParam("notification_page", sql`1`, sql`true`);
+          s.setQueryParam("notification_filter", valueLiteral);
+          s.setQueryParam("notification_page", sql`1`);
         }}
       >
         {label}
@@ -417,9 +421,8 @@ export function UserNotificationsPage() {
                 s.setQueryParam(
                   "notification_search",
                   sql`target_value`,
-                  sql`true`,
                 );
-                s.setQueryParam("notification_page", sql`1`, sql`true`);
+                s.setQueryParam("notification_page", sql`1`);
               }}
             />
           </div>
@@ -714,17 +717,15 @@ export function UserNotificationsPage() {
 
 /** Opening an authorized notification marks that occurrence read, then redirects. */
 export function UserNotificationOpenPage() {
-  const block = system.block(UserNotificationsBlock);
   const open = (s: DomStatements) => {
     s.setScalar("notification_open_status", sql.lit`opening`);
     s.tryServer({
       body: (s) => {
         s.startTransaction();
-        block.open(
-          s,
-          sql`route_user_notification_id`,
-          "ui.notification_open_href",
-        );
+        s.callStoredProcedure("user_notifications_open", {
+          inputScalars: { p_notification_id: sql`route_user_notification_id` },
+          outputScalars: { p_href: "ui.notification_open_href" },
+        });
         s.commitTransaction();
       },
       catch: (s) => s.setScalar("notification_open_status", sql.lit`failed`),
@@ -757,7 +758,7 @@ export function UserNotificationOpenPage() {
               <Button onClick={open} className="mt-4">Try again</Button>
             </Show>
             <Show when={sql`notification_open_status != 'opening'`}>
-              <Button href="/notifications" className="mt-4">
+              <Button href="/notifications" backLink className="mt-4">
                 Back to notifications
               </Button>
             </Show>
@@ -1011,6 +1012,7 @@ function PushNotificationSettings() {
       local
       procedure={(s) => {
         s.defScalar("push_status", sql.lit`checking`);
+        s.defScalar("push_busy", false);
         s.defScalar("push_error", sql.lit``);
         s.defScalar("push_result", { type: "Json" });
       }}
@@ -1037,6 +1039,11 @@ function PushNotificationSettings() {
         <Show when={sql`push_status = 'enabled'`}>
           <Typography level="body-sm" color="success">
             {t("pushEnabled")}
+          </Typography>
+        </Show>
+        <Show when={sql`push_status = 'permission_required'`}>
+          <Typography level="body-sm" className="text-secondary" role="status">
+            {t("pushPermissionRequired")}
           </Typography>
         </Show>
         <Show when={sql`push_status = 'denied'`}>
@@ -1074,33 +1081,53 @@ function PushNotificationSettings() {
           </Show>
           <Show when={sql`push_status not in ('enabled', 'unsupported')`}>
             <Button
+              loading={sql`push_busy`}
+              disabled={sql`push_status = 'checking' or push_busy`}
               onClick={(s) => {
-                s.setScalar("push_error", sql.lit``);
-                s.jsCall({
-                  module: "web_push",
-                  exportName: "subscribe",
-                  handle: sql.lit`user_notifications_push`,
-                  argJson: sql`json_build_object('requestPermission', true)`,
-                  resultJsonScalar: "push_result",
-                });
-                s.setScalar("push_status", sql`push_result->>'state'`);
-                s.setScalar(
-                  "push_error",
-                  sql`coalesce(push_result->>'error', '')`,
-                );
-                s.if(sql`push_status = 'failed'`, (s) => {
-                  unsubscribePushBrowser(s);
-                  s.setScalar("push_status", sql.lit`failed`);
-                });
-                s.if(
-                  sql`push_status in ('enabled', 'disabled', 'denied')`,
-                  (s) => {
-                    s.if(sql`push_status = 'enabled'`, (s) => {
-                      persistEnabledPushBrowserState(s);
+                s.if(sql`push_busy`, (s) => s.return());
+                s.setScalar("push_busy", true);
+                s.try({
+                  body: (s) => {
+                    s.setScalar("push_error", sql.lit``);
+                    s.jsCall({
+                      module: "web_push",
+                      exportName: "subscribe",
+                      handle: sql.lit`user_notifications_push`,
+                      argJson:
+                        sql`json_build_object('requestPermission', true)`,
+                      resultJsonScalar: "push_result",
                     });
-                    s.else((s) => deletePushBrowserState(s));
+                    s.setScalar("push_status", sql`push_result->>'state'`);
+                    s.setScalar(
+                      "push_error",
+                      sql`coalesce(push_result->>'error', '')`,
+                    );
+                    s.if(sql`push_status = 'failed'`, (s) => {
+                      unsubscribePushBrowser(s);
+                      s.setScalar("push_status", sql.lit`failed`);
+                    });
+                    s.if(
+                      sql`push_status in ('enabled', 'disabled', 'denied')`,
+                      (s) => {
+                        s.if(sql`push_status = 'enabled'`, (s) => {
+                          persistEnabledPushBrowserState(s);
+                        });
+                        s.else((s) => deletePushBrowserState(s));
+                      },
+                    );
                   },
-                );
+                  errorName: "push_enable_error",
+                  catch: (s) => {
+                    s.setScalar("push_status", sql.lit`failed`);
+                    s.setScalar(
+                      "push_error",
+                      sql`coalesce(push_enable_error.message, ${
+                        t("pushFailed")
+                      })`,
+                    );
+                  },
+                  finally: (s) => s.setScalar("push_busy", false),
+                });
               }}
             >
               {t("enableDevice")}

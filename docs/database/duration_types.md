@@ -21,8 +21,12 @@ Stores a duration as integer minutes, but provides user-friendly parsing and dis
 ```typescript
 db.table("deliveries", (table) => {
   table.minutesDuration("minutes", "BigInt").notNull();
-  table.minutesDuration("admin_minutes", "BigInt").notNull();
   table.minutesDuration("own_time", "BigInt");
+  // Admin time is 10% of minutes plus half of own time; derive it, don't store it
+  table.virtual(
+    "admin_minutes",
+    sql`cast(round(cast(minutes + coalesce(own_time, 0) / 2 as double) / 10) as bigint)`,
+  );
 });
 ```
 
@@ -138,10 +142,14 @@ db.table("deliveries", (table) => {
   table.enum("type", "delivery_type").notNull();
   table.date("date").notNull();
   table.minutesDuration("minutes", "BigInt").notNull();
-  table.minutesDuration("admin_minutes", "BigInt").notNull();
   table.minutesDuration("own_time", "BigInt");
   table.bool("free").notNull();
   table.bool("manually_deducted").notNull();
+  // Admin time is 10% of minutes plus half of own time; derive it, don't store it
+  table.virtual(
+    "admin_minutes",
+    sql`cast(round(cast(minutes + coalesce(own_time, 0) / 2 as double) / 10) as bigint)`,
+  );
 });
 
 db.table("calculation_starts", (table) => {
@@ -154,49 +162,21 @@ db.table("calculation_starts", (table) => {
 });
 ```
 
-### Form with Auto-calculated Admin Time
+### Delivery Entry Form
+
+`admin_minutes` is a virtual field, so the form only collects the stored
+durations; the admin time is computed on every read.
 
 ```tsx
 function AddDeliveriesForm() {
-  function updateAdmin(s: DomStatements) {
-    const cursor = useCursorHelper();
-    const adminMinutes = cursor.field("admin_minutes");
-    const minutes = cursor.field("minutes").value;
-    const ownTime = cursor.field("own_time").value;
-
-    // Calculate admin time as 10% of total (rounded)
-    const minutesCombined =
-      sql`coalesce(fn.parse_minutes_duration(${minutes}), 0) +
-          coalesce(fn.parse_minutes_duration(${ownTime}) / 2, 0)`;
-
-    s.if(
-      sql`not ${adminMinutes.touched} or trim(${adminMinutes.value}) = ''`,
-      (s) => {
-        adminMinutes.setValue(
-          s,
-          sql`fn.display_minutes_duration(
-            cast(round(cast(${minutesCombined} as double) / 10) as bigint)
-          )`
-        );
-      }
-    );
-  }
-
   return (
     <Form.InsertMany table="deliveries">
       <FormCards>
         <FormCards.Card>
           <Form.Field field="pc" />
           <Form.Field field="type" />
-          <Form.Field field="minutes">
-            <LabelOnLeftFormField onChange={updateAdmin} />
-          </Form.Field>
-          <Form.Field field="own_time">
-            <LabelOnLeftFormField onChange={updateAdmin} />
-          </Form.Field>
-          <Form.Field field="admin_minutes">
-            <LabelOnLeftFormField />
-          </Form.Field>
+          <Form.Field field="minutes" />
+          <Form.Field field="own_time" />
         </FormCards.Card>
       </FormCards>
     </Form.InsertMany>

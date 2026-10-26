@@ -9,7 +9,17 @@ tags:
 
 # Date and Time Functions
 
-Yolm SQL provides comprehensive date/time support compatible with much of PostgreSQL's SQL function surface. Date formatting and parsing use the Rust chrono crate syntax. See https://docs.rs/chrono/latest/chrono/format/strftime/index.html
+Yolm SQL provides comprehensive date/time support compatible with much of PostgreSQL's SQL function surface.
+
+Two format syntaxes are supported, depending on the function:
+
+- PostgreSQL template patterns (`YYYY`, `MM`, `DD`, `HH24`, `MI`, `SS`, `Mon`,
+  `Month`, `TZH`, ...) for `to_char`, `to_date`, and `to_timestamp(text, format)`.
+  The format for `to_date` and `to_timestamp` must be a string literal; it is
+  translated to a chrono format at compile time.
+- chrono `strftime` specifiers (`%Y`, `%m`, `%d`, ...) for `format.date`,
+  `strftime`, and the `date.parse_*` / `*.parse` functions. See
+  [Format Specifiers](#format-specifiers).
 
 ## Date Parts
 
@@ -23,7 +33,7 @@ Valid parts for extraction and truncation functions:
 | `week` | ISO week number |
 | `day` | Day of month (1-31) |
 | `doy` | Day of year (1-366) |
-| `dow` | Day of week (0=Sunday, 6=Saturday) |
+| `dow` | Day of week (0=Sunday, 6=Saturday); differs from the [weekday constants](#weekday-constants) |
 | `hour` | Hour (0-23) |
 | `minute` | Minute (0-59) |
 | `second` | Second (0-59) |
@@ -80,20 +90,15 @@ select date.trunc(year, timestamp '2023-09-17 14:30:00');
 
 ## Interval Arithmetic
 
-See [Interval Type](./interval_type.md) for comprehensive interval documentation.
+Adding or subtracting intervals, subtracting dates and timestamps, `age()`,
+`make_interval`, and the `justify_*` functions are documented in
+[Interval Type](./interval_type.md).
 
-### Adding/Subtracting Intervals
+### Adding/Subtracting Days
 
 ```sql
--- Using interval literals
-select date '2023-01-15' + interval '1 month';        -- 2023-02-15
-select timestamp '2023-09-17 12:00:00' + interval '2 hours 30 minutes';
-select current_date - interval '7 days';              -- 1 week ago
 select current_date - 7;                              -- 1 week ago
 select 7 + current_date;                              -- 1 week from today
-
--- End-of-month handling
-select date '2023-01-31' + interval '1 month';        -- 2023-02-28
 ```
 
 ### date.add / date.subtract (Yolm syntax)
@@ -134,24 +139,10 @@ select date.duration(year, date '2022-12-31', date '2023-01-01'); -- 0
 select date.duration(month, date '2023-01-31', date '2023-03-01'); -- 1
 ```
 
-### Subtracting dates (returns interval)
-
-```sql
-select date '2023-12-25' - date '2023-01-01';
--- Returns interval
-
-select timestamp '2023-12-25 18:00:00' - timestamp '2023-12-25 09:00:00';
--- 9 hours
-```
-
-### age()
-
-Calculate interval between timestamps as years, months, days.
-
-```sql
-select age(timestamp '2023-12-25', timestamp '2020-06-15');
--- 3 years 6 months 10 days
-```
+Subtracting two dates or timestamps returns an interval, and `age()` returns a
+symbolic years/months/days interval; see
+[Interval Arithmetic](./interval_type.md#interval-arithmetic) and
+[age](./interval_type.md#agetimestamp-timestamp).
 
 ## Date Construction
 
@@ -187,12 +178,17 @@ select to_timestamp(1631906400);     -- PostgreSQL syntax
 
 ### PostgreSQL syntax
 
+The format argument uses PostgreSQL template patterns and must be a string
+literal.
+
 ```sql
 select to_date('2023-09-17', 'YYYY-MM-DD');
 select to_timestamp('1983 Apr 13 12:09:14 +0000', 'YYYY Mon DD HH24:MI:SS TZH');
 ```
 
 ### Yolm syntax
+
+These functions use chrono `strftime` specifiers.
 
 ```sql
 select date.parse_date('11-12-18', '%m-%d-%y');     -- 2018-11-12
@@ -218,12 +214,17 @@ select timestamp.parse_naive('...', '%Y-%m-%d %H:%M:%S');
 
 ### to_char (PostgreSQL syntax)
 
+`to_char` uses PostgreSQL template patterns.
+
 ```sql
 select to_char(date '2023-09-17', 'Month DD, YYYY');  -- September 17, 2023
 select to_char(timestamp '2023-09-17 14:30:00', 'HH12:MI AM'); -- 02:30 PM
 ```
 
 ### format.date (Yolm syntax)
+
+`format.date(value, format)` and `strftime(format, value)` use chrono
+`strftime` specifiers. Note the reversed argument order of `strftime`.
 
 ```sql
 select format.date(date '2023-09-17', '%B %d, %Y');   -- September 17, 2023
@@ -329,6 +330,10 @@ from measurements
 group by hour;
 ```
 
+`time_bucket` takes two arguments, aligns to the Unix epoch (a Thursday), and
+omits empty periods. For other alignment or empty periods, use
+`time_bucket_gapfill`.
+
 ### date_bin
 
 `date_bin(width, source, origin)` is accepted as a PostgreSQL-style bucketing
@@ -378,26 +383,71 @@ For scalar bucketing of a `timestamptz` source, a `date` or timezone-free
 `timestamp` origin is interpreted in the source's local time zone. Calendar
 day/week boundaries therefore remain local boundaries across daylight-saving
 changes. An explicit `timestamptz` origin aligns absolute instants instead.
-These origin rules also apply to `date_bin`; `time_bucket` without an explicit
-origin remains aligned to the Unix epoch.
+These origin rules also apply to `date_bin`; `time_bucket` always aligns to
+the Unix epoch.
 
 Grouped gap filling requires `source`, `start`, and `stop` to have the same
 type. For daily date buckets, use a date source such as `created_at::date`
 with date boundaries.
 
-## make_interval
+Explicit bounds align buckets to `start` and run through the bucket containing
+`stop`. Also bound the source in `where` so the scan prunes.
 
-Builds an interval from positional or named numeric arguments.
+### Per-Period Series
+
+For one row per day, week, or month, use `time_bucket_gapfill`. Do not
+`left join` a generated period list to the data on a date range; that re-scans
+the data once per period
+([pitfall](query_planning.md#pitfall-period-series-joined-by-date-range)).
 
 ```sql
-select make_interval(days => 2);
-select make_interval(1, 2, 0, 3, 4, 5, 6);
+-- Orders per week (weeks start Thursday 2026-01-01), empty weeks as 0.
+select
+  time_bucket_gapfill(interval '7 days', o.created_at::date,
+    date '2026-01-01', date '2026-04-01') as week_start,
+  coalesce(count(o.id), 0) as orders
+from db.orders o
+where o.created_at >= date '2026-01-01' and o.created_at < date '2026-04-02'
+group by week_start
+order by week_start;
 ```
 
-Named arguments accepted by `make_interval` are `years`, `months`, `weeks`,
-`days`, `hours`, `minutes`, and `seconds` plus singular/abbreviated forms such
-as `year`, `mon`, `day`, `hour`, `min`, and `sec`. Positional arguments are, in
-order: years, months, weeks, days, hours, minutes, seconds.
+For counts at period end (such as open records), bucket +1 at open and -1 at
+close, then take a running total:
+
+```sql
+with events as (
+  select greatest(o.created_at::date, date '2026-01-01') as day, 1 as delta
+  from db.orders o
+  where o.created_at < date '2026-04-02'
+    and (o.closed_at is null or o.closed_at >= date '2026-01-01')
+  union all
+  select o.closed_at::date as day, -1 as delta
+  from db.orders o
+  where o.closed_at >= date '2026-01-01'
+    and o.closed_at < date '2026-04-02'
+),
+weekly as (
+  select
+    time_bucket_gapfill(
+      interval '7 days',
+      events.day,
+      date '2026-01-01',
+      date '2026-04-01'
+    ) as week_start,
+    coalesce(sum(events.delta), 0) as net_change
+  from events
+  group by week_start
+)
+select
+  week_start,
+  sum(net_change) over (
+    order by week_start
+    rows between unbounded preceding and current row
+  ) as open_at_week_end
+from weekly
+order by week_start;
+```
 
 ## Cron Functions
 
@@ -410,28 +460,18 @@ select cron.next_tz('0 0 8 * * MON-FRI', current_timestamp, 'America/New_York');
 ```
 
 Aliases: `cron_is_valid`, `cron_next`, and `cron_next_tz`. Invalid schedules or
-time zones return `null` for `cron.next*` functions.
-
-## Interval Justification
-
-### justify_days / justify_hours / justify_interval
-
-Adjusts interval representation so that 30-day periods are represented as months, 24-hour periods as days, etc.
-
-```sql
-select justify_days(interval '35 days');
--- 1 month 5 days
-
-select justify_hours(interval '27 hours');
--- 1 day 3 hours
-
-select justify_interval(interval '1 day 25 hours');
--- 2 days 1 hour
-```
+time zones return `null` for `cron.next*` functions. Schedules use the same
+standard cron semantics as [scheduled jobs](../concepts/scheduled_jobs.md#cron-syntax):
+5, 6 (seconds first), or 7 (year last) fields, day of week `0`/`7` = Sunday,
+either-day matching when both day fields are restricted, and `@daily`-style
+macros.
 
 ## Weekday Constants
 
-Named weekday constants for use with `date.last_weekday` and other date functions:
+Named weekday constants for use with `date.last_weekday` and other date
+functions. They use ISO numbering (Monday=1 through Sunday=7), which differs
+from `extract(dow ...)` (Sunday=0 through Saturday=6). Sunday is `7` here but
+`0` from `dow`, so do not compare `dow` results with these constants.
 
 ```sql
 select date.monday();    -- 1
@@ -501,9 +541,12 @@ from users
 group by date_trunc('week', created_at);
 ```
 
+To include empty periods, use [`time_bucket_gapfill`](#per-period-series).
+
 ## Format Specifiers
 
-Common format specifiers for parsing and formatting:
+Common chrono `strftime` specifiers for `format.date`, `strftime`, and the
+`date.parse_*` functions (not `to_char`, `to_date`, or `to_timestamp`):
 
 | Specifier | Description | Example |
 |-----------|-------------|---------|

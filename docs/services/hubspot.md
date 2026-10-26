@@ -19,10 +19,13 @@ tags:
 import { hubspot } from "services/hubspot";
 ```
 
-To customize the token or webhook base name:
+To customize the token or webhook base name, pass the token **value** as a
+SQL expression (typically `getStaticSecret(...)`), not a secret name:
 
 ```ts
 import { Hubspot } from "services/hubspot";
+import { getStaticSecret } from "std/services";
+import { sql } from "std/sql_utils";
 
 const altHubspot = new Hubspot({
   apiToken: getStaticSecret(sql.lit`OTHER_HUBSPOT_TOKEN`),
@@ -61,7 +64,8 @@ s.statements(hubspot.contacts.listAll({
 ```
 
 `limit` and `after` control one page; `listAll` follows `next_after` for you.
-`optIn` is required when the local runtime gates external services.
+For `optIn`, see
+[External-Service Opt-In](./solution_services.md#external-service-opt-in).
 
 ## Prerequisites
 
@@ -70,5 +74,5 @@ s.statements(hubspot.contacts.listAll({
 
 ## Related
 
-- [Static secrets block](../blocks/static_secrets.md)
+- Store access tokens as server-side static secrets.
 - [Service integrations](../concepts/service_integrations.md)

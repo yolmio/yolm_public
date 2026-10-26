@@ -34,6 +34,7 @@ export function RecordWithTabsAndDetailContent(
       type: { type: "String", maxLength: 32 },
       default: sql.lit(defaultTabValue),
       allowNoRead: true,
+      history: "push",
     },
   ]);
   return (
@@ -48,7 +49,6 @@ export function RecordWithTabsAndDetailContent(
             selectedTabScalar="selected_tab"
             value={sql`tab`}
             onValueChange={(s, value) => {
-              s.setScalar("tab", value);
               s.setQueryParam("tab", sql`${value}`);
             }}
             size="sm"

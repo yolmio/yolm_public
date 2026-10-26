@@ -1,20 +1,22 @@
 ---
 title: Forge testing skill
-description: Validation, automated tests, browser preview verification, request performance checks, and recording completion gates.
-tags: [ai, forge, testing, preview, playwright]
+description: "Use when verifying changes: validation, automated tests, browser verification on production snapshots, performance checks, and recordings."
+tags: [ai, forge, skill, testing, playwright]
 ---
 
 # Forge testing skill
 
-For production/preview execution evidence, metrics, background state, services,
-Edge machines and direct review URLs, read [Operational reads](forge_operations.md).
-Live buffers and historical captures have separate contracts.
-
 Forge supports system validation, automated Yolm tests, disposable preview
 databases, full browser interaction through Playwright, and recorded browser
-demonstrations. Use every layer that applies to the implemented behavior.
+demonstrations.
 
-## Required workflow
+How much to verify depends on the change; see
+[Change Size](review.md#change-size-verification-and-review). A minor change
+needs steps 3 and 4 (plus a quick preview look if visible). A larger change
+uses the full workflow below. Add a new test only under the
+[Tests](review.md#tests) policy.
+
+## Workflow for larger changes
 
 1. Read `docs/ai/forge_code.md` plus the focused product guides governing the
    change. Read `docs/ai/forge_preview.md` for app-visible behavior and
@@ -28,19 +30,22 @@ demonstrations. Use every layer that applies to the implemented behavior.
 4. Run the relevant automated tests with `runTests()`. Use a filter during
    iteration, then broaden the run in proportion to the change. Inspect each
    failed result and its diagnostic or debug output.
-5. For app-visible behavior, start a disposable preview and exercise the full
-   workflow with `previewScript`. Browser preview testing is a supported Forge
-   capability, including clicks, typing, dialogs, drag and drop, uploads,
+5. For app-visible behavior, start a disposable preview on a recent production
+   snapshot (check its database and age; see [Change
+   Size](review.md#change-size-verification-and-review)) and click through the
+   affected workflows with `previewScript` as a user would, including adjacent
+   flows that share the changed code. Browser preview testing is a supported
+   Forge capability, including clicks, typing, dialogs, drag and drop, uploads,
    accessibility snapshots, element geometry, and visible-state assertions.
 6. Check performance for the affected requests in `serverActivity.executions`,
-   including successful calls. Investigate interactive requests taking 500 ms
-   or more and repeatable regressions against the original version, even below
-   that threshold. Follow the performance check in `docs/ai/forge_preview.md`;
-   a passing browser assertion or `success: true` does not establish acceptable
-   performance.
-7. Verify writes independently with `queryPreview`, including related records
-   and audit rows. Restore fixtures with `modifyPreview`, or use
-   `restartPreview` to reset the preview.
+   including successful calls. Investigate pages or queries over ~100 ms (see
+   [Performance](review.md#performance)) and repeatable regressions against
+   the original version. Follow the performance check in
+   `docs/ai/forge_preview.md`; a passing browser assertion or `success: true`
+   does not establish acceptable performance.
+7. Verify writes independently with `queryPreview`, including related records.
+   Restore fixtures with `modifyPreview`, or use `restartPreview` to reset the
+   preview.
 8. For a requested video or proof, rehearse first, restore the opening state,
    then use `recordDemo` and complete the recording gates.
 
@@ -81,9 +86,14 @@ text(focused);
 
 External Forge MCP `exec` starts a durable asynchronous run instead. Pass a
 caller-generated non-nil UUID, retain it outside the script for retries, retain
-the returned run ID, and poll with `getTestRun`. The run is scoped to the
-selected session/version. Poll from subsequent `execRead` calls; do not keep
-one `exec` request open in a polling loop. Reuse the same request ID after a
+the returned run ID, and wait with
+`await getTestRun({ runId, waitSecs: 25 })`. The run is scoped to the selected
+session/version. `waitSecs` (0–25, default 0) returns as soon as the run
+leaves `resultState:"pending"` or when the wait elapses; while it is still
+pending the result adds `pollAfterSecs`, so call it again from a later
+`execRead`. Never spin on `Date.now()` or loop without waiting: it consumes the
+exec CPU budget. Where the runtime cannot wait, the first read returns at once
+with `waitNote`. Reuse the same request ID after a
 rejected admission or a lost start response; use a fresh ID only for a new
 run. `resultState:"not_retained"` means the durable completed status remains
 available but its bounded result payload has expired or been evicted; it is not
@@ -104,8 +114,8 @@ if (started.outcome === "rejected") {
   throw new Error(`Test lane is busy; retry after ${started.retryAfterSecs}s`);
 }
 text(started);
-// In a later execRead, poll with the returned run ID:
-// text(await getTestRun({ runId: started.runId }));
+// In a later execRead, wait for the returned run ID; repeat while pending:
+// text(await getTestRun({ runId: started.runId, waitSecs: 25 }));
 ```
 
 A supplied filter that selects zero tests returns `success: false`. Treat
@@ -129,7 +139,7 @@ data:
 - stable existing record or disposable fixture plus reset method
 - controls expected to be visible and actions to perform
 - final visible state
-- database invariants and related audit records
+- database invariants and related records
 - recording chapters when a demonstration is requested
 
 Use `authUserId` for deterministic business-workflow testing. Use the visible
@@ -154,7 +164,8 @@ workflow completed.
 
 ## Completion evidence
 
-An implementation report names only gates actually completed:
+An implementation report names only gates actually completed, from those the
+change size requires:
 
 - validation succeeded with no diagnostics
 - relevant automated tests selected at least one test and passed
@@ -167,5 +178,6 @@ An implementation report names only gates actually completed:
   the `demo-final` screenshot shows the outcome, relevant server executions
   succeeded, and `queryPreview` confirms persisted changes
 
-If a capability is unavailable, report its exact error and the evidence already
-completed. A different check does not substitute for the missing gate.
+If a required capability is unavailable, report its exact error and the
+evidence already completed. A different check does not substitute for a missing
+required gate.

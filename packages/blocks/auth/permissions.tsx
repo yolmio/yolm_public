@@ -1,3 +1,4 @@
+import { Link } from "components/link";
 import { Button } from "components/button";
 import { Alert } from "components/alert";
 import { Card, CardHeader } from "components/card";
@@ -64,15 +65,18 @@ export function PermissionEntry(props: {
   );
 }
 
-/** Read-only permission groups; callers supply grants and optional provenance. */
+/** Paginated permission groups; callers supply grants and optional provenance. */
 export function PermissionListCard(props: {
   title: string;
   description?: string;
   permissionsQuery: Sql;
   sourcesQuery?: Sql;
+  /** Optional destination for each permission source. */
+  sourceHref?: (source: Sql) => Sql;
   emptyMessage: string;
   sx?: Style;
 }) {
+  const pageSize = 10;
   const permissions = [...system.enums.auth_permission.valuesMap.values()];
   const groups = new Map<string, EnumValue[]>();
   for (const permission of permissions) {
@@ -81,13 +85,29 @@ export function PermissionListCard(props: {
     entries.push(permission);
     groups.set(group, entries);
   }
+  const orderedPermissions = [
+    ...(groups.get("") ?? []),
+    ...[...groups].flatMap(([name, entries]) => name ? entries : []),
+  ];
+  const displayOrder = sql.caseWhen({
+    operand: sql`permission`,
+    conditions: orderedPermissions.map((permission, index) => ({
+      condition: sql.lit(permission.name),
+      expr: sql`${index}`,
+    })),
+  });
+  const matchesSearch = sql.caseWhen({
+    operand: sql`permission`,
+    conditions: permissions.map((permission) => ({
+      condition: sql.lit(permission.name),
+      expr: permissionMatchesSearch(permission, sql`permission_search_query`),
+    })),
+    default: sql.false,
+  });
   const visible = (permission: EnumValue) =>
-    sql.and(
-      sql`exists (select 1 from granted_permissions where permission = ${
-        sql.lit(permission.name)
-      })`,
-      permissionMatchesSearch(permission, sql`permission_search_query`),
-    );
+    sql`exists (select 1 from visible_permissions where permission = ${
+      sql.lit(permission.name)
+    })`;
   const entry = (permission: EnumValue) => (
     <Show when={visible(permission)}>
       <PermissionEntry permission={sql.lit(permission.name)}>
@@ -120,7 +140,20 @@ export function PermissionListCard(props: {
                     },
                   ]}
                 >
-                  {sql`permission_source.source_label`}
+                  {props.sourceHref
+                    ? (
+                      <Show
+                        when={sql`${
+                          props.sourceHref(sql`permission_source`)
+                        } is not null`}
+                        fallback={sql`permission_source.source_label`}
+                      >
+                        <Link href={props.sourceHref(sql`permission_source`)}>
+                          {sql`permission_source.source_label`}
+                        </Link>
+                      </Show>
+                    )
+                    : sql`permission_source.source_label`}
                 </Chip>
               </Each>
             </div>
@@ -133,7 +166,10 @@ export function PermissionListCard(props: {
     <Data
       local
       noRefetch
-      procedure={(s) => s.defScalar("permission_search_query", sql.lit``)}
+      procedure={(s) => {
+        s.defScalar("permission_search_query", sql.lit``);
+        s.defScalar("permission_page", sql`1`);
+      }}
     >
       <Card variant="outlined" sx={props.sx}>
         <CardHeader className="flex-col items-stretch gap-3 sm:flex-row sm:items-center">
@@ -150,8 +186,10 @@ export function PermissionListCard(props: {
             startIcon="Search"
             placeholder="Search permissions..."
             value={sql`permission_search_query`}
-            onInput={(s) =>
-              s.setScalar("permission_search_query", sql`target_value`)}
+            onInput={(s) => {
+              s.setScalar("permission_search_query", sql`target_value`);
+              s.setScalar("permission_page", sql`1`);
+            }}
             className="w-full shrink-0 sm:w-64"
           />
         </CardHeader>
@@ -167,37 +205,105 @@ export function PermissionListCard(props: {
             }
           }}
         >
-          <div className="flex flex-col gap-3 py-4">
-            <Show when={sql`not exists (select 1 from granted_permissions)`}>
-              <Alert color="neutral" variant="soft" startIcon="InfoOutlined">
-                {props.emptyMessage}
-              </Alert>
-            </Show>
-            {groups.get("")?.map(entry)}
-            {[...groups].filter(([name]) => name !== "").map((
-              [name, entries],
-            ) => (
-              <Show when={sql.or(...entries.map(visible))}>
-                <Typography level="title-md" className="font-semibold">
-                  {name}
-                </Typography>
-                {entries.map(entry)}
+          <Data
+            local
+            procedure={(s) => {
+              s.defTable(
+                "matching_permissions",
+                sql`select permission, ${displayOrder} as display_order
+                  from granted_permissions where ${matchesSearch}`,
+              );
+              s.defScalar(
+                "permission_count",
+                sql`(select count(*) from matching_permissions)`,
+              );
+              s.defScalar(
+                "permission_page_count",
+                sql`case when permission_count = 0 then 1
+                  else (permission_count - 1) / ${pageSize} + 1 end`,
+              );
+              s.defScalar(
+                "effective_permission_page",
+                sql`least(permission_page, permission_page_count)`,
+              );
+              s.defTable(
+                "visible_permissions",
+                sql`select permission from matching_permissions
+                  order by display_order
+                  limit ${pageSize}
+                  offset (effective_permission_page - 1) * ${pageSize}`,
+              );
+            }}
+          >
+            <div className="flex flex-col gap-3 py-4">
+              <Show when={sql`permission_count > ${pageSize}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <Typography level="body-sm" className="text-secondary">
+                    {sql`((effective_permission_page - 1) * ${pageSize} + 1)
+                    || '–' || least(effective_permission_page * ${pageSize}, permission_count)
+                    || ' of ' || permission_count || ' permissions'`}
+                  </Typography>
+                  <div className="flex gap-1">
+                    <IconButton
+                      size="sm"
+                      variant="outlined"
+                      color="neutral"
+                      icon="ChevronLeft"
+                      aria-label="Previous permissions page"
+                      disabled={sql`effective_permission_page <= 1`}
+                      onClick={(s) =>
+                        s.setScalar(
+                          "permission_page",
+                          sql`greatest(1, effective_permission_page - 1)`,
+                        )}
+                    />
+                    <IconButton
+                      size="sm"
+                      variant="outlined"
+                      color="neutral"
+                      icon="ChevronRight"
+                      aria-label="Next permissions page"
+                      disabled={sql`effective_permission_page >= permission_page_count`}
+                      onClick={(s) =>
+                        s.setScalar(
+                          "permission_page",
+                          sql`least(permission_page_count, effective_permission_page + 1)`,
+                        )}
+                    />
+                  </div>
+                </div>
               </Show>
-            ))}
-            <Show
-              when={sql.and(
-                sql`exists (select 1 from granted_permissions)`,
-                sql.not(sql.or(...permissions.map(visible))),
-              )}
-            >
-              <Typography
-                level="body-sm"
-                className="py-6 text-center text-secondary"
+              <Show when={sql`not exists (select 1 from granted_permissions)`}>
+                <Alert color="neutral" variant="soft" startIcon="InfoOutlined">
+                  {props.emptyMessage}
+                </Alert>
+              </Show>
+              {groups.get("")?.map(entry)}
+              {[...groups].filter(([name]) => name !== "").map((
+                [name, entries],
+              ) => (
+                <Show when={sql.or(...entries.map(visible))}>
+                  <Typography level="title-md" className="font-semibold">
+                    {name}
+                  </Typography>
+                  {entries.map(entry)}
+                </Show>
+              ))}
+              <Show
+                when={sql.and(
+                  sql`exists (select 1 from granted_permissions)`,
+                  sql`permission_count = 0`,
+                )}
               >
-                No granted permissions match this search.
-              </Typography>
-            </Show>
-          </div>
+                <Typography
+                  level="body-sm"
+                  className="py-6 text-center text-secondary"
+                >
+                  No granted permissions match this search.
+                </Typography>
+              </Show>
+            </div>
+          </Data>
         </Data>
       </Card>
     </Data>

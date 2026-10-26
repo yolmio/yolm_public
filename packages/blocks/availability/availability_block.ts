@@ -1,3 +1,4 @@
+import type { AvailabilityPage } from "./availability_page";
 import type { SampleDataScriptContext } from "std/sample_data";
 import { sql } from "../../std/sql_utils";
 import type { NumericExpr, Sql } from "../../std/sql_utils";
@@ -31,7 +32,7 @@ export class AvailabilityBlock implements Block {
   definedByBlock?: string;
   componentDependencies: string[] = [];
   description: string | undefined;
-  static AvailabilityPage: any;
+  static AvailabilityPage: typeof AvailabilityPage;
   initialize() {
     const db = system.db;
 

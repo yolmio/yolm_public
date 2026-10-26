@@ -1,0 +1,43 @@
+import { createTranslator } from "std/i18n";
+
+export const { t: locationText } = createTranslator({
+  defaultLanguage: "en",
+  languages: {
+    en: {
+      hierarchy: "Location hierarchy",
+      locations: "Locations",
+      search: "Search locations…",
+      searchWithin: "Search within this location",
+      searchAll: "Search all locations",
+      searchResults: "Search results",
+      topLevel: "Top-level locations",
+      sublocations: "Sublocations",
+      countsHelp: "Equipment counts include sublocations",
+      noSublocationsPrefix: "No sublocations: ",
+      collapsePrefix: "Collapse ",
+      expandPrefix: "Expand ",
+      equipment: "equipment",
+      noMatches: "No matching locations.",
+      noLocations: "No locations yet.",
+      noSublocations: "No sublocations.",
+    },
+    es: {
+      hierarchy: "Jerarquía de ubicaciones",
+      locations: "Ubicaciones",
+      search: "Buscar ubicaciones…",
+      searchWithin: "Buscar dentro de esta ubicación",
+      searchAll: "Buscar todas las ubicaciones",
+      searchResults: "Resultados de búsqueda",
+      topLevel: "Ubicaciones principales",
+      sublocations: "Sububicaciones",
+      countsHelp: "El total de equipos incluye las sububicaciones",
+      noSublocationsPrefix: "Sin sububicaciones: ",
+      collapsePrefix: "Contraer ",
+      expandPrefix: "Expandir ",
+      equipment: "equipos",
+      noMatches: "No hay ubicaciones coincidentes.",
+      noLocations: "Aún no hay ubicaciones.",
+      noSublocations: "No hay sububicaciones.",
+    },
+  },
+});

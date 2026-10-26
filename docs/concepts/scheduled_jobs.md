@@ -50,38 +50,62 @@ system.scheduledProc({
 
 ### Cron Syntax
 
+Schedules use standard cron semantics. Five fields are standard cron; a sixth
+leading field adds seconds, and a seventh trailing field restricts the year.
+Five-field schedules fire at second 0.
+
 ```
-┌───────────── second (0 - 59)
+┌───────────── second (0 - 59, optional: present only in 6 and 7 field forms)
 │ ┌───────────── minute (0 - 59)
 │ │ ┌───────────── hour (0 - 23)
 │ │ │ ┌───────────── day of month (1 - 31)
 │ │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
-│ │ │ │ │ ┌───────────── day of week (0 - 6 or SUN-SAT)
-│ │ │ │ │ │
-│ │ │ │ │ │
-* * * * * *
+│ │ │ │ │ ┌───────────── day of week (0 - 7 or SUN-SAT; 0 and 7 are Sunday)
+│ │ │ │ │ │ ┌───────────── year (optional, 7 field form only)
+│ │ │ │ │ │ │
+* * * * * * *
 ```
+
+- Fields accept `*`, single values, lists (`1,3,5`), ranges (`1-5`), and
+  steps (`*/15`, `1-5/2`). Ranges do not wrap: write `5-7` or `FRI,SAT,SUN`
+  rather than `5-0`.
+- Day-of-week numbers follow standard cron: `0` and `7` are Sunday, `1` is
+  Monday, and `6` is Saturday. Day names (`SUN`-`SAT`, any case) are often
+  clearer.
+- When both day of month and day of week are restricted (neither starts with
+  `*`), the job fires on days matching **either** field. `0 9 1 * MON` runs at
+  9:00 on the 1st of every month and on every Monday. A field starting with
+  `*` (including steps such as `*/2`) does not restrict, so `0 9 */2 * MON`
+  runs only on Mondays that fall on odd days of the month.
+- Macros: `@yearly` / `@annually` (midnight January 1), `@monthly` (midnight on
+  the 1st), `@weekly` (midnight Sunday), `@daily` / `@midnight`, and `@hourly`
+  (top of every hour). `@reboot` is not supported.
+- Schedule times are in the system's configured timezone. `yolm check` rejects
+  invalid schedules.
 
 ### Cron Examples
 
 ```typescript
 // Every 30 minutes
-"0 */30 * * * *"
+"*/30 * * * *"
 
 // Every Monday at 5pm
-"0 0 17 * * MON"
+"0 17 * * MON"
 
 // Every Wednesday at 8:30pm
-"0 30 20 * * WED"
+"30 20 * * WED"
 
 // Daily at 9am
-"0 0 9 * * *"
+"0 9 * * *"
 
-// Every weekday at 6am
-"0 0 6 * * MON-FRI"
+// Every weekday at 6am (1-5 is Monday-Friday)
+"0 6 * * 1-5"
 
 // First day of every month at midnight
-"0 0 0 1 * *"
+"@monthly"
+
+// Every 15 seconds (6 field form: seconds first)
+"*/15 * * * * *"
 ```
 
 ## Multiple Schedules
@@ -161,30 +185,39 @@ system.scheduledProc({
 });
 ```
 
-### Aggregate Reports
+### Reminder Emails
+
+Enqueue reminders into an [email outbox](outbox.md) inside a transaction; the
+outbox reactor sends them after commit and retries failures:
 
 ```typescript
+// core.tsx: system.emailOutboxTable({ name: "invoice_reminder", fields: (table) => {
+//   table.string("recipient_email", 254).notNull();
+//   table.fk("invoice", "invoices").notNull();
+// } });
 system.scheduledProc({
-  name: "daily_stats",
-  schedule: "0 5 0 * * *",
+  name: "enqueue_overdue_invoice_reminders",
+  schedule: "0 0 8 * * *",
   procedure: (s) => {
     s.startTransaction();
-
     s.modify(sql`
-      insert into db.daily_stats (date, orders_count, revenue)
-      select
-        current_date() - interval '1 day',
-        count(*),
-        sum(total)
-      from db.orders
-      where created_at >= current_date() - interval '1 day'
-      and created_at < current_date()
+      insert into db.invoice_reminder_outbox (recipient_email, invoice)
+      select customers.email, invoices.id
+      from db.invoices
+      join db.customers on customers.id = invoices.customer
+      where invoices.due_date < current_date()
+        and invoices.paid_at is null
+        and not exists (
+          select 1 from db.invoice_reminder_outbox o where o.invoice = invoices.id
+        )
     `);
-
     s.commitTransaction();
   },
 });
 ```
+
+Do not use scheduled jobs to store daily totals or other rollups; compute them
+with queries, virtual fields, or views when they are read.
 
 ### Data Synchronization
 
@@ -220,97 +253,11 @@ system.scheduledProc({
 });
 ```
 
-### Email Notifications with Postmark
+### Email Notifications
 
-Send email notifications from scheduled jobs using the Postmark service with MJML templates:
-
-```typescript
-import { Postmark } from "services/postmark";
-
-const postmark = new Postmark();
-
-const reminderTemplate = sql.lit`
-<mjml>
-  <mj-body>
-    <mj-section>
-      <mj-column>
-        <mj-text font-family="Arial" font-size="16px">
-          Hi {{name}},<br><br>
-          You have tasks due tomorrow:<br><br>
-          {{{task_list}}}
-        </mj-text>
-        <mj-button href="https://app.example.com/tasks">
-          View Tasks
-        </mj-button>
-      </mj-column>
-    </mj-section>
-  </mj-body>
-</mjml>
-`;
-
-system.scheduledProc({
-  name: "send_due_date_reminders",
-  schedule: "0 0 9 * * *",  // Daily at 9 AM
-  procedure: (s) => {
-    // Find users with tasks due tomorrow
-    s.defTable("users_with_due_tasks", sql`
-      select
-        u.id as user_id,
-        u.first_name || ' ' || u.last_name as name,
-        u.email,
-        count(*) as task_count
-      from db.tasks t
-      join db.users u on u.id = t.assigned_to
-      where t.due_date = current_date() + interval '1 day'
-        and t.status != 'completed'
-      group by u.id, u.first_name, u.last_name, u.email
-    `);
-
-    s.forEachTable("users_with_due_tasks", "user", (s) => {
-      // Build HTML task list
-      s.defScalar("task_list", sql`
-        (select string_agg(
-          '• <b>' || string.html_escape(t.title) || '</b><br>',
-          ''
-        )
-        from db.tasks t
-        where t.assigned_to = user.user_id
-          and t.due_date = current_date() + interval '1 day'
-          and t.status != 'completed')
-      `);
-
-      // Render MJML template with variables
-      s.renderTemplate({
-        template: reminderTemplate,
-        scope: {
-          name: "user.name",
-          task_list: "task_list",
-        },
-        htmlEscaped: true,
-        defOutputScalar: "mjml_output",
-      });
-
-      // Convert MJML to HTML
-      s.renderMjml({
-        mjml: sql`mjml_output`,
-        defOutputScalar: "email_html",
-      });
-
-      // Send via Postmark
-      postmark.sendEmail(s, {
-        from: "notifications@yourapp.com",
-        to: sql`user.email`,
-        subject: sql`'Tasks due tomorrow (' || user.task_count || ')'`,
-        htmlBody: sql`email_html`,
-        tag: sql.lit`due-date-reminder`,
-      });
-    });
-  },
-});
-```
-
-For more on Postmark integration, see [Postmark Email Service](../services/postmark.md).
-For MJML template design, see [Email Templates with MJML](email_templates.md).
+To render and send MJML emails from a scheduled job, see
+[Email Templates with MJML](email_templates.md) and
+[Postmark Email Service](../services/postmark.md).
 
 ## Error Handling
 
@@ -328,16 +275,15 @@ system.scheduledProc({
       errorName: "err",
       catch: (s) => {
         s.rollbackTransaction();
-        // Log the error
-        s.modify(sql`
-          insert into db.job_errors (job_name, error_message, occurred_at)
-          values ('risky_job', err.message, now())
-        `);
+        s.debugExpr(sql`'risky_job failed: ' || err.message`);
       },
     });
   },
 });
 ```
+
+Do not add job error or job run tables. Use `s.debugExpr` for diagnostics and
+[transaction queries](../sql/transaction_queries.md) to see what a job changed.
 
 ## `storedScheduledProc` — Stored-Proc-Backed Scheduled Jobs
 
@@ -374,7 +320,7 @@ The resulting stored procedure is named `${name}_impl` unless you pass
 1. **Keep jobs fast** - Long-running jobs can affect system performance
 2. **Use transactions** - Ensure data consistency
 3. **Handle errors gracefully** - Don't let one failure crash the job
-4. **Log important events** - Track job execution for debugging
+4. **Use built-in history** - Rely on transaction queries and `s.debugExpr` output instead of job log tables
 5. **Consider time zones** - Schedule times are in the system's configured timezone
 6. **Avoid overlapping** - Ensure job duration is less than the schedule interval
 

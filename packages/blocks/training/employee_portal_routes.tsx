@@ -1,3 +1,16 @@
+import {
+  TranslationReviewPage,
+  TranslationReviewsPage,
+} from "./admin/translation_reviews";
+import { isPlayableVideoMime } from "components/video_player";
+import {
+  isVideoSource,
+  videoLinkContentType,
+} from "blocks/drive/external_link";
+import {
+  introductionHasContentSql,
+  introductionImagePrefix,
+} from "./course_introduction";
 import { Alert } from "components/alert";
 import { Button } from "components/button";
 import { Card, CardContent, CardHeader } from "components/card";
@@ -8,7 +21,6 @@ import { FieldFormControl } from "components/field_form_control";
 import { FormControl } from "components/form_control";
 import { FormLabel } from "components/form_label";
 import { IconButton } from "components/icon_button";
-import { Input } from "components/input";
 import { LexicalRichTextDisplay } from "components/lexical/components/lexical_editor";
 import { MaterialIcon } from "components/material_icon";
 import { ModalDialog } from "components/modal";
@@ -19,27 +31,33 @@ import { Textarea } from "components/textarea";
 import { Typography } from "components/typography";
 import { currentUserHasPermission, userHasPermission } from "blocks/auth";
 import { Data } from "std/data";
+import { FileActionButton } from "std/action_button";
 import { Form } from "std/form";
 import type { FormFieldHelper } from "std/form";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
-import type { DomStatements, UiServerStatements } from "std/statements";
+import type { DomStatements, IStatementsBase } from "std/statements";
 import { visuallyHiddenStyles } from "std/style_utils";
-import { Each, Effect, Route, Show } from "std/ui";
+import { Each, Effect, type Node, Route, Show } from "std/ui";
+import { CourseStepDocument } from "./course_step_document";
+import { defineCoursePreview } from "./course_preview_data";
+import {
+  CourseResponseEditor,
+  saveCourseResponseDrafts,
+} from "./course_response_editor";
+import { TrainingAssessmentPreview } from "./assessment_preview";
+import {
+  EmployeeAssessmentMetadataResponses,
+  EmployeeAssessmentResponses,
+} from "./assessment_responses";
 
 import type { TrainingBlock } from "./index.tsx";
-import {
-  deleteAssessmentChoiceSelectionSql,
-  insertAssessmentChoiceSelectionSql,
-  selectAssessmentSingleChoiceSql,
-} from "./assessment_helpers";
 import {
   assignmentInviteLinkSql,
   certificationProofUrl,
   certificationWarningDaysSql,
   competencyAlertWhereSql,
   competencyEvidenceUrl,
-  createCertificationForCompletedAssignment,
   currentEmployeeId,
   defaultLanguageSql,
   employeeName,
@@ -56,7 +74,6 @@ import {
   relativeDueSql,
   retrainingSourceSql,
   retrainingSourceWithFallbackSql,
-  revokeTrainingAccessTokensForClosedAssignmentSql,
   secondaryValidatorSignoffByPermission,
   trainingCompletionAttestation,
   trainingComplianceLabels,
@@ -65,11 +82,8 @@ import {
   trainingFileVersionUrl,
   trainingPermissions,
   trainingValidationLabels,
-  updateAssignmentStatusAfterTaskCompletionSql,
 } from "./helpers";
 import {
-  callSaveAssessmentMetadataResponse,
-  callSaveAssessmentResponse,
   EmptyState,
   FormFieldWithLabel,
   PageShell,
@@ -229,7 +243,9 @@ function employeeDocumentsHref(block: TrainingBlock, accessToken?: Sql) {
     : sql.lit(block.opts.content.readerLibraryHref());
 }
 
-function TrainingDocumentFormControl(props: { helper: FormFieldHelper }) {
+function TrainingDocumentFormControl(
+  props: { helper: FormFieldHelper; block: TrainingBlock },
+) {
   return (
     <Data
       watch={[props.helper.value]}
@@ -257,6 +273,12 @@ function TrainingDocumentFormControl(props: { helper: FormFieldHelper }) {
                      document.id
               from db.training_content_documents document
               where document.is_active
+                and ${
+            props.block.opts.content.canReadDocument(
+              sql`document.id`,
+              sql`current_user`,
+            )
+          }
                 and exists (
                   select 1
                   from db.training_content_language_variants variant
@@ -460,8 +482,14 @@ export function TrainingEmployeeSidebarMenuItems(props: {
       </Sidebar.MenuItem>
       <Sidebar.MenuItem>
         <Sidebar.MenuButton href={documentSubmissionsHref}>
-          <MaterialIcon icon="PostAdd" className="mr-2" />
+          <MaterialIcon icon="NoteAdd" className="mr-2" />
           {text({ en: "Manage Policies", es: "Administrar Políticas" })}
+        </Sidebar.MenuButton>
+      </Sidebar.MenuItem>
+      <Sidebar.MenuItem>
+        <Sidebar.MenuButton href={`${base}/translation-reviews`}>
+          <MaterialIcon icon="Translate" className="mr-2" />
+          {text({ en: "Translation reviews", es: "Revisión de traducciones" })}
         </Sidebar.MenuButton>
       </Sidebar.MenuItem>
       {complianceEnabled && (
@@ -492,6 +520,14 @@ export function TrainingEmployeeRoutes(
   const showPortalNav = props.showPortalNav ?? true;
   return (
     <>
+      <Route path={childPath("/translation-reviews")}>
+        <TranslationReviewsPage block={props.block} />
+      </Route>
+      <Route
+        path={childPath("/translation-reviews/{translation_review_id:id}")}
+      >
+        <TranslationReviewPage block={props.block} />
+      </Route>
       <Route path={rootPath}>
         <EmployeeTrainingHome
           block={props.block}
@@ -752,16 +788,16 @@ function EmployeeAssignmentCard(props: {
         },
         {
           when: sql`not assignment.is_overdue
-            and assignment.needs_final_signature`,
+            and assignment.needs_submission`,
           label: employeeText(sql`employee_language`, {
-            en: "Ready to sign",
-            es: "Lista para firmar",
+            en: "Ready to submit",
+            es: "Lista para enviar",
           }),
           color: "warning",
         },
         {
           when: sql`not assignment.is_overdue
-            and not assignment.needs_final_signature
+            and not assignment.needs_submission
             and assignment.started`,
           label: employeeText(sql`employee_language`, {
             en: "In progress",
@@ -897,7 +933,7 @@ function EmployeeTrainingHome(
           sql`with open_assignment_base as (
                 select a.id,
                        a.training_course_id is not null as is_course,
-                       coalesce(course.name, d.title, 'Training assignment')
+                       coalesce((select localized_name from db.training_course_versions where id = a.training_course_version_id), course.name, d.title, 'Training assignment')
                          as title,
                        case
                          when course.id is null then 'Document'
@@ -951,8 +987,8 @@ function EmployeeTrainingHome(
                            and t.status in ('assigned', 'in_progress')
                            and lang.code != ui.employee_language
                        ) as uses_default_language,
-                       course.requires_final_signature
-                         and a.employee_final_signed_at is null
+                       a.training_course_id is not null
+                         and a.status in ('pending', 'in_progress')
                          and exists (
                            select 1
                            from db.training_employee_tasks t
@@ -964,7 +1000,7 @@ function EmployeeTrainingHome(
                            from db.training_employee_tasks t
                            where t.training_assignment_id = a.id
                              and t.status in ('assigned', 'in_progress')
-                         ) as needs_final_signature
+                         ) as needs_submission
                 from db.training_assignments a
                 left join db.training_courses course
                   on course.id = a.training_course_id
@@ -980,8 +1016,7 @@ function EmployeeTrainingHome(
                     )
                     or (
                       a.status = 'in_progress'
-                      and course.requires_final_signature
-                      and a.employee_final_signed_at is null
+                      and a.training_course_id is not null
                       and exists (
                         select 1
                         from db.training_employee_tasks t
@@ -1053,7 +1088,7 @@ function EmployeeTrainingHome(
                        from db.training_employee_tasks t
                        where t.training_assignment_id = a.id
                      ) as document_task_id,
-                     coalesce(course.name, document.title, 'Training assignment')
+                     coalesce((select localized_name from db.training_course_versions where id = a.training_course_version_id), course.name, document.title, 'Training assignment')
                        as title,
                      coalesce(
                        (
@@ -1463,18 +1498,277 @@ export function EmployeeTrainingCoursePage(
     backHref?: Sql;
     backLabel?: string;
     validationMode?: boolean;
+    previewCourseId?: Sql;
+    previewActions?: Node;
   },
 ) {
   const block = props.block;
+  const introductionEnabled = trainingFeatureEnabled(
+    block.opts,
+    "courseIntroduction",
+  );
+  const hasIntroduction = introductionEnabled
+    ? introductionHasContentSql(sql`course_assignment.introduction`)
+    : sql`false`;
   const validationLabels = trainingValidationLabels(block.opts);
   const secondaryByPermission = secondaryValidatorSignoffByPermission(
     block.opts,
   );
   const validationEnabled = true;
+  const validateFinalSignature = <T extends IStatementsBase>(s: T) => {
+    if (validationEnabled) {
+      s.if(
+        sql`coalesce(ui.final_primary_validator_id, course_assignment.final_primary_validator_id) is null`,
+        (s) => {
+          s.setScalar(
+            "ui.signature_error",
+            employeeText(
+              sql`course_assignment.employee_language`,
+              {
+                en:
+                  `Choose the ${validationLabels.primaryStageDisplayName} before signing the course.`,
+                es: "Elija el validador antes de firmar el curso.",
+              },
+            ),
+          );
+          s.return();
+        },
+      );
+      s.if(
+        sql`course_assignment.generates_certification
+                                        and ${
+          secondaryByPermission ? sql`false` : sql`true`
+        }
+                                        and coalesce(
+                                          ui.final_secondary_validator_id,
+                                          course_assignment.final_secondary_validator_id
+                                        ) is null`,
+        (s) => {
+          s.setScalar(
+            "ui.signature_error",
+            employeeText(
+              sql`course_assignment.employee_language`,
+              {
+                en:
+                  `Choose the ${validationLabels.secondaryStageDisplayName} before signing the course.`,
+                es: "Elija el validador antes de firmar el curso.",
+              },
+            ),
+          );
+          s.return();
+        },
+      );
+      s.if(
+        sql`not exists (
+                                        select 1
+                                        from primary_validator_options validator
+                                        where validator.id = coalesce(
+                                          ui.final_primary_validator_id,
+                                          course_assignment.final_primary_validator_id
+                                        )
+                                      )`,
+        (s) => {
+          s.setScalar(
+            "ui.signature_error",
+            employeeText(
+              sql`course_assignment.employee_language`,
+              {
+                en:
+                  `Selected ${validationLabels.primaryStageDisplayName} is not eligible to sign.`,
+                es: "El validador seleccionado no puede firmar.",
+              },
+            ),
+          );
+          s.return();
+        },
+      );
+      s.if(
+        sql`course_assignment.generates_certification
+                                        and ${
+          secondaryByPermission ? sql`false` : sql`true`
+        }
+                                        and not exists (
+                                        select 1
+                                        from secondary_validator_options validator
+                                        where validator.id = coalesce(
+                                          ui.final_secondary_validator_id,
+                                          course_assignment.final_secondary_validator_id
+                                        )
+                                      )`,
+        (s) => {
+          s.setScalar(
+            "ui.signature_error",
+            employeeText(
+              sql`course_assignment.employee_language`,
+              {
+                en:
+                  `Selected ${validationLabels.secondaryStageDisplayName} is not eligible to sign.`,
+                es: "El validador seleccionado no puede firmar.",
+              },
+            ),
+          );
+          s.return();
+        },
+      );
+    }
+  };
+  const courseEditable =
+    sql`course_assignment.status in ('pending', 'in_progress')
+    and course_assignment.employee_final_signed_at is null`;
+  const needsVerification = sql`course_assignment.requires_final_signature
+    or course_assignment.final_primary_validator_id is not null
+    or course_assignment.final_secondary_validator_id is not null
+    or (${
+    secondaryByPermission ? sql`true` : sql`false`
+  } and course_assignment.generates_certification)`;
+  const submissionLabel = sql`case when ${needsVerification} then ${
+    employeeText(sql`course_assignment.employee_language`, {
+      en: "Submit for verification",
+      es: "Enviar para verificación",
+    })
+  } else ${
+    employeeText(sql`course_assignment.employee_language`, {
+      en: "Complete course",
+      es: "Completar curso",
+    })
+  } end`;
+  const submitCourse = (s: DomStatements, signatureData: Sql = sql`null`) => {
+    s.setScalar("signature_error", sql`null`);
+    if (props.previewCourseId) {
+      s.if(
+        sql`course_assignment.requires_final_signature`,
+        validateFinalSignature,
+      );
+      s.modify(sql`update ui.course_assignment set
+        status = case when ${needsVerification} then 'validation_pending' else 'completed' end,
+        employee_final_signature_data = ${signatureData},
+        employee_final_signed_at = case when requires_final_signature then now() else null end,
+        final_primary_validator_id = ui.final_primary_validator_id,
+        final_secondary_validator_id = ui.final_secondary_validator_id,
+        final_primary_validator_name = (select name from ui.primary_validator_options where id = ui.final_primary_validator_id),
+        final_secondary_validator_name = (select name from ui.secondary_validator_options where id = ui.final_secondary_validator_id)`);
+      return;
+    }
+    s.tryServer({
+      body: (s) => {
+        s.if(
+          sql`course_assignment.requires_final_signature`,
+          validateFinalSignature,
+        );
+        s.startTransaction();
+        saveCourseResponseDrafts(s, props.accessToken);
+        s.callStoredProcedure("training_submit_course", {
+          inputScalars: {
+            p_signature_data: signatureData,
+            p_assignment_id: sql`ui.training_assignment_id`,
+            p_access_token: props.accessToken ?? sql`null`,
+            p_primary_validator_id:
+              sql`coalesce(ui.final_primary_validator_id, course_assignment.final_primary_validator_id)`,
+            p_secondary_validator_id:
+              sql`case when course_assignment.generates_certification
+              and ${secondaryByPermission ? sql`false` : sql`true`}
+              then coalesce(ui.final_secondary_validator_id, course_assignment.final_secondary_validator_id) else null end`,
+          },
+        });
+        s.commitTransaction();
+        if (props.accessToken) {
+          s.if(
+            sql`(select status from db.training_assignments where id = ui.training_assignment_id) = 'completed'`,
+            (s) => {
+              s.setScalar(
+                "ui.submission_confirmation",
+                employeeText(sql`course_assignment.employee_language`, {
+                  en: "Course completed.",
+                  es: "Curso completado.",
+                }),
+              );
+            },
+          );
+        }
+        s.refetch();
+      },
+      catch: (s) => {
+        s.setScalar(
+          "ui.signature_error",
+          employeeText(sql`course_assignment.employee_language`, {
+            en:
+              "Could not submit this course. Check your steps and responses, then try again.",
+            es:
+              "No se pudo enviar el curso. Revise los pasos y las respuestas e inténtelo de nuevo.",
+          }),
+        );
+      },
+    });
+  };
+  const courseLanguage = sql`course_assignment.employee_language`;
+  const courseView = sql`case
+    when course_view = 'introduction' and not (${hasIntroduction}) then 'steps'
+    else course_view
+  end`;
+  const currentSectionId = sql`coalesce(
+    course_section_id,
+    (select o.section_id from course_outline_sections o
+      where exists (
+        select 1 from course_tasks t
+        where coalesce(t.section_id, 0) = o.section_id
+          and t.status != 'completed'
+      )
+      order by o.position limit 1),
+    (select o.section_id from course_outline_sections o
+      order by o.position limit 1)
+  )`;
+  const adjacentSectionId = (direction: "previous" | "next") =>
+    sql`(select o.section_id from course_outline_sections o
+      where o.position ${direction === "previous" ? sql`<` : sql`>`} (
+        select c.position from course_outline_sections c
+        where c.section_id = ${currentSectionId}
+      )
+      order by o.position ${direction === "previous" ? sql`desc` : sql`asc`}
+      limit 1)`;
+  const previousSectionId = adjacentSectionId("previous");
+  const nextSectionId = adjacentSectionId("next");
+  const openCourseView = (
+    s: DomStatements,
+    view: "introduction" | "steps" | "signoff",
+    sectionId?: Sql,
+    scrollTarget?: Sql,
+  ) => {
+    s.setScalar("course_view", sql.lit(view));
+    if (sectionId) s.setScalar("course_section_id", sectionId);
+    if (view === "steps") s.setScalar("course_started", true);
+    s.setScalar(
+      "course_scroll_target",
+      scrollTarget ?? sql.lit`training-course-content`,
+    );
+  };
+  // Keep the open section stable once the learner works in it; otherwise the
+  // first-unfinished default would jump ahead when its last step completes.
+  const pinCourseSection = (s: DomStatements) =>
+    s.setScalar(
+      "course_section_id",
+      sql`coalesce(course_section_id, coalesce(course_task.section_id, 0))`,
+    );
   return (
     <Data
       local
+      watch={props.previewCourseId
+        ? [sql`preview_restart`, sql`preview_language`]
+        : []}
       procedure={(s) => {
+        // Which outline entry is open: introduction, steps, or signoff.
+        s.defScalar(
+          "course_view",
+          props.validationMode ? sql.lit`signoff` : sql.lit`introduction`,
+        );
+        // Null follows the first section with unfinished steps.
+        s.defScalar("course_section_id", { type: "BigInt" });
+        s.defScalar("course_scroll_target", {
+          type: { type: "String", maxLength: 100 },
+        });
+        s.defScalar("submission_confirmation", {
+          type: { type: "String", maxLength: 200 },
+        });
+        s.defScalar("course_started", false);
         s.defScalar("course_step_error", {
           type: { type: "String", maxLength: 1000 },
         });
@@ -1492,6 +1786,10 @@ export function EmployeeTrainingCoursePage(
       }}
     >
       <Data
+        noRefetch={!!props.previewCourseId}
+        watch={props.previewCourseId
+          ? [sql`preview_restart`, sql`preview_language`]
+          : []}
         procedure={(s) => {
           s.defScalar(
             "person_id",
@@ -1510,9 +1808,13 @@ export function EmployeeTrainingCoursePage(
             )`
               : currentEmployeeId(block.opts),
           );
-          s.defRecord(
-            "course_assignment",
-            sql`select a.id, course.name as title,
+          if (props.previewCourseId) {
+            defineCoursePreview(s, block, props.previewCourseId);
+          } else {
+            s.defRecord(
+              "course_assignment",
+              sql`select a.id, coalesce((select localized_name from db.training_course_versions where id = a.training_course_version_id), course.name) as title,
+                     (select introduction from db.training_course_versions where id = a.training_course_version_id) as introduction,
                      a.final_primary_validator_id,
                      a.final_secondary_validator_id,
                      a.employee_final_signature_data,
@@ -1524,16 +1826,16 @@ export function EmployeeTrainingCoursePage(
                        from db.training_assignment_validations av
                           where av.training_assignment_id = a.id
                          and av.validation_stage_code = ${
-              sql.lit(validationLabels.primaryStageCode)
-            }
+                sql.lit(validationLabels.primaryStageCode)
+              }
                      ) as primary_validator_validated,
                      exists (
                        select 1
                        from db.training_assignment_validations av
                           where av.training_assignment_id = a.id
                          and av.validation_stage_code = ${
-              sql.lit(validationLabels.secondaryStageCode)
-            }
+                sql.lit(validationLabels.secondaryStageCode)
+              }
                      ) as secondary_validator_validated,
                      coalesce(
                        ${currentEmployeeId(block.opts)}
@@ -1541,34 +1843,32 @@ export function EmployeeTrainingCoursePage(
                        false
                      ) as current_user_is_primary_validator,
                      ${
-              secondaryByPermission
-                ? currentUserHasPermission(
-                  sql.lit(validationLabels.secondaryStagePermission),
-                )
-                : sql`coalesce(
+                secondaryByPermission
+                  ? currentUserHasPermission(
+                    sql.lit(validationLabels.secondaryStagePermission),
+                  )
+                  : sql`coalesce(
                        ${currentEmployeeId(block.opts)}
                          = a.final_secondary_validator_id,
                        false
                      )`
-            } as current_user_is_secondary_validator,
+              } as current_user_is_secondary_validator,
                      ${
-              employeeName(block.opts, sql`final_primary_validator`)
-            } as final_primary_validator_name,
+                employeeName(block.opts, sql`final_primary_validator`)
+              } as final_primary_validator_name,
                      ${
-              employeeName(block.opts, sql`final_secondary_validator`)
-            } as final_secondary_validator_name,
+                employeeName(block.opts, sql`final_secondary_validator`)
+              } as final_secondary_validator_name,
                      (
                        select ${employeeName(block.opts, sql`current_person`)}
                        from db.${
-              sql.ref(personTable(block.opts))
-            } current_person
+                sql.ref(personTable(block.opts))
+              } current_person
                        where current_person.id = ${
-              currentEmployeeId(block.opts)
-            }
+                currentEmployeeId(block.opts)
+              }
                      ) as current_user_name,
-                     ${
-              personLanguageSql(block.opts, sql`e`)
-            } as employee_language,
+                     a.training_language as employee_language,
                      ${employeeName(block.opts, sql`e`)} as employee_name,
                      (select min(t.due_date)
                       from db.training_employee_tasks t
@@ -1586,28 +1886,32 @@ export function EmployeeTrainingCoursePage(
                      a.status
               from db.training_assignments a
               join db.${
-              sql.ref(personTable(block.opts))
-            } e on e.id = a.person_id
+                sql.ref(personTable(block.opts))
+              } e on e.id = a.person_id
               join db.training_courses course
                 on course.id = a.training_course_id
               left join db.${
-              sql.ref(personTable(block.opts))
-            } final_primary_validator
+                sql.ref(personTable(block.opts))
+              } final_primary_validator
                 on final_primary_validator.id = a.final_primary_validator_id
               left join db.${
-              sql.ref(personTable(block.opts))
-            } final_secondary_validator
+                sql.ref(personTable(block.opts))
+              } final_secondary_validator
                 on final_secondary_validator.id =
                   a.final_secondary_validator_id
               where a.id = ui.training_assignment_id
                 and a.person_id = ui.person_id`,
-          );
-          s.defTable(
-            "course_tasks",
-            sql`select t.id, t.id as task_id, t.status,
+            );
+            s.defTable(
+              "course_tasks",
+              sql`select t.id, t.id as task_id, t.status,
                      section.id as section_id,
                      section.name as section_name,
                      section.description as section_description,
+                     section.training_course_version_id as section_version_id,
+                     (select introduction from db.training_course_versions v where v.id = section.training_course_version_id
+                       and v.training_course_id != (select training_course_id from db.training_assignments where id = ui.training_assignment_id)) as nested_introduction,
+                     (select coalesce(v.localized_name, c.name) from db.training_courses c join db.training_course_versions v on v.training_course_id = c.id where v.id = section.training_course_version_id) as nested_course_name,
                      section.ordinal as section_ordinal,
                      i.sort_order as item_ordinal,
                      coalesce(i.external_title, i.content) as title,
@@ -1627,7 +1931,7 @@ export function EmployeeTrainingCoursePage(
                      coalesce(i.requires_essay, false)
                        or i.type = 'essay' as requires_essay,
                      i.essay_prompt,
-                     t.essay_response,
+                     t.essay_response, false as response_dirty,
                      t.signature_name,
                      t.signature_data,
                      i.external_url
@@ -1639,19 +1943,18 @@ export function EmployeeTrainingCoursePage(
               where t.training_assignment_id = ui.training_assignment_id
                 and t.status != 'waived'
               order by section.ordinal nulls last, i.sort_order, t.id`,
-          );
-          // Library documents attached to each step, pinned to the exact
-          // version snapshotted on the task so signed steps stay tied to
-          // the revision the employee saw.
-          s.defTable(
-            "course_task_item_documents",
-            sql`select task_doc.id,
+            );
+            // Company Files media follows its latest published version.
+            // The original task snapshots remain available as evidence.
+            s.defTable(
+              "course_task_item_documents",
+              sql`select task_doc.id,
                     task_doc.training_employee_task_id,
                     coalesce(item_doc.label, d.title) as title,
                     v.id as document_version_id,
-                    v.file_name, v.content_mode, v.blob_hash,
+                    v.file_name, v.content_type, v.content_mode, v.blob_hash,
                     v.rich_content, v.external_url
-                from db.training_task_item_documents task_doc
+                from db.training_task_item_document_versions task_doc
                 join db.training_employee_tasks t
                   on t.id = task_doc.training_employee_task_id
                 join db.training_course_section_item_documents item_doc
@@ -1663,6 +1966,28 @@ export function EmployeeTrainingCoursePage(
                   on v.id = task_doc.document_version_id
                 where t.training_assignment_id = ui.training_assignment_id
                 order by t.id, item_doc.sort_order, task_doc.id`,
+            );
+          }
+          s.defTable(
+            "course_outline_sections",
+            sql`select section_id, name, description, position,
+                       row_number() over (order by position) as section_number
+                from (
+                  select ordered.section_id, min(ordered.section_name) as name,
+                         min(ordered.section_description) as description,
+                         min(ordered.position) as position
+                  from (
+                    select coalesce(t.section_id, 0) as section_id,
+                           t.section_name, t.section_description,
+                           row_number() over (
+                             order by t.section_ordinal nulls last,
+                                      t.item_ordinal, t.id
+                           ) as position
+                    from course_tasks t
+                  ) ordered
+                  group by ordered.section_id
+                ) grouped
+                order by position`,
           );
           s.defTable(
             "primary_validator_options",
@@ -1701,25 +2026,74 @@ export function EmployeeTrainingCoursePage(
         }}
       >
         <Show
-          when={sql`course_assignment.id is not null`}
-          fallback={
-            <AccessProblemNotice
-              block={props.block}
-              kind={props.accessToken ? "invite" : "task"}
-            />
-          }
+          when={sql`course_assignment.id is not null and ${
+            props.previewCourseId
+              ? sql`preview_course.version_id is not null`
+              : sql.true
+          }`}
+          fallback={props.previewCourseId
+            ? (
+              <PageShell
+                title={sql`coalesce(preview_course.name, 'Course unavailable')`}
+                actions={props.previewActions}
+                narrow
+                back={
+                  <Button
+                    component="a"
+                    href={props.backHref}
+                    variant="plain"
+                    startIcon="ArrowBack"
+                  >
+                    Back to editor
+                  </Button>
+                }
+              >
+                <Alert color="warning">
+                  {sql`case when preview_course.id is not null
+                    then 'No ' || coalesce((select name from db.training_content_languages where code = ui.preview_language), ui.preview_language) || ' version found.'
+                    else 'This course is no longer available. Return to the course editor to choose another course.'
+                    end`}
+                </Alert>
+              </PageShell>
+            )
+            : (
+              <Show
+                when={sql`submission_confirmation is not null`}
+                fallback={
+                  <AccessProblemNotice
+                    block={props.block}
+                    kind={props.accessToken ? "invite" : "task"}
+                  />
+                }
+              >
+                <PageShell title={sql`submission_confirmation`} narrow>
+                  <Alert color="success" startIcon="CheckCircle">
+                    {sql`submission_confirmation`}
+                  </Alert>
+                </PageShell>
+              </Show>
+            )}
         >
           <PageShell
             title={sql`course_assignment.title`}
-            subtitle={sql`coalesce(${
+            subtitle={sql`case
+              when course_assignment.status in ('completed', 'validation_pending')
+                then ${
+              employeeText(sql`course_assignment.employee_language`, {
+                en: "Completed",
+                es: "Completado",
+              })
+            }
+              else coalesce(${
               relativeDueSql(
                 sql`course_assignment.employee_language`,
                 sql`course_assignment.due_date`,
               )
-            }, '')`}
-          >
-            <div className="max-w-4xl mx-auto">
-              <div className="mb-3">
+            }, '')
+            end`}
+            actions={props.previewActions}
+            back={
+              <div>
                 <Button
                   component="a"
                   href={props.backHref ??
@@ -1736,225 +2110,542 @@ export function EmployeeTrainingCoursePage(
                     })}
                 </Button>
               </div>
-              <Card variant="outlined">
-                <CardHeader>
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 w-full">
-                    <div>
-                      <Typography level="title-lg" startIcon="Checklist">
-                        {employeeText(
-                          sql`course_assignment.employee_language`,
-                          {
-                            en: "Course steps",
-                            es: "Pasos del curso",
-                          },
-                        )}
-                      </Typography>
-                      <Typography level="body-sm" className="text-neutral-600">
-                        {employeeText(
-                          sql`course_assignment.employee_language`,
-                          {
-                            en:
-                              "Open the documents, write any required responses, and check each step off.",
-                            es:
-                              "Abra los documentos, escriba las respuestas requeridas y marque cada paso.",
-                          },
-                        )}
-                      </Typography>
-                    </div>
-                    <Typography
-                      level="body-sm"
-                      className="text-neutral-600 shrink-0"
-                    >
-                      {sql`course_assignment.done_tasks::string || '/' || course_assignment.total_tasks::string`}
-                      {" "}
-                      {employeeText(sql`course_assignment.employee_language`, {
-                        en: "steps done",
-                        es: "pasos completados",
-                      })}
+            }
+          >
+            <div>
+              {props.previewCourseId && (
+                <>
+                  <Alert
+                    color="neutral"
+                    startIcon="Visibility"
+                    className="mb-4"
+                  >
+                    {sql`coalesce(preview_version_label, 'Course') || ' preview — progress is not saved.'`}
+                    {" "}
+                    Responses and signatures are for testing only. No
+                    assignments, notifications, or certificates are created.
+                  </Alert>
+                  <Each table="preview_issues" recordName="preview_issue">
+                    <Alert color="warning" startIcon="Warning" className="mb-3">
+                      {sql`preview_issue.issue`}
+                    </Alert>
+                  </Each>
+                </>
+              )}
+              <Effect
+                watch={[sql`course_scroll_target`]}
+                onChange={(s) => {
+                  s.if(sql`course_scroll_target is not null`, (s) => {
+                    s.element(sql`course_scroll_target`).scrollIntoView({
+                      block: sql.lit`start`,
+                    });
+                    s.setScalar("course_scroll_target", sql`null`);
+                  });
+                }}
+              />
+              <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+                <nav
+                  aria-label={employeeText(courseLanguage, {
+                    en: "Course outline",
+                    es: "Esquema del curso",
+                  })}
+                  className="flex flex-col gap-1 rounded-md border border-divider bg-white p-3 lg:sticky lg:top-4 lg:max-h-[90dvh] lg:w-72 lg:shrink-0 lg:overflow-y-auto"
+                >
+                  <div className="px-2 pb-3">
+                    <Typography level="body-sm" className="text-neutral-600">
+                      {sql`course_assignment.done_tasks::string || ' / ' || course_assignment.total_tasks::string || ' ' || ${
+                        employeeText(courseLanguage, {
+                          en: "steps done",
+                          es: "pasos completados",
+                        })
+                      }`}
                     </Typography>
+                    <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200">
+                      <div
+                        className="h-full rounded-full bg-primary-500 transition-all"
+                        style={{
+                          width:
+                            sql`(course_assignment.done_tasks * 100 / greatest(course_assignment.total_tasks, 1))::string || '%'`,
+                        }}
+                      />
+                    </div>
                   </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="h-1.5 w-full rounded-full bg-neutral-200 overflow-hidden mb-4">
+                  <Show when={hasIntroduction}>
+                    <button
+                      type="button"
+                      className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-neutral-100"
+                      aria-current={sql`case when ${courseView} = 'introduction' then 'step' else null end`}
+                      dynamicClassNames={[{
+                        condition: sql`${courseView} = 'introduction'`,
+                        classNames: "bg-primary-50 font-semibold",
+                      }]}
+                      onClick={(s) => openCourseView(s, "introduction")}
+                    >
+                      <MaterialIcon
+                        icon="MenuBook"
+                        className="text-neutral-500"
+                      />
+                      {employeeText(courseLanguage, {
+                        en: "Introduction",
+                        es: "Introducción",
+                      })}
+                    </button>
+                  </Show>
+                  <Each
+                    table="course_outline_sections"
+                    recordName="outline_section"
+                  >
+                    <div className="flex flex-col">
+                      <button
+                        type="button"
+                        className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-semibold hover:bg-neutral-100"
+                        aria-current={sql`case when ${courseView} = 'steps' and outline_section.section_id = ${currentSectionId} then 'step' else null end`}
+                        dynamicClassNames={[{
+                          condition:
+                            sql`${courseView} = 'steps' and outline_section.section_id = ${currentSectionId}`,
+                          classNames: "bg-primary-50",
+                        }]}
+                        onClick={(s) =>
+                          openCourseView(
+                            s,
+                            "steps",
+                            sql`outline_section.section_id`,
+                          )}
+                      >
+                        <span className="min-w-0 flex-1">
+                          {sql`coalesce(outline_section.name, ${
+                            employeeText(courseLanguage, {
+                              en: "Course steps",
+                              es: "Pasos del curso",
+                            })
+                          })`}
+                        </span>
+                        <span className="shrink-0 text-xs font-normal text-neutral-600">
+                          {sql`(select count(*) from course_tasks t where coalesce(t.section_id, 0) = outline_section.section_id and t.status = 'completed')::string || '/' || (select count(*) from course_tasks t where coalesce(t.section_id, 0) = outline_section.section_id)::string`}
+                        </span>
+                      </button>
+                      <div className="hidden flex-col lg:flex">
+                        <Each
+                          table="course_tasks"
+                          recordName="outline_task"
+                          where={sql`coalesce(outline_task.section_id, 0) = outline_section.section_id`}
+                        >
+                          <button
+                            type="button"
+                            className="flex min-h-9 w-full items-start gap-2 rounded-md py-1.5 pl-3 pr-2 text-left text-sm text-neutral-700 hover:bg-neutral-100"
+                            onClick={(s) =>
+                              openCourseView(
+                                s,
+                                "steps",
+                                sql`outline_section.section_id`,
+                                sql`'training-course-step-' || outline_task.id::string`,
+                              )}
+                          >
+                            <Show
+                              when={sql`outline_task.status = 'completed'`}
+                              fallback={
+                                <Show
+                                  when={sql`outline_task.item_type = 'assessment' and outline_task.assessment_state = 'review_pending'`}
+                                  fallback={
+                                    <Show
+                                      when={sql`outline_task.item_type = 'assessment' and outline_task.assessment_state in ('failed_retake_available', 'failed_final')`}
+                                      fallback={
+                                        <MaterialIcon
+                                          icon="RadioButtonUnchecked"
+                                          className="mt-0.5 text-base text-neutral-400"
+                                        />
+                                      }
+                                    >
+                                      <MaterialIcon
+                                        icon="Error"
+                                        className="mt-0.5 text-base text-red-600"
+                                      />
+                                    </Show>
+                                  }
+                                >
+                                  <MaterialIcon
+                                    icon="HourglassTop"
+                                    className="mt-0.5 text-base text-amber-600"
+                                  />
+                                </Show>
+                              }
+                            >
+                              <MaterialIcon
+                                icon="CheckCircle"
+                                className="mt-0.5 text-base text-emerald-600"
+                              />
+                            </Show>
+                            <span className="min-w-0 flex-1">
+                              {sql`outline_task.title`}
+                            </span>
+                          </button>
+                        </Each>
+                      </div>
+                    </div>
+                  </Each>
+                  <>
+                    <button
+                      type="button"
+                      className="mt-1 flex min-h-10 w-full items-center gap-2 rounded-md border-t border-divider px-2 py-2 text-left text-sm font-semibold hover:bg-neutral-100"
+                      aria-current={sql`case when ${courseView} = 'signoff' then 'step' else null end`}
+                      dynamicClassNames={[{
+                        condition: sql`${courseView} = 'signoff'`,
+                        classNames: "bg-primary-50",
+                      }]}
+                      onClick={(s) => openCourseView(s, "signoff")}
+                    >
+                      <Show
+                        when={sql`course_assignment.employee_final_signed_at is not null`}
+                        fallback={
+                          <MaterialIcon
+                            icon="Draw"
+                            className="text-neutral-500"
+                          />
+                        }
+                      >
+                        <MaterialIcon
+                          icon="CheckCircle"
+                          className="text-emerald-600"
+                        />
+                      </Show>
+                      <span className="min-w-0 flex-1">
+                        {employeeText(courseLanguage, {
+                          en: "Review and submit",
+                          es: "Revisar y enviar",
+                        })}
+                      </span>
+                      <Show
+                        when={sql`course_assignment.done_tasks < course_assignment.total_tasks`}
+                      >
+                        <MaterialIcon
+                          icon="Lock"
+                          className="text-base text-neutral-400"
+                        />
+                      </Show>
+                    </button>
+                  </>
+                </nav>
+                <div
+                  id="training-course-content"
+                  className="flex min-w-0 flex-1 flex-col gap-4"
+                >
+                  <Show when={hasIntroduction}>
                     <div
-                      className="h-full rounded-full bg-primary-500 transition-all"
-                      style={{
-                        width:
-                          sql`(course_assignment.done_tasks * 100 / greatest(course_assignment.total_tasks, 1))::string || '%'`,
-                      }}
-                    />
-                  </div>
+                      className="rounded-md border border-divider bg-white p-4 sm:p-6"
+                      dynamicClassNames={[{
+                        condition: sql`${courseView} != 'introduction'`,
+                        classNames: "hidden",
+                      }]}
+                    >
+                      <LexicalRichTextDisplay
+                        value={sql`course_assignment.introduction`}
+                        imageSrcPrefixRewrite={props.previewCourseId
+                          ? undefined
+                          : {
+                            prefix: sql.lit(introductionImagePrefix),
+                            replacement: props.accessToken
+                              ? sql`'/api/training/invite/' || ${props.accessToken} || '/assignments/' || course_assignment.id::string || '/introduction-images/'`
+                              : sql`'/api/training/assignments/' || course_assignment.id::string || '/introduction-images/'`,
+                          }}
+                      />
+                      <Button
+                        className="mt-5"
+                        endIcon="ArrowForward"
+                        onClick={(s) => openCourseView(s, "steps")}
+                      >
+                        {sql`case when course_started or course_assignment.done_tasks > 0 then ${
+                          employeeText(courseLanguage, {
+                            en: "Continue course",
+                            es: "Continuar curso",
+                          })
+                        } else ${
+                          employeeText(courseLanguage, {
+                            en: "Begin course",
+                            es: "Comenzar curso",
+                          })
+                        } end`}
+                      </Button>
+                    </div>
+                  </Show>
                   <Show
-                    when={sql`course_assignment.done_tasks = course_assignment.total_tasks
+                    when={sql`${courseView} != 'introduction' and ${courseEditable}
+                      and course_assignment.done_tasks = course_assignment.total_tasks
+                      and ${
+                      props.previewCourseId
+                        ? sql`course_assignment.total_tasks > 0`
+                        : sql`true`
+                    }
                       and ${
                       props.validationMode
                         ? sql`course_assignment.employee_final_signed_at is not null`
                         : sql`true`
                     }`}
                   >
-                    <Alert
-                      color="success"
-                      startIcon="CheckCircle"
-                      className="mb-4"
-                    >
-                      {employeeText(sql`course_assignment.employee_language`, {
-                        en: "All steps of this course are complete.",
-                        es: "Todos los pasos de este curso están completos.",
-                      })}
+                    <Alert color="success" startIcon="CheckCircle">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          {employeeText(courseLanguage, {
+                            en:
+                              "All steps are done. Review your answers, then submit the course.",
+                            es:
+                              "Todos los pasos están listos. Revise sus respuestas y envíe el curso.",
+                          })}
+                        </span>
+                        <Show
+                          when={sql`${courseView} = 'steps'
+                            and ${courseEditable}`}
+                        >
+                          <Button
+                            size="sm"
+                            endIcon="ArrowForward"
+                            onClick={(s) => openCourseView(s, "signoff")}
+                          >
+                            {employeeText(courseLanguage, {
+                              en: "Review and submit",
+                              es: "Revisar y enviar",
+                            })}
+                          </Button>
+                        </Show>
+                      </div>
                     </Alert>
                   </Show>
                   <Show when={sql`course_step_error is not null`}>
-                    <Alert color="danger" startIcon="Error" className="mb-4">
+                    <Alert color="danger" startIcon="Error">
                       {sql`course_step_error`}
                     </Alert>
                   </Show>
-                  <div className="flex flex-col gap-3">
-                    <Each table="course_tasks" recordName="course_task">
-                      <Show
-                        when={sql`course_task.section_id is not null
-                          and not exists (
-                            select 1
-                            from course_tasks previous
-                            where previous.section_id = course_task.section_id
-                              and (
-                                previous.section_ordinal < course_task.section_ordinal
-                                or (
-                                  previous.section_ordinal = course_task.section_ordinal
-                                  and (
-                                    previous.item_ordinal < course_task.item_ordinal
-                                    or (
-                                      previous.item_ordinal = course_task.item_ordinal
-                                      and previous.id < course_task.id
-                                    )
-                                  )
-                                )
-                              )
-                          )`}
-                      >
-                        <div className="mt-2 first:mt-0 border-b border-divider pb-2">
-                          <Typography level="title-md">
-                            {sql`course_task.section_name`}
-                          </Typography>
-                          <Show
-                            when={sql`nullif(trim(coalesce(course_task.section_description, '')), '') is not null`}
+                  <div
+                    // Hidden views stay mounted so drawn signatures survive
+                    // navigation; display:none would size their canvases at
+                    // zero, so collapse them instead.
+                    dynamicClassNames={[{
+                      condition: sql`${courseView} != 'steps'`,
+                      classNames: "invisible h-0 overflow-hidden",
+                    }]}
+                  >
+                    <Each
+                      table="course_outline_sections"
+                      recordName="current_section"
+                      where={sql`current_section.section_id = ${currentSectionId}`}
+                    >
+                      <div className="mb-4">
+                        <Typography
+                          level="body-sm"
+                          className="text-neutral-600"
+                        >
+                          {sql`${
+                            employeeText(courseLanguage, {
+                              en: "Section",
+                              es: "Sección",
+                            })
+                          } || ' ' || current_section.section_number::string || ' / ' || (select count(*) from course_outline_sections)::string`}
+                        </Typography>
+                        <Typography level="h4">
+                          {sql`coalesce(current_section.name, ${
+                            employeeText(courseLanguage, {
+                              en: "Course steps",
+                              es: "Pasos del curso",
+                            })
+                          })`}
+                        </Typography>
+                        <Show
+                          when={sql`nullif(trim(coalesce(current_section.description, '')), '') is not null`}
+                        >
+                          <Typography
+                            level="body-md"
+                            className="mt-1 text-neutral-600"
                           >
-                            <Typography
-                              level="body-sm"
-                              className="text-neutral-600 mt-1"
-                            >
-                              {sql`course_task.section_description`}
+                            {sql`current_section.description`}
+                          </Typography>
+                        </Show>
+                      </div>
+                    </Each>
+                    <Each
+                      table="course_tasks"
+                      recordName="course_task"
+                      eachKey={props.previewCourseId
+                        ? sql`course_task.id::string || ':' || preview_restart::string || ':' || preview_language`
+                        : undefined}
+                    >
+                      <div
+                        id={sql`'training-course-step-' || course_task.id::string`}
+                        dynamicClassNames={[{
+                          condition:
+                            sql`coalesce(course_task.section_id, 0) = ${currentSectionId}`,
+                          classNames: "pb-3",
+                        }, {
+                          condition:
+                            sql`coalesce(course_task.section_id, 0) != ${currentSectionId}`,
+                          classNames: "invisible h-0 overflow-hidden",
+                        }]}
+                      >
+                        <Show
+                          when={sql`${introductionEnabled} and course_task.nested_introduction is not null and not exists (
+                        select 1 from course_tasks previous where previous.section_version_id = course_task.section_version_id
+                          and (previous.section_ordinal < course_task.section_ordinal
+                            or (previous.section_ordinal = course_task.section_ordinal and previous.item_ordinal < course_task.item_ordinal)
+                            or (previous.section_ordinal = course_task.section_ordinal and previous.item_ordinal = course_task.item_ordinal and previous.id < course_task.id))
+                      )`}
+                        >
+                          <section className="mb-3 border-b border-divider pb-4">
+                            <Typography level="title-md" className="mb-3">
+                              {sql`course_task.nested_course_name`}
                             </Typography>
-                          </Show>
-                        </div>
-                      </Show>
-                      <div className="p-4 border border-divider rounded-md bg-white">
-                        <div className="flex items-start gap-3">
-                          <div className="pt-0.5 shrink-0">
-                            <Show
-                              when={sql`course_task.item_type = 'signature'`}
-                            >
+                            <LexicalRichTextDisplay
+                              value={sql`course_task.nested_introduction`}
+                              imageSrcPrefixRewrite={props.previewCourseId
+                                ? undefined
+                                : {
+                                  prefix: sql.lit(introductionImagePrefix),
+                                  replacement: props.accessToken
+                                    ? sql`'/api/training/invite/' || ${props.accessToken} || '/assignments/' || course_assignment.id::string || '/introduction-images/'`
+                                    : sql`'/api/training/assignments/' || course_assignment.id::string || '/introduction-images/'`,
+                                }}
+                            />
+                          </section>
+                        </Show>
+                        <div className="p-4 border border-divider rounded-md bg-white">
+                          <div className="flex items-start gap-3">
+                            <div className="pt-0.5 shrink-0">
                               <Show
-                                when={sql`course_task.status = 'completed'`}
-                                fallback={
-                                  <MaterialIcon
-                                    icon="Draw"
-                                    className="text-neutral-500"
-                                  />
-                                }
+                                when={sql`course_task.item_type = 'signature'`}
                               >
-                                <MaterialIcon
-                                  icon="CheckCircle"
-                                  className="text-emerald-600"
-                                />
+                                <Show
+                                  when={sql`course_task.status = 'completed'`}
+                                  fallback={
+                                    <MaterialIcon
+                                      icon="Draw"
+                                      className="text-neutral-500"
+                                    />
+                                  }
+                                >
+                                  <MaterialIcon
+                                    icon="CheckCircle"
+                                    className="text-emerald-600"
+                                  />
+                                </Show>
                               </Show>
-                            </Show>
-                            <Show
-                              when={sql`course_task.item_type = 'assessment'`}
-                            >
                               <Show
-                                when={sql`course_task.assessment_state = 'passed'`}
-                                fallback={
-                                  <MaterialIcon
-                                    icon="Quiz"
-                                    className="text-neutral-500"
-                                  />
-                                }
+                                when={sql`course_task.item_type = 'assessment'`}
                               >
-                                <MaterialIcon
-                                  icon="CheckCircle"
-                                  className="text-emerald-600"
-                                />
+                                <Show
+                                  when={sql`course_task.assessment_state = 'passed'`}
+                                  fallback={
+                                    <MaterialIcon
+                                      icon="Grading"
+                                      className="text-neutral-500"
+                                    />
+                                  }
+                                >
+                                  <MaterialIcon
+                                    icon="CheckCircle"
+                                    className="text-emerald-600"
+                                  />
+                                </Show>
                               </Show>
-                            </Show>
-                            <Show
-                              when={sql`course_task.item_type != 'signature'
+                              <Show
+                                when={sql`course_task.item_type != 'signature'
                                 and course_task.item_type != 'assessment'`}
-                            >
-                              <Checkbox
-                                checked={sql`course_task.status = 'completed'`}
-                                disabled={props.validationMode
-                                  ? sql`true`
-                                  : sql`course_assignment.status = 'completed'
-                                    or course_assignment.employee_final_signed_at is not null`}
-                                label=""
-                                onCheckboxChange={(s) => {
-                                  s.setScalar(
-                                    "course_step_error",
-                                    sql`null`,
-                                  );
-                                  s.tryServer({
-                                    body: (s) => {
+                              >
+                                <Checkbox
+                                  aria-label={sql`course_task.title`}
+                                  checked={sql`course_task.status = 'completed'`}
+                                  disabled={props.validationMode
+                                    ? sql`true`
+                                    : sql`not (${courseEditable})
+                                    or ${
+                                      props.previewCourseId
+                                        ? sql`course_task.requires_essay and nullif(trim(course_task.essay_response), '') is null`
+                                        : sql`false`
+                                    }`}
+                                  label=""
+                                  onCheckboxChange={(s) => {
+                                    pinCourseSection(s);
+                                    if (props.previewCourseId) {
+                                      s.setScalar(
+                                        "course_step_error",
+                                        sql`null`,
+                                      );
                                       s.if(
-                                        sql`target_checked`,
+                                        sql`target_checked and course_task.requires_essay and nullif(trim(course_task.essay_response), '') is null`,
                                         (s) => {
-                                          s.if(
-                                            sql`course_task.requires_essay
-                                              and nullif(trim(coalesce(course_task.essay_response, '')), '') is null`,
-                                            (s) => {
-                                              s.setScalar(
-                                                "ui.course_step_error",
-                                                employeeText(
-                                                  sql`course_assignment.employee_language`,
-                                                  {
-                                                    en:
-                                                      "Write the required response before checking this step off.",
-                                                    es:
-                                                      "Escriba la respuesta requerida antes de marcar este paso.",
-                                                  },
-                                                ),
-                                              );
-                                              // Re-render so the checkbox
-                                              // snaps back to unchecked.
-                                              s.refetch();
-                                              s.return();
-                                            },
-                                          );
-                                          s.startTransaction();
-                                          s.callStoredProcedure(
-                                            "training_complete_task",
-                                            {
-                                              inputScalars: {
-                                                p_task_id:
-                                                  sql`course_task.task_id`,
-                                                p_access_token:
-                                                  props.accessToken ??
-                                                    sql`null`,
-                                                p_signature_data: sql`null`,
-                                                p_completion_attestation:
-                                                  sql`null`,
-                                                p_essay_response: sql`null`,
-                                              },
-                                            },
-                                          );
-                                          s.commitTransaction();
                                           s.setScalar(
-                                            "ui.course_step_error",
-                                            sql`null`,
+                                            "course_step_error",
+                                            sql
+                                              .lit`Write the required response before checking this step off.`,
                                           );
+                                          s.return();
                                         },
-                                        (s) => {
-                                          s.startTransaction();
-                                          s.modify(sql`
+                                      );
+                                      s.modify(
+                                        sql`update ui.course_tasks set status = case when target_checked then 'completed' else 'in_progress' end where id = course_task.id`,
+                                      );
+                                      s.modify(
+                                        sql`update ui.course_assignment set done_tasks = (select count(*) from ui.course_tasks where status = 'completed')`,
+                                      );
+                                      return;
+                                    }
+                                    s.setScalar(
+                                      "course_step_error",
+                                      sql`null`,
+                                    );
+                                    s.tryServer({
+                                      body: (s) => {
+                                        s.if(
+                                          sql`target_checked`,
+                                          (s) => {
+                                            s.if(
+                                              sql`course_task.requires_essay
+                                              and nullif(trim(coalesce(course_task.essay_response, '')), '') is null`,
+                                              (s) => {
+                                                s.setScalar(
+                                                  "ui.course_step_error",
+                                                  employeeText(
+                                                    sql`course_assignment.employee_language`,
+                                                    {
+                                                      en:
+                                                        "Write the required response before checking this step off.",
+                                                      es:
+                                                        "Escriba la respuesta requerida antes de marcar este paso.",
+                                                    },
+                                                  ),
+                                                );
+                                                // Re-render so the checkbox
+                                                // snaps back to unchecked.
+                                                s.refetch();
+                                                s.return();
+                                              },
+                                            );
+                                            s.startTransaction();
+                                            saveCourseResponseDrafts(
+                                              s,
+                                              props.accessToken,
+                                            );
+                                            s.callStoredProcedure(
+                                              "training_complete_task",
+                                              {
+                                                inputScalars: {
+                                                  p_task_id:
+                                                    sql`course_task.task_id`,
+                                                  p_access_token:
+                                                    props.accessToken ??
+                                                      sql`null`,
+                                                  p_signature_data: sql`null`,
+                                                  p_completion_attestation:
+                                                    sql`null`,
+                                                  p_essay_response: sql`null`,
+                                                },
+                                              },
+                                            );
+                                            s.commitTransaction();
+                                            s.setScalar(
+                                              "ui.course_step_error",
+                                              sql`null`,
+                                            );
+                                          },
+                                          (s) => {
+                                            s.startTransaction();
+                                            s.modify(sql`
                                             update db.training_employee_tasks
                                             set status = 'in_progress',
                                                 completed_at = null,
@@ -1965,12 +2656,12 @@ export function EmployeeTrainingCoursePage(
                                                 from db.training_assignments task_assignment
                                                 where task_assignment.id = training_assignment_id
                                                   and task_assignment.person_id = ui.person_id
-                                                  and task_assignment.status != 'completed'
+                                                  and task_assignment.status in ('pending', 'in_progress')
                                                   and task_assignment.employee_final_signed_at is null
                                               )
                                               and status = 'completed'
                                           `);
-                                          s.modify(sql`
+                                            s.modify(sql`
                                             update db.training_assignments
                                             set status = 'in_progress'
                                             where id = ui.training_assignment_id
@@ -1981,472 +2672,608 @@ export function EmployeeTrainingCoursePage(
                                                   and t.status in ('assigned', 'in_progress')
                                               )
                                           `);
-                                          s.commitTransaction();
-                                        },
-                                      );
-                                      s.refetch();
-                                    },
-                                    catch: (s) => {
-                                      s.setScalar(
-                                        "course_step_error",
-                                        employeeText(
-                                          sql`course_assignment.employee_language`,
-                                          {
-                                            en:
-                                              "The step could not be updated.",
-                                            es:
-                                              "No se pudo actualizar el paso.",
+                                            s.commitTransaction();
                                           },
-                                        ),
-                                      );
-                                    },
-                                  });
-                                }}
-                              />
-                            </Show>
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Typography level="title-md">
-                                {sql`course_task.title`}
-                              </Typography>
-                              <Chip size="sm" variant="soft" color="neutral">
-                                {sql`course_task.kind`}
-                              </Chip>
-                              <Show
-                                when={sql`course_task.item_type = 'assessment'`}
-                              >
-                                <StatusChip
-                                  fallbackLabel={sql`course_task.assessment_state`}
-                                  cases={[
-                                    {
-                                      when:
-                                        sql`course_task.assessment_state = 'not_started'`,
-                                      label: employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        {
-                                          en: "Not started",
-                                          es: "Sin iniciar",
-                                        },
-                                      ),
-                                      color: "neutral",
-                                    },
-                                    {
-                                      when:
-                                        sql`course_task.assessment_state = 'in_progress'`,
-                                      label: employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        {
-                                          en: "In progress",
-                                          es: "En progreso",
-                                        },
-                                      ),
-                                      color: "primary",
-                                    },
-                                    {
-                                      when:
-                                        sql`course_task.assessment_state = 'review_pending'`,
-                                      label: employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        {
-                                          en: "Review pending",
-                                          es: "Revisión pendiente",
-                                        },
-                                      ),
-                                      color: "warning",
-                                    },
-                                    {
-                                      when:
-                                        sql`course_task.assessment_state = 'passed'`,
-                                      label: employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        { en: "Passed", es: "Aprobada" },
-                                      ),
-                                      color: "success",
-                                    },
-                                    {
-                                      when:
-                                        sql`course_task.assessment_state in ('failed_retake_available', 'failed_final')`,
-                                      label: employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        { en: "Failed", es: "Reprobada" },
-                                      ),
-                                      color: "danger",
-                                    },
-                                  ]}
+                                        );
+                                        s.refetch();
+                                      },
+                                      catch: (s) => {
+                                        s.setScalar(
+                                          "course_step_error",
+                                          employeeText(
+                                            sql`course_assignment.employee_language`,
+                                            {
+                                              en:
+                                                "The step could not be updated.",
+                                              es:
+                                                "No se pudo actualizar el paso.",
+                                            },
+                                          ),
+                                        );
+                                      },
+                                    });
+                                  }}
                                 />
                               </Show>
                             </div>
-                            <Show
-                              when={sql`course_task.item_type = 'assessment'`}
-                            >
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                <Button
-                                  component="a"
-                                  href={employeeAssessmentHref(
-                                    props.block,
-                                    sql`course_task.task_id`,
-                                    props.accessToken,
-                                  )}
-                                  variant="outlined"
-                                  color="neutral"
-                                  size="sm"
-                                  startIcon="Quiz"
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Typography level="title-md">
+                                  {sql`course_task.title`}
+                                </Typography>
+                                <Chip size="sm" variant="soft" color="neutral">
+                                  {sql`course_task.kind`}
+                                </Chip>
+                                <Show
+                                  when={sql`course_task.item_type = 'assessment'`}
                                 >
-                                  {employeeText(
-                                    sql`course_assignment.employee_language`,
-                                    {
-                                      en: "Open assessment",
-                                      es: "Abrir evaluación",
-                                    },
-                                  )}
-                                </Button>
+                                  <StatusChip
+                                    fallbackLabel={sql`course_task.assessment_state`}
+                                    cases={[
+                                      {
+                                        when:
+                                          sql`course_task.assessment_state = 'not_started'`,
+                                        label: employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          {
+                                            en: "Not started",
+                                            es: "Sin iniciar",
+                                          },
+                                        ),
+                                        color: "neutral",
+                                      },
+                                      {
+                                        when:
+                                          sql`course_task.assessment_state = 'in_progress'`,
+                                        label: employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          {
+                                            en: "In progress",
+                                            es: "En progreso",
+                                          },
+                                        ),
+                                        color: "primary",
+                                      },
+                                      {
+                                        when:
+                                          sql`course_task.assessment_state = 'review_pending'`,
+                                        label: employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          {
+                                            en: "Review pending",
+                                            es: "Revisión pendiente",
+                                          },
+                                        ),
+                                        color: "warning",
+                                      },
+                                      {
+                                        when:
+                                          sql`course_task.assessment_state = 'passed'`,
+                                        label: employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          { en: "Passed", es: "Aprobada" },
+                                        ),
+                                        color: "success",
+                                      },
+                                      {
+                                        when:
+                                          sql`course_task.assessment_state in ('failed_retake_available', 'failed_final')`,
+                                        label: employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          { en: "Failed", es: "Reprobada" },
+                                        ),
+                                        color: "danger",
+                                      },
+                                    ]}
+                                  />
+                                </Show>
                               </div>
-                            </Show>
-                            <Show
-                              when={sql`course_task.external_url is not null`}
-                            >
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                <Button
-                                  component="a"
-                                  href={sql`course_task.external_url`}
-                                  target="_blank"
-                                  variant="outlined"
-                                  color="neutral"
-                                  size="sm"
-                                  startIcon="OpenInNew"
-                                >
-                                  {employeeText(
-                                    sql`course_assignment.employee_language`,
-                                    { en: "Open link", es: "Abrir enlace" },
-                                  )}
-                                </Button>
-                              </div>
-                            </Show>
-                            <Show
-                              when={sql`exists (
-                              select 1
-                              from course_task_item_documents doc
-                              where doc.training_employee_task_id = course_task.task_id
-                            )`}
-                            >
-                              <div className="mt-2 flex flex-col gap-2">
-                                <Each
-                                  table="course_task_item_documents"
-                                  recordName="step_doc"
-                                  where={sql`step_doc.training_employee_task_id = course_task.task_id`}
-                                >
-                                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-md border border-divider bg-neutral-50 px-3 py-2">
-                                    <Typography
-                                      level="title-sm"
-                                      className="min-w-0"
-                                    >
-                                      {sql`step_doc.title`}
-                                    </Typography>
-                                    <div className="flex gap-2">
-                                      <Show
-                                        when={sql`step_doc.external_url is not null`}
-                                      >
-                                        <Button
-                                          component="a"
-                                          href={trainingExternalVersionUrl(
-                                            sql`step_doc.document_version_id`,
-                                            sql`course_task.task_id`,
-                                            props.accessToken,
-                                          )}
-                                          target="_blank"
-                                          variant="outlined"
-                                          color="neutral"
-                                          size="sm"
-                                          startIcon="OpenInNew"
-                                        >
-                                          {employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            { en: "Open", es: "Abrir" },
-                                          )}
-                                        </Button>
-                                      </Show>
-                                      <Show
-                                        when={sql`step_doc.blob_hash is not null`}
-                                      >
-                                        <Button
-                                          component="a"
-                                          href={trainingFileVersionUrl(
-                                            sql`step_doc.document_version_id`,
-                                            sql`course_task.task_id`,
-                                            props.accessToken,
-                                          )}
-                                          target="_blank"
-                                          variant="outlined"
-                                          color="neutral"
-                                          size="sm"
-                                          startIcon="OpenInNew"
-                                        >
-                                          {employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            { en: "Open", es: "Abrir" },
-                                          )}
-                                        </Button>
-                                      </Show>
-                                    </div>
-                                  </div>
-                                  <Show
-                                    when={sql`step_doc.rich_content is not null`}
-                                  >
-                                    <div className="rounded-md border border-divider bg-white p-3">
-                                      <LexicalRichTextDisplay
-                                        value={sql`step_doc.rich_content`}
-                                        imageSrcPrefixRewrite={trainingNativeImageSrcPrefixRewrite(
-                                          sql`step_doc.document_version_id`,
+                              <Show
+                                when={sql`course_task.item_type = 'assessment'`}
+                              >
+                                {props.previewCourseId
+                                  ? (
+                                    <TrainingAssessmentPreview
+                                      block={props.block}
+                                    />
+                                  )
+                                  : (
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      <Button
+                                        component="a"
+                                        href={employeeAssessmentHref(
+                                          props.block,
                                           sql`course_task.task_id`,
                                           props.accessToken,
                                         )}
-                                      />
-                                    </div>
-                                  </Show>
-                                </Each>
-                              </div>
-                            </Show>
-                            <Show when={sql`course_task.requires_essay`}>
-                              <FormControl className="mt-3">
-                                <FormLabel>
-                                  {sql`coalesce(course_task.essay_prompt, ${
-                                    employeeText(
-                                      sql`course_assignment.employee_language`,
-                                      {
-                                        en:
-                                          "Describe what you learned and how you will apply it.",
-                                        es:
-                                          "Describa lo que aprendió y cómo lo aplicará.",
-                                      },
-                                    )
-                                  })`}
-                                </FormLabel>
-                                <Show
-                                  when={sql`course_task.status != 'completed'
-                                    and ${
-                                    props.validationMode
-                                      ? sql`false`
-                                      : sql`true`
-                                  }`}
-                                  fallback={
-                                    <Typography
-                                      level="body-sm"
-                                      className="text-neutral-700"
-                                    >
-                                      {sql`course_task.essay_response`}
-                                    </Typography>
-                                  }
-                                >
-                                  <Textarea
-                                    value={sql`coalesce(course_task.essay_response, '')`}
-                                    minRows={3}
-                                    onInput={(s) => {
-                                      s.tryServer({
-                                        body: (s) => {
-                                          s.startTransaction();
-                                          s.modify(sql`
-                                          update db.training_employee_tasks
-                                          set essay_response = nullif(trim(target_value), ''),
-                                              status = case
-                                                when status = 'assigned' then 'in_progress'
-                                                else status
-                                              end
-                                          where id = course_task.task_id
-                                              and exists (
-                                                select 1
-                                                from db.training_assignments task_assignment
-                                                where task_assignment.id = training_assignment_id
-                                                  and task_assignment.person_id = ui.person_id
-                                                  and task_assignment.status != 'completed'
-                                                  and task_assignment.employee_final_signed_at is null
-                                              )
-                                            and status in ('assigned', 'in_progress')
-                                        `);
-                                          s.commitTransaction();
-                                          s.refetch();
-                                        },
-                                      });
-                                    }}
-                                  />
-                                </Show>
-                              </FormControl>
-                            </Show>
-                            <Show
-                              when={sql`course_task.item_type = 'signature'`}
-                            >
-                              <div className="mt-3 rounded-md border border-divider bg-neutral-50 p-3">
-                                <Show
-                                  when={sql`course_task.status = 'completed'`}
-                                  fallback={props.validationMode
-                                    ? (
-                                      <Typography
-                                        level="body-sm"
-                                        className="text-neutral-600"
+                                        variant="outlined"
+                                        color="neutral"
+                                        size="sm"
+                                        startIcon="Grading"
                                       >
                                         {employeeText(
                                           sql`course_assignment.employee_language`,
                                           {
-                                            en: "Signature pending.",
-                                            es: "Firma pendiente.",
+                                            en: "Open assessment",
+                                            es: "Abrir evaluación",
                                           },
                                         )}
-                                      </Typography>
-                                    )
-                                    : (
-                                      <div className="grid gap-3">
-                                        <Show
-                                          when={sql`course_task_signature_error is not null`}
-                                        >
-                                          <Alert
-                                            color="danger"
-                                            startIcon="Error"
-                                          >
-                                            {sql`course_task_signature_error`}
-                                          </Alert>
-                                        </Show>
-                                        <SignaturePad
-                                          label={employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en: "Draw your signature",
-                                              es: "Dibuje su firma",
-                                            },
-                                          )}
-                                          submitLabel={employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en: "Sign step",
-                                              es: "Firmar paso",
-                                            },
-                                          )}
-                                          onSigned={(s, signatureData) => {
-                                            s.setScalar(
-                                              "course_task_signature_error",
-                                              sql`null`,
-                                            );
-                                            s.tryServer({
-                                              body: (s) => {
-                                                s.startTransaction();
-                                                s.callStoredProcedure(
-                                                  "training_complete_task",
-                                                  {
-                                                    inputScalars: {
-                                                      p_task_id:
-                                                        sql`course_task.task_id`,
-                                                      p_access_token:
-                                                        props.accessToken ??
-                                                          sql`null`,
-                                                      p_signature_data:
-                                                        signatureData,
-                                                      p_completion_attestation:
-                                                        sql`null`,
-                                                      p_essay_response:
-                                                        sql`null`,
-                                                    },
-                                                  },
-                                                );
-                                                s.commitTransaction();
-                                                s.setScalar(
-                                                  "course_task_signature_error",
-                                                  sql`null`,
-                                                );
-                                                s.refetch();
-                                              },
-                                              catch: (s) => {
-                                                s.setScalar(
-                                                  "course_task_signature_error",
-                                                  employeeText(
-                                                    sql`course_assignment.employee_language`,
-                                                    {
-                                                      en:
-                                                        "The signature could not be saved.",
-                                                      es:
-                                                        "No se pudo guardar la firma.",
-                                                    },
-                                                  ),
-                                                );
-                                              },
-                                            });
-                                          }}
-                                        />
-                                      </div>
+                                      </Button>
+                                    </div>
+                                  )}
+                              </Show>
+                              <Show
+                                when={sql`course_task.external_url is not null`}
+                              >
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  <Button
+                                    component="a"
+                                    href={sql`course_task.external_url`}
+                                    target="_blank"
+                                    variant="outlined"
+                                    color="neutral"
+                                    size="sm"
+                                    startIcon="OpenInNew"
+                                  >
+                                    {employeeText(
+                                      sql`course_assignment.employee_language`,
+                                      { en: "Open link", es: "Abrir enlace" },
                                     )}
-                                >
-                                  <div className="grid gap-2">
-                                    <Typography
-                                      level="body-sm"
-                                      className="text-neutral-700"
-                                      startIcon="Draw"
-                                    >
-                                      {sql`course_task.signature_name`}
-                                    </Typography>
-                                    <Show
-                                      when={sql`course_task.signature_data is not null`}
-                                    >
-                                      <img
-                                        src={sql`course_task.signature_data`}
-                                        alt="Employee signature"
-                                        className="max-h-24 w-fit rounded border border-divider bg-white p-2"
-                                      />
-                                    </Show>
-                                  </div>
-                                </Show>
-                              </div>
-                            </Show>
+                                  </Button>
+                                </div>
+                              </Show>
+                              <Show
+                                when={sql`exists (
+                              select 1
+                              from course_task_item_documents doc
+                              where doc.training_employee_task_id = course_task.task_id
+                            )`}
+                              >
+                                <div className="mt-2 flex flex-col gap-2">
+                                  <Each
+                                    table="course_task_item_documents"
+                                    recordName="step_doc"
+                                    where={sql`step_doc.training_employee_task_id = course_task.task_id`}
+                                  >
+                                    {props.previewCourseId
+                                      ? (
+                                        <>
+                                          <Show
+                                            when={sql`step_doc.file_version_id is not null`}
+                                            fallback={
+                                              <>
+                                                <Typography level="title-sm">
+                                                  {sql`step_doc.title`}
+                                                </Typography>
+                                                <Alert color="warning">
+                                                  No published document is
+                                                  available in the selected or
+                                                  default language.
+                                                </Alert>
+                                              </>
+                                            }
+                                          >
+                                            <Show
+                                              when={sql`step_doc.language != ui.preview_language`}
+                                            >
+                                              <Typography level="body-sm">
+                                                {sql`'Using the published ' || upper(step_doc.language) || ' version.'`}
+                                              </Typography>
+                                            </Show>
+                                            {block.opts.content.previewDocument(
+                                              sql`step_doc.document_id`,
+                                              sql`step_doc.file_version_id`,
+                                              sql`step_doc.title`,
+                                              sql`step_doc.document_version_id`,
+                                            )}
+                                          </Show>
+                                        </>
+                                      )
+                                      : (
+                                        <CourseStepDocument
+                                          document={sql`step_doc`}
+                                          content={block.opts.content}
+                                          controlledRevisionId={sql`step_doc.document_version_id`}
+                                          nativePdfHref={trainingFileVersionUrl(
+                                            sql`step_doc.document_version_id`,
+                                            sql`course_task.task_id`,
+                                            props.accessToken,
+                                          )}
+                                          language={sql`course_assignment.employee_language`}
+                                          fileHref={trainingFileVersionUrl(
+                                            sql`step_doc.document_version_id`,
+                                            sql`course_task.task_id`,
+                                            props.accessToken,
+                                          )}
+                                          externalHref={trainingExternalVersionUrl(
+                                            sql`step_doc.document_version_id`,
+                                            sql`course_task.task_id`,
+                                            props.accessToken,
+                                          )}
+                                          imageSrcPrefixRewrite={trainingNativeImageSrcPrefixRewrite(
+                                            sql`step_doc.document_version_id`,
+                                            sql`course_task.task_id`,
+                                            props.accessToken,
+                                          )}
+                                        />
+                                      )}
+                                  </Each>
+                                </div>
+                              </Show>
+                              <Show when={sql`course_task.requires_essay`}>
+                                <FormControl className="mt-3">
+                                  <FormLabel>
+                                    {sql`course_task.essay_prompt`}
+                                  </FormLabel>
+                                  <Show
+                                    when={sql`${courseEditable}
+                                    and ${
+                                      props.validationMode
+                                        ? sql`false`
+                                        : sql`true`
+                                    }`}
+                                    fallback={
+                                      <Typography
+                                        level="body-sm"
+                                        className="text-neutral-700"
+                                      >
+                                        {sql`course_task.essay_response`}
+                                      </Typography>
+                                    }
+                                  >
+                                    <CourseResponseEditor
+                                      accessToken={props.accessToken}
+                                      preview={!!props.previewCourseId}
+                                      onEdit={pinCourseSection}
+                                    />
+                                  </Show>
+                                </FormControl>
+                              </Show>
+                              <Show
+                                when={sql`course_task.item_type = 'signature'`}
+                              >
+                                <div className="mt-3 rounded-md border border-divider bg-neutral-50 p-3">
+                                  <Show
+                                    when={sql`course_task.status = 'completed'`}
+                                    fallback={props.validationMode
+                                      ? (
+                                        <Typography
+                                          level="body-sm"
+                                          className="text-neutral-600"
+                                        >
+                                          {employeeText(
+                                            sql`course_assignment.employee_language`,
+                                            {
+                                              en: "Signature pending.",
+                                              es: "Firma pendiente.",
+                                            },
+                                          )}
+                                        </Typography>
+                                      )
+                                      : (
+                                        <div className="grid gap-3">
+                                          <Show
+                                            when={sql`course_task_signature_error is not null`}
+                                          >
+                                            <Alert
+                                              color="danger"
+                                              startIcon="Error"
+                                            >
+                                              {sql`course_task_signature_error`}
+                                            </Alert>
+                                          </Show>
+                                          <SignaturePad
+                                            label={employeeText(
+                                              sql`course_assignment.employee_language`,
+                                              {
+                                                en: "Draw your signature",
+                                                es: "Dibuje su firma",
+                                              },
+                                            )}
+                                            submitLabel={employeeText(
+                                              sql`course_assignment.employee_language`,
+                                              {
+                                                en: "Sign step",
+                                                es: "Firmar paso",
+                                              },
+                                            )}
+                                            onSigned={(s, signatureData) => {
+                                              pinCourseSection(s);
+                                              if (props.previewCourseId) {
+                                                s.modify(
+                                                  sql`update ui.course_tasks set signature_data = ${signatureData}, signature_name = 'Preview signature', status = 'completed' where id = course_task.id`,
+                                                );
+                                                s.modify(
+                                                  sql`update ui.course_assignment set done_tasks = (select count(*) from ui.course_tasks where status = 'completed')`,
+                                                );
+                                                return;
+                                              }
+                                              s.setScalar(
+                                                "course_task_signature_error",
+                                                sql`null`,
+                                              );
+                                              s.tryServer({
+                                                body: (s) => {
+                                                  s.startTransaction();
+                                                  saveCourseResponseDrafts(
+                                                    s,
+                                                    props.accessToken,
+                                                  );
+                                                  s.callStoredProcedure(
+                                                    "training_complete_task",
+                                                    {
+                                                      inputScalars: {
+                                                        p_task_id:
+                                                          sql`course_task.task_id`,
+                                                        p_access_token:
+                                                          props.accessToken ??
+                                                            sql`null`,
+                                                        p_signature_data:
+                                                          signatureData,
+                                                        p_completion_attestation:
+                                                          sql`null`,
+                                                        p_essay_response:
+                                                          sql`null`,
+                                                      },
+                                                    },
+                                                  );
+                                                  s.commitTransaction();
+                                                  s.setScalar(
+                                                    "course_task_signature_error",
+                                                    sql`null`,
+                                                  );
+                                                  s.refetch();
+                                                },
+                                                catch: (s) => {
+                                                  s.setScalar(
+                                                    "course_task_signature_error",
+                                                    employeeText(
+                                                      sql`course_assignment.employee_language`,
+                                                      {
+                                                        en:
+                                                          "The signature could not be saved.",
+                                                        es:
+                                                          "No se pudo guardar la firma.",
+                                                      },
+                                                    ),
+                                                  );
+                                                },
+                                              });
+                                            }}
+                                          />
+                                        </div>
+                                      )}
+                                  >
+                                    <div className="grid gap-2">
+                                      <Typography
+                                        level="body-sm"
+                                        className="text-neutral-700"
+                                        startIcon="Draw"
+                                      >
+                                        {sql`course_task.signature_name`}
+                                      </Typography>
+                                      <Show
+                                        when={sql`course_task.signature_data is not null`}
+                                      >
+                                        <img
+                                          src={sql`course_task.signature_data`}
+                                          alt="Employee signature"
+                                          className="max-h-24 w-fit rounded border border-divider bg-white p-2"
+                                        />
+                                      </Show>
+                                    </div>
+                                  </Show>
+                                </div>
+                              </Show>
+                            </div>
                           </div>
                         </div>
                       </div>
                     </Each>
-                  </div>
-                  <Show
-                    when={sql`course_assignment.done_tasks = course_assignment.total_tasks
-                      and course_assignment.requires_final_signature`}
-                  >
-                    <div className="mt-5 rounded-md border border-divider bg-neutral-50 p-4">
-                      <Typography level="title-md" startIcon="Draw">
-                        {validationEnabled
-                          ? sql`case
-                              when course_assignment.generates_certification
-                              then ${
-                            employeeText(
-                              sql`course_assignment.employee_language`,
-                              {
-                                en:
-                                  `Choose ${validationLabels.primaryStageDisplayName} and ${validationLabels.secondaryStageDisplayName} and sign`,
-                                es: "Elija validadores y firme",
-                              },
-                            )
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <Show
+                          when={sql`${previousSectionId} is not null`}
+                          fallback={
+                            <Show when={hasIntroduction}>
+                              <Button
+                                variant="outlined"
+                                color="neutral"
+                                startIcon="ArrowBack"
+                                onClick={(s) =>
+                                  openCourseView(s, "introduction")}
+                              >
+                                {employeeText(courseLanguage, {
+                                  en: "Introduction",
+                                  es: "Introducción",
+                                })}
+                              </Button>
+                            </Show>
                           }
-                              else ${
-                            employeeText(
-                              sql`course_assignment.employee_language`,
-                              {
-                                en:
-                                  `Choose ${validationLabels.primaryStageDisplayName} and sign`,
-                                es: "Elija validador y firme",
-                              },
-                            )
-                          }
-                            end`
-                          : employeeText(
-                            sql`course_assignment.employee_language`,
-                            {
-                              en: "Sign completed course",
-                              es: "Firme el curso completado",
-                            },
-                          )}
-                      </Typography>
-                      <Typography
-                        level="body-sm"
-                        className="text-neutral-600 mt-1"
+                        >
+                          <Button
+                            variant="outlined"
+                            color="neutral"
+                            startIcon="ArrowBack"
+                            onClick={(s) =>
+                              openCourseView(s, "steps", previousSectionId)}
+                          >
+                            {employeeText(courseLanguage, {
+                              en: "Previous section",
+                              es: "Sección anterior",
+                            })}
+                          </Button>
+                        </Show>
+                      </div>
+                      <Show
+                        when={sql`${nextSectionId} is not null`}
+                        fallback={
+                          <>
+                            <Button
+                              endIcon="ArrowForward"
+                              onClick={(s) => openCourseView(s, "signoff")}
+                            >
+                              {employeeText(courseLanguage, {
+                                en: "Review and submit",
+                                es: "Revisar y enviar",
+                              })}
+                            </Button>
+                          </>
+                        }
                       >
-                        {validationEnabled
-                          ? sql`case
+                        <Button
+                          endIcon="ArrowForward"
+                          onClick={(s) =>
+                            openCourseView(s, "steps", nextSectionId)}
+                        >
+                          {employeeText(courseLanguage, {
+                            en: "Next section",
+                            es: "Siguiente sección",
+                          })}
+                        </Button>
+                      </Show>
+                    </div>
+                  </div>
+                  <div
+                    dynamicClassNames={[{
+                      condition: sql`${courseView} != 'signoff'`,
+                      classNames: "invisible h-0 overflow-hidden",
+                    }]}
+                  >
+                    <Typography level="title-lg">
+                      {employeeText(courseLanguage, {
+                        en: "Review and submit",
+                        es: "Revisar y enviar",
+                      })}
+                    </Typography>
+                    <Typography className="mt-2 mb-4" level="body-sm">
+                      {employeeText(courseLanguage, {
+                        en:
+                          "Review your answers using the course outline. You can change them until you submit. Submission locks your answers.",
+                        es:
+                          "Revise sus respuestas usando el índice del curso. Puede cambiarlas hasta enviar el curso. Al enviarlo, las respuestas quedan bloqueadas.",
+                      })}
+                    </Typography>
+                    <Show
+                      when={sql`course_assignment.status in ('validation_pending', 'completed')`}
+                    >
+                      <Alert color="success" startIcon="CheckCircle">
+                        {sql`case when course_assignment.status = 'validation_pending' then ${
+                          employeeText(courseLanguage, {
+                            en: "Course submitted for verification.",
+                            es: "Curso enviado para verificación.",
+                          })
+                        } else ${
+                          employeeText(courseLanguage, {
+                            en: "Course completed.",
+                            es: "Curso completado.",
+                          })
+                        } end`}
+                      </Alert>
+                    </Show>
+                    <Show
+                      when={sql`not course_assignment.requires_final_signature and ${courseEditable}`}
+                    >
+                      <Show when={sql`signature_error is not null`}>
+                        <Alert color="danger" startIcon="Error">
+                          {sql`signature_error`}
+                        </Alert>
+                      </Show>
+                      <Button
+                        className="mt-3"
+                        disabled={sql`course_assignment.total_tasks = 0 or course_assignment.done_tasks != course_assignment.total_tasks`}
+                        onClick={(s) => submitCourse(s)}
+                      >
+                        {submissionLabel}
+                      </Button>
+                    </Show>
+                    <Show
+                      when={sql`course_assignment.done_tasks < course_assignment.total_tasks`}
+                    >
+                      <Alert color="neutral" startIcon="Lock">
+                        {sql`${
+                          employeeText(courseLanguage, {
+                            en:
+                              "Complete every step before submitting this course. Steps left: ",
+                            es:
+                              "Complete todos los pasos antes de enviar este curso. Pasos pendientes: ",
+                          })
+                        } || (course_assignment.total_tasks - course_assignment.done_tasks)::string`}
+                      </Alert>
+                    </Show>
+                    <Show
+                      when={sql`course_assignment.done_tasks = course_assignment.total_tasks
+                      and ${
+                        props.previewCourseId
+                          ? sql`course_assignment.total_tasks > 0`
+                          : sql`true`
+                      }
+                      and course_assignment.requires_final_signature`}
+                    >
+                      <div className="mt-5 rounded-md border border-divider bg-neutral-50 p-4">
+                        <Typography level="title-md" startIcon="Draw">
+                          {validationEnabled
+                            ? sql`case
                               when course_assignment.generates_certification
                               then ${
-                            secondaryByPermission
-                              ? employeeText(
+                              employeeText(
+                                sql`course_assignment.employee_language`,
+                                {
+                                  en:
+                                    `Choose ${validationLabels.primaryStageDisplayName} and ${validationLabels.secondaryStageDisplayName} and sign`,
+                                  es: "Elija validadores y firme",
+                                },
+                              )
+                            }
+                              else ${
+                              employeeText(
+                                sql`course_assignment.employee_language`,
+                                {
+                                  en:
+                                    `Choose ${validationLabels.primaryStageDisplayName} and sign`,
+                                  es: "Elija validador y firme",
+                                },
+                              )
+                            }
+                            end`
+                            : employeeText(
+                              sql`course_assignment.employee_language`,
+                              {
+                                en: "Sign completed course",
+                                es: "Firme el curso completado",
+                              },
+                            )}
+                        </Typography>
+                        <Typography
+                          level="body-sm"
+                          className="text-neutral-600 mt-1"
+                        >
+                          {validationEnabled
+                            ? sql`case
+                              when course_assignment.generates_certification
+                              then ${
+                              secondaryByPermission
+                                ? employeeText(
+                                  sql`course_assignment.employee_language`,
+                                  {
+                                    en:
+                                      `Choose the ${validationLabels.primaryStageDisplayName} who will validate this completed course.`,
+                                    es:
+                                      "Elija el validador que validará este curso completado.",
+                                  },
+                                )
+                                : employeeText(
+                                  sql`course_assignment.employee_language`,
+                                  {
+                                    en:
+                                      `Choose the ${validationLabels.primaryStageDisplayName} and ${validationLabels.secondaryStageDisplayName} who will validate this completed course.`,
+                                    es:
+                                      "Elija los validadores que validarán este curso completado.",
+                                  },
+                                )
+                            }
+                              else ${
+                              employeeText(
                                 sql`course_assignment.employee_language`,
                                 {
                                   en:
@@ -2455,59 +3282,88 @@ export function EmployeeTrainingCoursePage(
                                     "Elija el validador que validará este curso completado.",
                                 },
                               )
-                              : employeeText(
-                                sql`course_assignment.employee_language`,
-                                {
-                                  en:
-                                    `Choose the ${validationLabels.primaryStageDisplayName} and ${validationLabels.secondaryStageDisplayName} who will validate this completed course.`,
-                                  es:
-                                    "Elija los validadores que validarán este curso completado.",
-                                },
-                              )
-                          }
-                              else ${
-                            employeeText(
+                            }
+                            end`
+                            : employeeText(
                               sql`course_assignment.employee_language`,
                               {
                                 en:
-                                  `Choose the ${validationLabels.primaryStageDisplayName} who will validate this completed course.`,
+                                  "Sign to confirm you completed every required step.",
                                 es:
-                                  "Elija el validador que validará este curso completado.",
+                                  "Firme para confirmar que completó todos los pasos requeridos.",
                               },
-                            )
-                          }
-                            end`
-                          : employeeText(
-                            sql`course_assignment.employee_language`,
-                            {
-                              en:
-                                "Sign to confirm you completed every required step.",
-                              es:
-                                "Firme para confirmar que completó todos los pasos requeridos.",
-                            },
-                          )}
-                      </Typography>
-                      <Show when={sql`signature_error is not null`}>
-                        <Alert
-                          color="danger"
-                          startIcon="Error"
-                          className="mt-3"
-                        >
-                          {sql`signature_error`}
-                        </Alert>
-                      </Show>
-                      <div className="mt-3 grid gap-4">
-                        <Show
-                          when={sql`course_assignment.employee_final_signed_at is null`}
-                          fallback={
+                            )}
+                        </Typography>
+                        <Show when={sql`signature_error is not null`}>
+                          <Alert
+                            color="danger"
+                            startIcon="Error"
+                            className="mt-3"
+                          >
+                            {sql`signature_error`}
+                          </Alert>
+                        </Show>
+                        <div className="mt-3 grid gap-4">
+                          <Show
+                            when={sql`course_assignment.employee_final_signed_at is null`}
+                            fallback={
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {validationEnabled && (
+                                  <>
+                                    <div className="rounded-md border border-divider bg-white p-3">
+                                      <Typography
+                                        level="body-sm"
+                                        className="text-neutral-600"
+                                      >
+                                        {employeeText(
+                                          sql`course_assignment.employee_language`,
+                                          {
+                                            en: validationLabels
+                                              .primaryStageDisplayName,
+                                            es: validationLabels
+                                              .primaryStageDisplayName,
+                                          },
+                                        )}
+                                      </Typography>
+                                      <Typography level="title-sm">
+                                        {sql`coalesce(course_assignment.final_primary_validator_name, '')`}
+                                      </Typography>
+                                    </div>
+                                    <Show
+                                      when={sql`course_assignment.generates_certification`}
+                                    >
+                                      <div className="rounded-md border border-divider bg-white p-3">
+                                        <Typography
+                                          level="body-sm"
+                                          className="text-neutral-600"
+                                        >
+                                          {employeeText(
+                                            sql`course_assignment.employee_language`,
+                                            {
+                                              en: validationLabels
+                                                .secondaryStageDisplayName,
+                                              es: validationLabels
+                                                .secondaryStageDisplayName,
+                                            },
+                                          )}
+                                        </Typography>
+                                        <Typography level="title-sm">
+                                          {secondaryByPermission
+                                            ? sql`coalesce(course_assignment.final_secondary_validator_name, 'Any eligible signer')`
+                                            : sql`coalesce(course_assignment.final_secondary_validator_name, '')`}
+                                        </Typography>
+                                      </div>
+                                    </Show>
+                                  </>
+                                )}
+                              </div>
+                            }
+                          >
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                               {validationEnabled && (
                                 <>
-                                  <div className="rounded-md border border-divider bg-white p-3">
-                                    <Typography
-                                      level="body-sm"
-                                      className="text-neutral-600"
-                                    >
+                                  <FormControl>
+                                    <FormLabel>
                                       {employeeText(
                                         sql`course_assignment.employee_language`,
                                         {
@@ -2517,463 +3373,225 @@ export function EmployeeTrainingCoursePage(
                                             .primaryStageDisplayName,
                                         },
                                       )}
-                                    </Typography>
-                                    <Typography level="title-sm">
-                                      {sql`coalesce(course_assignment.final_primary_validator_name, '')`}
-                                    </Typography>
-                                  </div>
-                                  <Show
-                                    when={sql`course_assignment.generates_certification`}
-                                  >
-                                    <div className="rounded-md border border-divider bg-white p-3">
-                                      <Typography
-                                        level="body-sm"
-                                        className="text-neutral-600"
-                                      >
-                                        {employeeText(
-                                          sql`course_assignment.employee_language`,
-                                          {
-                                            en: validationLabels
-                                              .secondaryStageDisplayName,
-                                            es: validationLabels
-                                              .secondaryStageDisplayName,
-                                          },
+                                    </FormLabel>
+                                    <Select
+                                      aria-label={validationLabels
+                                        .primaryStageDisplayName}
+                                      value={sql`coalesce(final_primary_validator_id, course_assignment.final_primary_validator_id)::string`}
+                                      onInput={(s) =>
+                                        s.setScalar(
+                                          "final_primary_validator_id",
+                                          sql`nullif(target_value, '')::bigint`,
                                         )}
-                                      </Typography>
-                                      <Typography level="title-sm">
-                                        {secondaryByPermission
-                                          ? sql`coalesce(course_assignment.final_secondary_validator_name, 'Any eligible signer')`
-                                          : sql`coalesce(course_assignment.final_secondary_validator_name, '')`}
-                                      </Typography>
-                                    </div>
-                                  </Show>
-                                </>
-                              )}
-                            </div>
-                          }
-                        >
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {validationEnabled && (
-                              <>
-                                <FormControl>
-                                  <FormLabel>
-                                    {employeeText(
-                                      sql`course_assignment.employee_language`,
-                                      {
-                                        en: validationLabels
-                                          .primaryStageDisplayName,
-                                        es: validationLabels
-                                          .primaryStageDisplayName,
-                                      },
-                                    )}
-                                  </FormLabel>
-                                  <Select
-                                    value={sql`coalesce(final_primary_validator_id, course_assignment.final_primary_validator_id)::string`}
-                                    onInput={(s) =>
-                                      s.setScalar(
-                                        "final_primary_validator_id",
-                                        sql`nullif(target_value, '')::bigint`,
-                                      )}
-                                  >
-                                    <Select.Option value="">
-                                      {employeeText(
-                                        sql`course_assignment.employee_language`,
-                                        {
-                                          en:
-                                            `Select ${validationLabels.primaryStageDisplayName}`,
-                                          es: "Seleccione validador",
-                                        },
-                                      )}
-                                    </Select.Option>
-                                    <Each
-                                      table="primary_validator_options"
-                                      recordName="validator"
                                     >
-                                      <Select.Option
-                                        value={sql`validator.id::string`}
-                                      >
-                                        {sql`validator.name`}
-                                      </Select.Option>
-                                    </Each>
-                                  </Select>
-                                </FormControl>
-                                {!secondaryByPermission && (
-                                  <Show
-                                    when={sql`course_assignment.generates_certification`}
-                                  >
-                                    <FormControl>
-                                      <FormLabel>
+                                      <Select.Option value="">
                                         {employeeText(
                                           sql`course_assignment.employee_language`,
                                           {
-                                            en: validationLabels
-                                              .secondaryStageDisplayName,
-                                            es: validationLabels
-                                              .secondaryStageDisplayName,
+                                            en:
+                                              `Select ${validationLabels.primaryStageDisplayName}`,
+                                            es: "Seleccione validador",
                                           },
                                         )}
-                                      </FormLabel>
-                                      <Select
-                                        value={sql`coalesce(final_secondary_validator_id, course_assignment.final_secondary_validator_id)::string`}
-                                        onInput={(s) =>
-                                          s.setScalar(
-                                            "final_secondary_validator_id",
-                                            sql`nullif(target_value, '')::bigint`,
-                                          )}
+                                      </Select.Option>
+                                      <Each
+                                        table="primary_validator_options"
+                                        recordName="validator"
                                       >
-                                        <Select.Option value="">
+                                        <Select.Option
+                                          value={sql`validator.id::string`}
+                                        >
+                                          {sql`validator.name`}
+                                        </Select.Option>
+                                      </Each>
+                                    </Select>
+                                  </FormControl>
+                                  {!secondaryByPermission && (
+                                    <Show
+                                      when={sql`course_assignment.generates_certification`}
+                                    >
+                                      <FormControl>
+                                        <FormLabel>
                                           {employeeText(
                                             sql`course_assignment.employee_language`,
                                             {
-                                              en:
-                                                `Select ${validationLabels.secondaryStageDisplayName}`,
-                                              es: "Seleccione validador",
+                                              en: validationLabels
+                                                .secondaryStageDisplayName,
+                                              es: validationLabels
+                                                .secondaryStageDisplayName,
                                             },
                                           )}
-                                        </Select.Option>
-                                        <Each
-                                          table="secondary_validator_options"
-                                          recordName="validator"
+                                        </FormLabel>
+                                        <Select
+                                          aria-label={validationLabels
+                                            .secondaryStageDisplayName}
+                                          value={sql`coalesce(final_secondary_validator_id, course_assignment.final_secondary_validator_id)::string`}
+                                          onInput={(s) =>
+                                            s.setScalar(
+                                              "final_secondary_validator_id",
+                                              sql`nullif(target_value, '')::bigint`,
+                                            )}
                                         >
-                                          <Select.Option
-                                            value={sql`validator.id::string`}
-                                          >
-                                            {sql`validator.name`}
+                                          <Select.Option value="">
+                                            {employeeText(
+                                              sql`course_assignment.employee_language`,
+                                              {
+                                                en:
+                                                  `Select ${validationLabels.secondaryStageDisplayName}`,
+                                                es: "Seleccione validador",
+                                              },
+                                            )}
                                           </Select.Option>
-                                        </Each>
-                                      </Select>
-                                    </FormControl>
-                                  </Show>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </Show>
-                        <Show
-                          when={sql`course_assignment.employee_final_signed_at is null`}
-                          fallback={
-                            <div className="rounded-md border border-divider bg-white p-3">
-                              <div className="flex flex-wrap items-center gap-2 mb-2">
-                                <Chip size="sm" variant="soft" color="success">
-                                  {employeeText(
-                                    sql`course_assignment.employee_language`,
-                                    {
-                                      en: "Employee signed",
-                                      es: "Empleado firmó",
-                                    },
+                                          <Each
+                                            table="secondary_validator_options"
+                                            recordName="validator"
+                                          >
+                                            <Select.Option
+                                              value={sql`validator.id::string`}
+                                            >
+                                              {sql`validator.name`}
+                                            </Select.Option>
+                                          </Each>
+                                        </Select>
+                                      </FormControl>
+                                    </Show>
                                   )}
-                                </Chip>
+                                </>
+                              )}
+                            </div>
+                          </Show>
+                          <Show
+                            when={sql`course_assignment.employee_final_signed_at is null`}
+                            fallback={
+                              <div className="rounded-md border border-divider bg-white p-3">
+                                <div className="flex flex-wrap items-center gap-2 mb-2">
+                                  <Chip
+                                    size="sm"
+                                    variant="soft"
+                                    color="success"
+                                  >
+                                    {employeeText(
+                                      sql`course_assignment.employee_language`,
+                                      {
+                                        en: "Employee signed",
+                                        es: "Empleado firmó",
+                                      },
+                                    )}
+                                  </Chip>
+                                  <Typography
+                                    level="body-sm"
+                                    className="text-neutral-600"
+                                  >
+                                    {formatDateTimeSql(
+                                      sql`course_assignment.employee_final_signed_at`,
+                                    )}
+                                  </Typography>
+                                </div>
+                                <img
+                                  src={sql`course_assignment.employee_final_signature_data`}
+                                  alt="Employee final signature"
+                                  className="h-24 max-w-full object-contain"
+                                />
+                              </div>
+                            }
+                          >
+                            <SignaturePad
+                              label={employeeText(
+                                sql`course_assignment.employee_language`,
+                                {
+                                  en: "Employee final signature",
+                                  es: "Firma final del empleado",
+                                },
+                              )}
+                              submitLabel={submissionLabel}
+                              onSigned={submitCourse}
+                            />
+                          </Show>
+                        </div>
+                      </div>
+                    </Show>
+                    {!props.previewCourseId && (
+                      <Show
+                        when={validationEnabled && !props.previewCourseId
+                          ? sql`course_assignment.done_tasks = course_assignment.total_tasks
+                      and course_assignment.status in ('validation_pending', 'completed')
+                      and (course_assignment.final_primary_validator_id is not null or course_assignment.generates_certification)`
+                          : sql`false`}
+                      >
+                        <div className="mt-5 rounded-md border border-divider bg-neutral-50 p-4">
+                          <Typography level="title-md" startIcon="Rule">
+                            {validationLabels.validatorGenericLabel} validation
+                          </Typography>
+                          <Show when={sql`validation_error is not null`}>
+                            <Alert
+                              color="danger"
+                              startIcon="Error"
+                              className="mt-3"
+                            >
+                              {sql`validation_error`}
+                            </Alert>
+                          </Show>
+                          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <Show
+                              when={sql`course_assignment.final_primary_validator_id is not null`}
+                            >
+                              <ValidatorSignoffCard
+                                block={props.block}
+                                stage="primary"
+                              />
+                            </Show>
+                            <Show
+                              when={sql`course_assignment.generates_certification`}
+                            >
+                              <ValidatorSignoffCard
+                                block={props.block}
+                                stage="secondary"
+                              />
+                            </Show>
+                            <Each
+                              table="assignment_validations"
+                              recordName="assignment_validation"
+                            >
+                              <div className="p-3 rounded-md bg-white border border-divider">
                                 <Typography
                                   level="body-sm"
                                   className="text-neutral-600"
                                 >
-                                  {formatDateTimeSql(
-                                    sql`course_assignment.employee_final_signed_at`,
-                                  )}
+                                  {sql`assignment_validation.validation_stage_name`}
                                 </Typography>
-                              </div>
-                              <img
-                                src={sql`course_assignment.employee_final_signature_data`}
-                                alt="Employee final signature"
-                                className="h-24 max-w-full object-contain"
-                              />
-                            </div>
-                          }
-                        >
-                          <SignaturePad
-                            label={employeeText(
-                              sql`course_assignment.employee_language`,
-                              {
-                                en: "Employee final signature",
-                                es: "Firma final del empleado",
-                              },
-                            )}
-                            onSigned={(s, signatureData) => {
-                              s.setScalar("signature_error", sql`null`);
-                              s.tryServer({
-                                body: (s) => {
-                                  if (validationEnabled) {
-                                    s.if(
-                                      sql`coalesce(ui.final_primary_validator_id, course_assignment.final_primary_validator_id) is null`,
-                                      (s) => {
-                                        s.setScalar(
-                                          "ui.signature_error",
-                                          employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en:
-                                                `Choose the ${validationLabels.primaryStageDisplayName} before signing the course.`,
-                                              es:
-                                                "Elija el validador antes de firmar el curso.",
-                                            },
-                                          ),
-                                        );
-                                        s.return();
-                                      },
-                                    );
-                                    s.if(
-                                      sql`course_assignment.generates_certification
-                                        and ${
-                                        secondaryByPermission
-                                          ? sql`false`
-                                          : sql`true`
-                                      }
-                                        and coalesce(
-                                          ui.final_secondary_validator_id,
-                                          course_assignment.final_secondary_validator_id
-                                        ) is null`,
-                                      (s) => {
-                                        s.setScalar(
-                                          "ui.signature_error",
-                                          employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en:
-                                                `Choose the ${validationLabels.secondaryStageDisplayName} before signing the course.`,
-                                              es:
-                                                "Elija el validador antes de firmar el curso.",
-                                            },
-                                          ),
-                                        );
-                                        s.return();
-                                      },
-                                    );
-                                    s.if(
-                                      sql`not exists (
-                                        select 1
-                                        from primary_validator_options validator
-                                        where validator.id = coalesce(
-                                          ui.final_primary_validator_id,
-                                          course_assignment.final_primary_validator_id
-                                        )
-                                      )`,
-                                      (s) => {
-                                        s.setScalar(
-                                          "ui.signature_error",
-                                          employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en:
-                                                `Selected ${validationLabels.primaryStageDisplayName} is not eligible to sign.`,
-                                              es:
-                                                "El validador seleccionado no puede firmar.",
-                                            },
-                                          ),
-                                        );
-                                        s.return();
-                                      },
-                                    );
-                                    s.if(
-                                      sql`course_assignment.generates_certification
-                                        and ${
-                                        secondaryByPermission
-                                          ? sql`false`
-                                          : sql`true`
-                                      }
-                                        and not exists (
-                                        select 1
-                                        from secondary_validator_options validator
-                                        where validator.id = coalesce(
-                                          ui.final_secondary_validator_id,
-                                          course_assignment.final_secondary_validator_id
-                                        )
-                                      )`,
-                                      (s) => {
-                                        s.setScalar(
-                                          "ui.signature_error",
-                                          employeeText(
-                                            sql`course_assignment.employee_language`,
-                                            {
-                                              en:
-                                                `Selected ${validationLabels.secondaryStageDisplayName} is not eligible to sign.`,
-                                              es:
-                                                "El validador seleccionado no puede firmar.",
-                                            },
-                                          ),
-                                        );
-                                        s.return();
-                                      },
-                                    );
-                                  }
-                                  s.startTransaction();
-                                  s.throwErrorIf(
-                                    sql`nullif(trim(coalesce(${signatureData}, '')), '') is null`,
-                                    sql.lit`A final signature is required.`,
-                                  );
-                                  s.throwErrorIf(
-                                    sql`not exists (
-                                      select 1
-                                      from db.training_assignments assignment
-                                      join db.training_courses course
-                                        on course.id = assignment.training_course_id
-                                      where assignment.id = ui.training_assignment_id
-                                        and assignment.person_id = ui.person_id
-                                        and assignment.status = 'in_progress'
-                                        and assignment.employee_final_signed_at is null
-                                        and course.requires_final_signature
-                                        and not exists (
-                                          select 1
-                                          from db.training_employee_tasks open_task
-                                          where open_task.training_assignment_id = assignment.id
-                                            and open_task.status in ('assigned', 'in_progress')
-                                        )
-                                    )`,
-                                    sql
-                                      .lit`This assignment is not ready for a final signature.`,
-                                  );
-                                  s.modify(sql`
-                                    update db.training_assignments
-                                    set final_primary_validator_id = ${
-                                    validationEnabled
-                                      ? sql`coalesce(
-                                          ui.final_primary_validator_id,
-                                          course_assignment.final_primary_validator_id
-                                        )`
-                                      : sql`null`
-                                  },
-                                        final_secondary_validator_id = ${
-                                    validationEnabled
-                                      ? sql`case
-                                          when course_assignment.generates_certification
-                                            and ${
-                                        secondaryByPermission
-                                          ? sql`false`
-                                          : sql`true`
-                                      }
-                                          then coalesce(
-                                            ui.final_secondary_validator_id,
-                                            course_assignment.final_secondary_validator_id
-                                          )
-                                          else null
-                                        end`
-                                      : sql`null`
-                                  },
-                                        employee_final_signature_data =
-                                          ${signatureData},
-                                        employee_final_signed_at = now()
-                                    where id = ui.training_assignment_id
-                                      and person_id = ui.person_id
-                                      and status = 'in_progress'
-                                      and employee_final_signed_at is null
-                                  `);
-                                  s.modify(
-                                    updateAssignmentStatusAfterTaskCompletionSql(
-                                      {
-                                        opts: block.opts,
-                                        assignmentId:
-                                          sql`ui.training_assignment_id`,
-                                      },
-                                    ),
-                                  );
-                                  if (
-                                    trainingFeatureEnabled(
-                                      block.opts,
-                                      "inviteAccess",
+                                <Typography level="title-sm">
+                                  {sql`assignment_validation.validator_signature_name`}
+                                </Typography>
+                                <Typography
+                                  level="body-sm"
+                                  className="text-neutral-600"
+                                >
+                                  {sql`coalesce(assignment_validation.validator_name, 'Validator') || ' · ' || ${
+                                    formatDateTimeSql(
+                                      sql`assignment_validation.validated_at`,
                                     )
-                                  ) {
-                                    s.modify(
-                                      revokeTrainingAccessTokensForClosedAssignmentSql(
-                                        {
-                                          opts: block.opts,
-                                          assignmentId:
-                                            sql`ui.training_assignment_id`,
-                                        },
-                                      ),
-                                    );
-                                  }
-                                  s.commitTransaction();
-                                  createCertificationForCompletedAssignment(
-                                    s,
-                                    {
-                                      opts: block.opts,
-                                      assignmentId:
-                                        sql`ui.training_assignment_id`,
-                                    },
-                                  );
-                                  s.refetch();
-                                },
-                              });
-                            }}
-                          />
-                        </Show>
-                      </div>
-                    </div>
-                  </Show>
-                  <Show
-                    when={validationEnabled
-                      ? sql`course_assignment.done_tasks = course_assignment.total_tasks
-                      and course_assignment.employee_final_signed_at is not null
-                      and course_assignment.final_primary_validator_id is not null`
-                      : sql`false`}
-                  >
-                    <div className="mt-5 rounded-md border border-divider bg-neutral-50 p-4">
-                      <Typography level="title-md" startIcon="Rule">
-                        {validationLabels.validatorGenericLabel} validation
-                      </Typography>
-                      <Show when={sql`validation_error is not null`}>
-                        <Alert
-                          color="danger"
-                          startIcon="Error"
-                          className="mt-3"
-                        >
-                          {sql`validation_error`}
-                        </Alert>
-                      </Show>
-                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <ValidatorSignoffCard
-                          block={props.block}
-                          stage="primary"
-                        />
-                        <Show
-                          when={sql`course_assignment.generates_certification`}
-                        >
-                          <ValidatorSignoffCard
-                            block={props.block}
-                            stage="secondary"
-                          />
-                        </Show>
-                        <Each
-                          table="assignment_validations"
-                          recordName="assignment_validation"
-                        >
-                          <div className="p-3 rounded-md bg-white border border-divider">
-                            <Typography
-                              level="body-sm"
-                              className="text-neutral-600"
-                            >
-                              {sql`assignment_validation.validation_stage_name`}
-                            </Typography>
-                            <Typography level="title-sm">
-                              {sql`assignment_validation.validator_signature_name`}
-                            </Typography>
-                            <Typography
-                              level="body-sm"
-                              className="text-neutral-600"
-                            >
-                              {sql`coalesce(assignment_validation.validator_name, 'Validator') || ' · ' || ${
-                                formatDateTimeSql(
-                                  sql`assignment_validation.validated_at`,
-                                )
-                              }`}
-                            </Typography>
-                            <Show
-                              when={sql`assignment_validation.validator_signature_data is not null`}
-                            >
-                              <div className="mt-2 rounded-md border border-divider bg-white p-2">
-                                <img
-                                  src={sql`assignment_validation.validator_signature_data`}
-                                  alt="Manager validation signature"
-                                  className="h-24 max-w-full object-contain"
-                                />
+                                  }`}
+                                </Typography>
+                                <Show
+                                  when={sql`assignment_validation.validator_signature_data is not null`}
+                                >
+                                  <div className="mt-2 rounded-md border border-divider bg-white p-2">
+                                    <img
+                                      src={sql`assignment_validation.validator_signature_data`}
+                                      alt="Manager validation signature"
+                                      className="h-24 max-w-full object-contain"
+                                    />
+                                  </div>
+                                </Show>
                               </div>
-                            </Show>
+                            </Each>
                           </div>
-                        </Each>
-                      </div>
-                    </div>
-                  </Show>
-                </CardContent>
-              </Card>
+                        </div>
+                      </Show>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </PageShell>
         </Show>
@@ -3107,8 +3725,7 @@ function EmployeeAssessmentTaskPage(
                        assessment.id as assessment_id,
                        assessment.name as assessment_name,
                        assessment.execution_mode,
-                       ${personLanguageSql(block.opts, sql`person`)}
-                         as employee_language,
+                       a.training_language as employee_language,
                        (select task_state.derived_state
                         from db.training_task_derived_state task_state
                         where task_state.task_id = t.id)
@@ -3143,7 +3760,7 @@ function EmployeeAssessmentTaskPage(
             "display_attempt",
             sql`select att.id, att.status, att.outcome, att.attempt_number,
                        att.score_points, att.max_points, att.score_percent,
-                       v.version_label, v.show_correct_answers_after_submission,
+                       v.version_label, v.localized_name, v.show_correct_answers_after_submission,
                        v.show_failed_attempts_to_employee
                 from db.training_assessment_attempts att
                 join db.training_assessment_versions v
@@ -3253,16 +3870,16 @@ function EmployeeAssessmentTaskPage(
             }}
           />
           <PageShell
-            title={sql`assessment_task.assessment_name`}
+            title={sql`coalesce(display_attempt.localized_name, assessment_task.assessment_name)`}
             subtitle={sql`coalesce(${
               relativeDueSql(
                 sql`assessment_task.employee_language`,
                 sql`assessment_task.due_date`,
               )
             }, '')`}
-          >
-            <div className="max-w-4xl mx-auto">
-              <div className="mb-3">
+            narrow
+            back={
+              <div>
                 <Button
                   component="a"
                   href={employeeCourseHref(
@@ -3281,6 +3898,9 @@ function EmployeeAssessmentTaskPage(
                   })}
                 </Button>
               </div>
+            }
+          >
+            <div>
               <Show when={sql`assessment_error is not null`}>
                 <Alert color="danger" startIcon="Error" className="mb-4">
                   {sql`assessment_error`}
@@ -3290,7 +3910,7 @@ function EmployeeAssessmentTaskPage(
                 <CardHeader>
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 w-full">
                     <div>
-                      <Typography level="title-lg" startIcon="Quiz">
+                      <Typography level="title-lg" startIcon="Grading">
                         {sql`assessment_task.step_content`}
                       </Typography>
                       <Typography level="body-sm" className="text-neutral-600">
@@ -3499,453 +4119,6 @@ function EmployeeAssessmentTaskPage(
   );
 }
 
-function EmployeeAssessmentResponses(
-  props: { block: TrainingBlock; accessToken?: Sql },
-) {
-  const saveResponse = (
-    s: UiServerStatements,
-    field: "textResponse" | "signatureName" | "signatureData",
-    value: Sql,
-  ) =>
-    callSaveAssessmentResponse(s, {
-      attemptId: sql`display_attempt.id`,
-      itemId: sql`assessment_response.item_id`,
-      field,
-      value,
-      accessToken: props.accessToken,
-    });
-  return (
-    <div className="flex flex-col gap-3">
-      <Each table="assessment_responses" recordName="assessment_response">
-        <div className="border border-divider rounded-md p-4 bg-white">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <Typography level="body-sm" className="text-neutral-500">
-                {sql`assessment_response.section_name`}
-              </Typography>
-              <Typography level="title-sm">
-                {sql`assessment_response.prompt ||
-                  case when assessment_response.is_required
-                    then '' else ' (optional)' end`}
-              </Typography>
-              <Show when={sql`assessment_response.help_text is not null`}>
-                <Typography level="body-sm" className="text-neutral-600">
-                  {sql`assessment_response.help_text`}
-                </Typography>
-              </Show>
-            </div>
-            <Show
-              when={sql`display_attempt.status = 'complete'
-                and assessment_response.include_in_score`}
-            >
-              <Chip size="sm" variant="soft" color="neutral">
-                {sql`coalesce(assessment_response.points_awarded::string, '0')
-                  || ' / ' ||
-                  assessment_response.response_max_points::string || ' pts'`}
-              </Chip>
-            </Show>
-          </div>
-          <div className="mt-3">
-            <Show when={sql`assessment_response.type = 'multiple_choice'`}>
-              <div className="flex flex-col gap-1">
-                <Each
-                  table="assessment_choices"
-                  recordName="assessment_choice"
-                  where={sql`assessment_choice.item_id =
-                    assessment_response.item_id`}
-                >
-                  <Show
-                    when={sql`display_attempt.status = 'in_progress'
-                      and assessment_task.execution_mode !=
-                        'trainer_recorded'`}
-                    fallback={
-                      <div className="flex flex-col gap-1">
-                        <Typography level="body-sm">
-                          {sql`case when assessment_choice.selected
-                            then '☑ ' else '☐ ' end ||
-                            assessment_choice.content`}
-                        </Typography>
-                        <Show
-                          when={sql`display_attempt.status = 'complete'
-                            and display_attempt.show_correct_answers_after_submission`}
-                        >
-                          <Typography
-                            level="body-xs"
-                            className="text-neutral-500"
-                          >
-                            {sql`case
-                              when assessment_choice.is_correct
-                              then 'Correct answer'
-                              else 'Incorrect choice'
-                            end || coalesce(
-                              ' · ' || assessment_choice.explanation,
-                              ''
-                            )`}
-                          </Typography>
-                        </Show>
-                      </div>
-                    }
-                  >
-                    <Checkbox
-                      checked={sql`assessment_choice.selected`}
-                      label={sql`assessment_choice.content`}
-                      onCheckboxChange={(s) => {
-                        s.setScalar("ui.assessment_error", sql`null`);
-                        s.tryServer({
-                          body: (s) => {
-                            s.startTransaction();
-                            s.if(
-                              sql`assessment_response.selection_mode =
-                                'single'`,
-                              (s) => {
-                                for (
-                                  const statement
-                                    of selectAssessmentSingleChoiceSql({
-                                      attemptId: sql`display_attempt.id`,
-                                      itemId: sql`assessment_response.item_id`,
-                                      choiceId: sql`assessment_choice.id`,
-                                    })
-                                ) {
-                                  s.modify(statement);
-                                }
-                              },
-                              (s) => {
-                                s.if(
-                                  sql`target_checked`,
-                                  (s) => {
-                                    s.modify(
-                                      insertAssessmentChoiceSelectionSql({
-                                        attemptId: sql`display_attempt.id`,
-                                        itemId:
-                                          sql`assessment_response.item_id`,
-                                        choiceId: sql`assessment_choice.id`,
-                                      }),
-                                    );
-                                  },
-                                  (s) => {
-                                    s.modify(
-                                      deleteAssessmentChoiceSelectionSql({
-                                        attemptId: sql`display_attempt.id`,
-                                        itemId:
-                                          sql`assessment_response.item_id`,
-                                        choiceId: sql`assessment_choice.id`,
-                                      }),
-                                    );
-                                  },
-                                );
-                              },
-                            );
-                            s.commitTransaction();
-                            s.refetch();
-                          },
-                          catch: (s) => {
-                            s.setScalar(
-                              "ui.assessment_error",
-                              employeeText(
-                                sql`assessment_task.employee_language`,
-                                {
-                                  en: "The answer could not be saved.",
-                                  es: "No se pudo guardar la respuesta.",
-                                },
-                              ),
-                            );
-                          },
-                        });
-                      }}
-                    />
-                  </Show>
-                </Each>
-                <Show
-                  when={sql`display_attempt.status = 'complete'
-                    and display_attempt.show_correct_answers_after_submission
-                    and nullif(trim(assessment_response.explanation), '')
-                      is not null`}
-                >
-                  <Alert color="neutral" startIcon="Info" className="mt-3">
-                    <Typography level="body-xs" className="font-medium">
-                      {employeeText(
-                        sql`assessment_task.employee_language`,
-                        { en: "Explanation", es: "Explicación" },
-                      )}
-                    </Typography>
-                    <Typography level="body-sm" className="whitespace-pre-wrap">
-                      {sql`assessment_response.explanation`}
-                    </Typography>
-                  </Alert>
-                </Show>
-                <Show
-                  when={sql`display_attempt.status = 'complete'
-                    and display_attempt.show_correct_answers_after_submission
-                    and assessment_response.is_correct = false
-                    and nullif(trim(assessment_response.remediation_text), '')
-                      is not null`}
-                >
-                  <Alert color="warning" startIcon="School" className="mt-3">
-                    <Typography level="body-xs" className="font-medium">
-                      {employeeText(
-                        sql`assessment_task.employee_language`,
-                        { en: "Review", es: "Repaso" },
-                      )}
-                    </Typography>
-                    <Typography level="body-sm" className="whitespace-pre-wrap">
-                      {sql`assessment_response.remediation_text`}
-                    </Typography>
-                  </Alert>
-                </Show>
-              </div>
-            </Show>
-            <Show when={sql`assessment_response.type = 'text_response'`}>
-              <Show
-                when={sql`display_attempt.status = 'in_progress'
-                  and assessment_task.execution_mode != 'trainer_recorded'`}
-                fallback={
-                  <Typography level="body-sm" className="whitespace-pre-wrap">
-                    {sql`coalesce(assessment_response.text_response,
-                      'No response.')`}
-                  </Typography>
-                }
-              >
-                <Textarea
-                  value={sql`coalesce(assessment_response.text_response, '')`}
-                  minRows={4}
-                  onInput={(s) => {
-                    s.tryServer({
-                      body: (s) => {
-                        saveResponse(s, "textResponse", sql`target_value`);
-                      },
-                    });
-                  }}
-                />
-              </Show>
-            </Show>
-            <Show when={sql`assessment_response.type = 'signature'`}>
-              <Show
-                when={sql`display_attempt.status = 'in_progress'
-                  and assessment_task.execution_mode != 'trainer_recorded'`}
-                fallback={
-                  <div>
-                    <Typography level="body-sm">
-                      {sql`coalesce('Signed: ' ||
-                        assessment_response.signature_name, 'Not signed.')`}
-                    </Typography>
-                    <Show
-                      when={sql`assessment_response.signature_data is not null`}
-                    >
-                      <img
-                        src={sql`assessment_response.signature_data`}
-                        alt="Signature"
-                        className="mt-2 max-h-24 border border-divider rounded-md bg-white"
-                      />
-                    </Show>
-                  </div>
-                }
-              >
-                <SignaturePad
-                  label={employeeText(sql`assessment_task.employee_language`, {
-                    en: "Draw your signature",
-                    es: "Dibuje su firma",
-                  })}
-                  onSigned={(s, signatureData) => {
-                    s.tryServer({
-                      body: (s) => {
-                        saveResponse(
-                          s,
-                          "signatureName",
-                          sql`(
-                            select ${
-                            employeeName(
-                              props.block.opts,
-                              sql`signature_person`,
-                            )
-                          }
-                            from db.${
-                            sql.ref(personTable(props.block.opts))
-                          } signature_person
-                            where signature_person.id =
-                              assessment_task.person_id
-                          )`,
-                        );
-                        saveResponse(s, "signatureData", signatureData);
-                        s.refetch();
-                      },
-                    });
-                  }}
-                />
-              </Show>
-            </Show>
-            <Show
-              when={sql`assessment_response.type =
-                'practical_observation'`}
-            >
-              <Alert color="warning" startIcon="FactCheck">
-                {employeeText(sql`assessment_task.employee_language`, {
-                  en: "A trainer records this practical observation.",
-                  es: "Un instructor registra esta observación práctica.",
-                })}
-              </Alert>
-            </Show>
-          </div>
-        </div>
-      </Each>
-    </div>
-  );
-}
-
-function EmployeeAssessmentMetadataResponses(
-  props: { accessToken?: Sql },
-) {
-  const editable = sql`display_attempt.status = 'in_progress'
-    and assessment_task.execution_mode != 'trainer_recorded'`;
-  const saveMetadata = (
-    s: UiServerStatements,
-    field:
-      | "textValue"
-      | "numberValue"
-      | "dateValue"
-      | "selectedChoiceId",
-    value: Sql,
-  ) =>
-    callSaveAssessmentMetadataResponse(s, {
-      attemptId: sql`display_attempt.id`,
-      fieldId: sql`metadata_response.field_id`,
-      field,
-      value,
-      accessToken: props.accessToken,
-    });
-  return (
-    <Show when={sql`exists (select 1 from assessment_metadata_responses)`}>
-      <div className="border border-divider rounded-md p-4 bg-neutral-50 mb-4">
-        <Typography level="title-sm" className="mb-3">
-          Assessment details
-        </Typography>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <Each
-            table="assessment_metadata_responses"
-            recordName="metadata_response"
-          >
-            <FormControl>
-              <FormLabel>
-                {sql`metadata_response.label ||
-                  case when metadata_response.required
-                    then '' else ' (optional)' end`}
-              </FormLabel>
-              <Show when={sql`metadata_response.help_text is not null`}>
-                <Typography level="body-xs" className="text-neutral-600 mb-1">
-                  {sql`metadata_response.help_text`}
-                </Typography>
-              </Show>
-              <Show
-                when={editable}
-                fallback={
-                  <Typography level="body-sm">
-                    {sql`case metadata_response.type::string
-                      when 'text' then coalesce(
-                        metadata_response.text_value, 'Not recorded')
-                      when 'number' then coalesce(
-                        metadata_response.number_value::string,
-                        'Not recorded')
-                      when 'date' then coalesce(
-                        ${formatDateSql(sql`metadata_response.date_value`)},
-                        'Not recorded')
-                      else coalesce((
-                        select choice.label
-                        from assessment_metadata_choices choice
-                        where choice.id =
-                          metadata_response.selected_choice_id
-                      ), 'Not recorded')
-                    end`}
-                  </Typography>
-                }
-              >
-                <Show when={sql`metadata_response.type = 'text'`}>
-                  <Input
-                    value={sql`coalesce(metadata_response.text_value, '')`}
-                    onInput={(s) => {
-                      s.tryServer({
-                        body: (s) => {
-                          saveMetadata(s, "textValue", sql`target_value`);
-                        },
-                      });
-                    }}
-                  />
-                </Show>
-                <Show when={sql`metadata_response.type = 'number'`}>
-                  <Input
-                    type="number"
-                    value={sql`coalesce(metadata_response.number_value::string, '')`}
-                    onInput={(s) => {
-                      s.tryServer({
-                        body: (s) => {
-                          saveMetadata(
-                            s,
-                            "numberValue",
-                            sql`try_cast(target_value as double)`,
-                          );
-                        },
-                      });
-                    }}
-                  />
-                </Show>
-                <Show when={sql`metadata_response.type = 'date'`}>
-                  <Input
-                    type="date"
-                    value={sql`coalesce(metadata_response.date_value::string, '')`}
-                    onInput={(s) => {
-                      s.tryServer({
-                        body: (s) => {
-                          saveMetadata(
-                            s,
-                            "dateValue",
-                            sql`try_cast(target_value as date)`,
-                          );
-                        },
-                      });
-                    }}
-                  />
-                </Show>
-                <Show when={sql`metadata_response.type = 'single_choice'`}>
-                  <Select
-                    className="w-full"
-                    value={sql`coalesce(
-                      metadata_response.selected_choice_id::string, '')`}
-                    onInput={(s) => {
-                      s.tryServer({
-                        body: (s) => {
-                          saveMetadata(
-                            s,
-                            "selectedChoiceId",
-                            sql`case
-                              when nullif(target_value, '') is null then null
-                              else target_value::bigint
-                            end`,
-                          );
-                          s.refetch();
-                        },
-                      });
-                    }}
-                  >
-                    <Select.Option value="">Not recorded</Select.Option>
-                    <Each
-                      table="assessment_metadata_choices"
-                      recordName="metadata_choice"
-                      where={sql`metadata_choice.field_id =
-                        metadata_response.field_id`}
-                    >
-                      <Select.Option value={sql`metadata_choice.id::string`}>
-                        {sql`metadata_choice.label`}
-                      </Select.Option>
-                    </Each>
-                  </Select>
-                </Show>
-              </Show>
-            </FormControl>
-          </Each>
-        </div>
-      </div>
-    </Show>
-  );
-}
-
 function EmployeeTrainingTaskPage(
   props: { block: TrainingBlock; accessToken?: Sql },
 ) {
@@ -3996,7 +4169,7 @@ function EmployeeTrainingTaskPage(
                     coalesce(v.version_label, 'Current course version') as version_label,
                     coalesce(lang.code, assignment_lang.code) as language,
                     coalesce(v.file_name, v.external_url, i.external_url) as file_name,
-                    v.content_mode,
+                    v.content_mode, v.content_type,
                     v.blob_hash,
                     v.rich_content,
                     i.type as course_item_type,
@@ -4041,16 +4214,15 @@ function EmployeeTrainingTaskPage(
                 : sql``
             }`,
           );
-          // Library documents attached to the course step this task came
-          // from, pinned to the version snapshotted on the task.
+          // Use the same displayed revisions as the course and content API.
           s.defTable(
             "task_item_documents",
             sql`select task_doc.id,
                     coalesce(item_doc.label, d.title) as title,
                     v.id as document_version_id,
-                    v.file_name, v.content_mode, v.blob_hash,
+                    v.file_name, v.content_type, v.content_mode, v.blob_hash,
                     v.rich_content, v.external_url
-                from db.training_task_item_documents task_doc
+                from db.training_task_item_document_versions task_doc
                 join db.training_course_section_item_documents item_doc
                   on item_doc.id =
                     task_doc.training_course_section_item_document_id
@@ -4088,7 +4260,7 @@ function EmployeeTrainingTaskPage(
                       from db.training_assignments task_assignment
                       where task_assignment.id = training_assignment_id
                         and task_assignment.person_id = ui.person_id
-                        and task_assignment.status != 'completed'
+                        and task_assignment.status in ('pending', 'in_progress')
                         and task_assignment.employee_final_signed_at is null
                     )
                     and status in ('assigned', 'in_progress')
@@ -4101,15 +4273,23 @@ function EmployeeTrainingTaskPage(
           />
           <PageShell
             title={sql`task.title`}
-            subtitle={sql`coalesce(${
+            subtitle={sql`case
+              when task.status = 'completed' then ${
+              employeeText(sql`task.employee_language`, {
+                en: "Completed",
+                es: "Completada",
+              })
+            } || coalesce(' ' || ${formatDateSql(sql`task.completed_at`)}, '')
+              else coalesce(${
               relativeDueSql(sql`task.employee_language`, sql`task.due_date`)
-            }, '')`}
-          >
-            <div className="max-w-4xl mx-auto">
+            }, '')
+            end`}
+            narrow
+            back={
               <Show
                 when={sql`not (training_return_source = 'dashboard' and task.status = 'completed')`}
               >
-                <div className="mb-3">
+                <div>
                   <Button
                     component="a"
                     href={sql`case when task.is_course_task and training_return_source != 'dashboard' then ${
@@ -4140,6 +4320,9 @@ function EmployeeTrainingTaskPage(
                   </Button>
                 </div>
               </Show>
+            }
+          >
+            <div>
               <Card variant="outlined">
                 <CardHeader>
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 w-full">
@@ -4217,71 +4400,114 @@ function EmployeeTrainingTaskPage(
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <div className="mb-4 p-3 rounded-md bg-neutral-50 border border-divider flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div>
-                      <Typography level="body-sm" className="text-neutral-700">
-                        {employeeText(sql`task.employee_language`, {
-                          en:
-                            "Review the assigned materials, answer any required prompt, then draw your signature for the active revision.",
-                          es:
-                            "Revise los materiales asignados, responda cualquier pregunta requerida y dibuje su firma para la revisión activa.",
-                        })}
-                      </Typography>
-                      <Typography level="body-sm" className="text-neutral-600">
-                        {sql`task.file_name`}
-                      </Typography>
-                    </div>
-                    <Show when={sql`task.external_url is not null`}>
-                      <Button
-                        component="a"
-                        href={sql`case
+                  <Show
+                    when={sql`not ${isVideoSource(sql`task.content_type`)}`}
+                  >
+                    <div className="mb-4 p-3 rounded-md bg-neutral-50 border border-divider flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <MaterialIcon
+                          icon="Description"
+                          className="shrink-0 text-neutral-500"
+                        />
+                        <div className="min-w-0">
+                          <Typography
+                            level="body-xs"
+                            className="text-neutral-600"
+                          >
+                            {employeeText(sql`task.employee_language`, {
+                              en: "Assigned document",
+                              es: "Documento asignado",
+                            })}
+                          </Typography>
+                          <Typography level="title-sm" className="break-words">
+                            {sql`coalesce(task.file_name, task.title)`}
+                          </Typography>
+                        </div>
+                      </div>
+                      <Show
+                        when={sql`task.external_url is not null and task.content_type is distinct from ${
+                          sql.lit(videoLinkContentType)
+                        }`}
+                      >
+                        <Button
+                          component="a"
+                          href={sql`case
                           when task.document_version_id is not null then ${
-                          trainingExternalVersionUrl(
+                            trainingExternalVersionUrl(
+                              sql`task.document_version_id`,
+                              sql`task.id`,
+                              props.accessToken,
+                            )
+                          }
+                          else task.external_url
+                        end`}
+                          target="_blank"
+                          variant="outlined"
+                          color="neutral"
+                          size="sm"
+                          startIcon="OpenInNew"
+                          className="self-start shrink-0 whitespace-nowrap sm:self-center"
+                        >
+                          {employeeText(sql`task.employee_language`, {
+                            en: "Open assigned link",
+                            es: "Abrir enlace asignado",
+                          })}
+                        </Button>
+                      </Show>
+                      <Show
+                        when={sql`task.document_version_id is not null
+                      and task.blob_hash is not null`}
+                      >
+                        <Button
+                          component="a"
+                          href={trainingFileVersionUrl(
                             sql`task.document_version_id`,
                             sql`task.id`,
                             props.accessToken,
-                          )
-                        }
-                          else task.external_url
-                        end`}
-                        target="_blank"
-                        variant="outlined"
-                        color="neutral"
-                        size="sm"
-                        startIcon="OpenInNew"
-                        className="self-start sm:self-center"
-                      >
-                        {employeeText(sql`task.employee_language`, {
-                          en: "Open assigned link",
-                          es: "Abrir enlace asignado",
-                        })}
-                      </Button>
-                    </Show>
-                    <Show
-                      when={sql`task.document_version_id is not null
-                      and task.blob_hash is not null`}
-                    >
-                      <Button
-                        component="a"
-                        href={trainingFileVersionUrl(
+                          )}
+                          target="_blank"
+                          variant="outlined"
+                          color="neutral"
+                          size="sm"
+                          startIcon="OpenInNew"
+                          className="self-start shrink-0 whitespace-nowrap sm:self-center"
+                        >
+                          {employeeText(sql`task.employee_language`, {
+                            en: "Open primary document",
+                            es: "Abrir documento principal",
+                          })}
+                        </Button>
+                      </Show>
+                    </div>
+                  </Show>
+                  <Show
+                    when={sql`${
+                      isPlayableVideoMime(sql`task.content_type`)
+                    } and task.blob_hash is not null
+                      or (task.content_type = ${
+                      sql.lit(videoLinkContentType)
+                    } and task.external_url is not null)`}
+                  >
+                    <div className="mb-4 space-y-3">
+                      <CourseStepDocument
+                        document={sql`task`}
+                        content={block.opts.content}
+                        controlledRevisionId={sql`task.document_version_id`}
+                        nativePdfHref={trainingFileVersionUrl(
                           sql`task.document_version_id`,
                           sql`task.id`,
                           props.accessToken,
                         )}
-                        target="_blank"
-                        variant="outlined"
-                        color="neutral"
-                        size="sm"
-                        startIcon="OpenInNew"
-                        className="self-start sm:self-center"
-                      >
-                        {employeeText(sql`task.employee_language`, {
-                          en: "Open primary document",
-                          es: "Abrir documento principal",
-                        })}
-                      </Button>
-                    </Show>
-                  </div>
+                        language={sql`task.employee_language`}
+                        fileHref={trainingFileVersionUrl(
+                          sql`task.document_version_id`,
+                          sql`task.id`,
+                          props.accessToken,
+                        )}
+                        externalHref={sql`null`}
+                      />
+                    </div>
+                  </Show>
                   <Show
                     when={sql`task.document_version_id is not null
                     and task.blob_hash is not null
@@ -4301,16 +4527,21 @@ function EmployeeTrainingTaskPage(
                     </div>
                   </Show>
                   <Show when={sql`task.rich_content is not null`}>
-                    <div className="mb-4 rounded-md border border-divider bg-white p-4">
-                      <LexicalRichTextDisplay
-                        value={sql`task.rich_content`}
-                        imageSrcPrefixRewrite={trainingNativeImageSrcPrefixRewrite(
+                    {block.opts.content.renderNativeDocument({
+                      versionId: sql`task.document_version_id`,
+                      value: sql`task.rich_content`,
+                      pdfHref: trainingFileVersionUrl(
+                        sql`task.document_version_id`,
+                        sql`task.id`,
+                        props.accessToken,
+                      ),
+                      imageSrcPrefixRewrite:
+                        trainingNativeImageSrcPrefixRewrite(
                           sql`task.document_version_id`,
                           sql`task.id`,
                           props.accessToken,
-                        )}
-                      />
-                    </div>
+                        ),
+                    })}
                   </Show>
                   <Show
                     when={sql`exists (select 1 from task_item_documents)`}
@@ -4327,71 +4558,32 @@ function EmployeeTrainingTaskPage(
                           table="task_item_documents"
                           recordName="linked_doc"
                         >
-                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-md border border-divider bg-neutral-50 px-3 py-2">
-                            <Typography level="title-sm" className="min-w-0">
-                              {sql`linked_doc.title`}
-                            </Typography>
-                            <div className="flex gap-2">
-                              <Show
-                                when={sql`linked_doc.external_url is not null`}
-                              >
-                                <Button
-                                  component="a"
-                                  href={trainingExternalVersionUrl(
-                                    sql`linked_doc.document_version_id`,
-                                    sql`task.id`,
-                                    props.accessToken,
-                                  )}
-                                  target="_blank"
-                                  variant="outlined"
-                                  color="neutral"
-                                  size="sm"
-                                  startIcon="OpenInNew"
-                                >
-                                  {employeeText(
-                                    sql`task.employee_language`,
-                                    { en: "Open", es: "Abrir" },
-                                  )}
-                                </Button>
-                              </Show>
-                              <Show
-                                when={sql`linked_doc.blob_hash is not null`}
-                              >
-                                <Button
-                                  component="a"
-                                  href={trainingFileVersionUrl(
-                                    sql`linked_doc.document_version_id`,
-                                    sql`task.id`,
-                                    props.accessToken,
-                                  )}
-                                  target="_blank"
-                                  variant="outlined"
-                                  color="neutral"
-                                  size="sm"
-                                  startIcon="OpenInNew"
-                                >
-                                  {employeeText(
-                                    sql`task.employee_language`,
-                                    { en: "Open", es: "Abrir" },
-                                  )}
-                                </Button>
-                              </Show>
-                            </div>
-                          </div>
-                          <Show
-                            when={sql`linked_doc.rich_content is not null`}
-                          >
-                            <div className="rounded-md border border-divider bg-white p-3">
-                              <LexicalRichTextDisplay
-                                value={sql`linked_doc.rich_content`}
-                                imageSrcPrefixRewrite={trainingNativeImageSrcPrefixRewrite(
-                                  sql`linked_doc.document_version_id`,
-                                  sql`task.id`,
-                                  props.accessToken,
-                                )}
-                              />
-                            </div>
-                          </Show>
+                          <CourseStepDocument
+                            document={sql`linked_doc`}
+                            content={block.opts.content}
+                            controlledRevisionId={sql`linked_doc.document_version_id`}
+                            nativePdfHref={trainingFileVersionUrl(
+                              sql`linked_doc.document_version_id`,
+                              sql`task.id`,
+                              props.accessToken,
+                            )}
+                            language={sql`task.employee_language`}
+                            fileHref={trainingFileVersionUrl(
+                              sql`linked_doc.document_version_id`,
+                              sql`task.id`,
+                              props.accessToken,
+                            )}
+                            externalHref={trainingExternalVersionUrl(
+                              sql`linked_doc.document_version_id`,
+                              sql`task.id`,
+                              props.accessToken,
+                            )}
+                            imageSrcPrefixRewrite={trainingNativeImageSrcPrefixRewrite(
+                              sql`linked_doc.document_version_id`,
+                              sql`task.id`,
+                              props.accessToken,
+                            )}
+                          />
                         </Each>
                       </div>
                     </div>
@@ -4406,16 +4598,15 @@ function EmployeeTrainingTaskPage(
                             <Show when={sql`task.requires_essay`}>
                               <FormControl>
                                 <FormLabel>
-                                  {sql`coalesce(task.essay_prompt, ${
-                                    employeeText(sql`task.employee_language`, {
-                                      en:
-                                        "Describe what you learned and how you will apply it.",
-                                      es:
-                                        "Describa lo que aprendió y cómo lo aplicará.",
-                                    })
-                                  })`}
+                                  {sql`task.essay_prompt`}
                                 </FormLabel>
                                 <Textarea
+                                  aria-label={sql`coalesce(nullif(trim(task.essay_prompt), ''), ${
+                                    employeeText(sql`task.employee_language`, {
+                                      en: "Written response",
+                                      es: "Respuesta escrita",
+                                    })
+                                  })`}
                                   bindScalar="essay_response"
                                   minRows={6}
                                 />
@@ -5010,7 +5201,7 @@ export function EmployeePersonnelFilePage(
               <CardHeader>
                 <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 w-full">
                   <div>
-                    <Typography level="title-lg" startIcon="ManageAccounts">
+                    <Typography level="title-lg" startIcon="AssignmentInd">
                       Personnel Actions
                     </Typography>
                     <Typography
@@ -5022,6 +5213,41 @@ export function EmployeePersonnelFilePage(
                     </Typography>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <FileActionButton
+                      variant="outlined"
+                      color="neutral"
+                      startIcon="UploadFile"
+                      inputProps={{ accept: ".pdf,.doc,.docx" }}
+                      successMessage="Training document added to the personnel file."
+                      action={(s, file) => {
+                        block.assertCanManageEmployeeFiles(s);
+                        s.readDomFile(file.uuid, "training_document_content");
+                        s.createBlob(
+                          sql`training_document_content`,
+                          "training_document_blob_hash",
+                        );
+                        s.startTransaction();
+                        block.assertCanManageEmployeeFiles(s);
+                        s.modify(sql`
+                          insert into db.training_personnel_documents
+                            (person_id, training_personnel_document_type, title,
+                             blob_hash, file_name, content_type, created_by_id)
+                          values (ui.person_id,
+                            ${
+                          personnelDocumentTypeWithFallbackSql(
+                            block.opts,
+                            "training",
+                          )
+                        },
+                            left(${file.name}, 200), training_document_blob_hash,
+                            ${file.name}, coalesce(nullif(${file.type}, ''), 'application/octet-stream'),
+                            ${currentEmployeeId(block.opts)})
+                        `);
+                        s.commitTransaction();
+                      }}
+                    >
+                      Upload training document
+                    </FileActionButton>
                     <Button
                       startIcon="AddTask"
                       onClick={(s) =>
@@ -5148,6 +5374,18 @@ export function EmployeePersonnelFilePage(
                     "new_competency_check_id",
                     sql`last_record_id(db.training_competency_checks)`,
                   );
+                  s.throwErrorIf(
+                    sql`exists (select 1 from db.training_competency_checks check_record
+                      where check_record.id = new_competency_check_id
+                        and check_record.document_id is not null
+                        and not ${
+                      block.opts.content.canReadDocument(
+                        sql`check_record.document_id`,
+                        sql`current_user`,
+                      )
+                    })`,
+                    sql.lit`You cannot link this document.`,
+                  );
                   s.modify(sql`
                     insert into db.training_retraining_cases
                       (person_id, training_retraining_source, source_id,
@@ -5188,7 +5426,10 @@ export function EmployeePersonnelFilePage(
                       <FormLabel>Related document</FormLabel>
                       <Form.Field field="document_id">
                         {(helper) => (
-                          <TrainingDocumentFormControl helper={helper} />
+                          <TrainingDocumentFormControl
+                            helper={helper}
+                            block={block}
+                          />
                         )}
                       </Form.Field>
                     </FormControl>

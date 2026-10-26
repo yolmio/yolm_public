@@ -86,7 +86,9 @@ export function FilePreview(props: {
       }}
     >
       <div
-        className="flex h-full min-h-96 flex-col bg-body"
+        className={props.module === "docx_viewer"
+          ? "flex h-[85dvh] min-h-[36rem] flex-col bg-body"
+          : "flex h-full min-h-96 flex-col bg-body"}
         sx={filePreviewStyles}
         js={{
           handles: [{ module: props.module, cleanup: "cleanup", handle }],

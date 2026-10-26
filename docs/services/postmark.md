@@ -16,12 +16,14 @@ The Postmark service provides transactional email sending via the [Postmark API]
 
 ### 1. Store Your API Token
 
-Add a static secret named `POSTMARK_SERVER_TOKEN` with your Postmark server token. This is done via the studio secrets management or system configuration.
+Add a server-side static secret named `POSTMARK_SERVER_TOKEN` with your Postmark server token. This is done via the studio secrets management or system configuration.
 
 ### 2. Import
 
 ```typescript
 import { Postmark } from "services/postmark";
+import { getStaticSecret } from "std/services";
+import { sql } from "std/sql_utils";
 ```
 
 ### 3. Create Instance
@@ -30,9 +32,9 @@ import { Postmark } from "services/postmark";
 // Uses POSTMARK_SERVER_TOKEN secret automatically
 const postmark = new Postmark();
 
-// Or provide a custom token
-const postmark = new Postmark({
-  serverToken: sql`(select value from db.settings where key = 'postmark_token')`,
+// Or read a different static secret (for example, a second Postmark server)
+const marketingPostmark = new Postmark({
+  serverToken: getStaticSecret(sql.lit`POSTMARK_MARKETING_TOKEN`),
 });
 ```
 
@@ -57,61 +59,10 @@ postmark.sendEmail(s, {
 
 ### Email with MJML Template
 
-The typical pattern is: render an MJML template → substitute variables → send via Postmark.
-
-```typescript
-// 1. Define your MJML template
-const template = sql.lit`
-<mjml>
-  <mj-body>
-    <mj-section>
-      <mj-column>
-        <mj-text font-size="16px" font-family="Arial">
-          Hi {{recipient_name}},
-        </mj-text>
-        <mj-text font-family="Arial">
-          {{message_body}}
-        </mj-text>
-        <mj-button href="{{action_url}}">
-          View Details
-        </mj-button>
-      </mj-column>
-    </mj-section>
-  </mj-body>
-</mjml>
-`;
-
-// 2. In your procedure, set up variables and render
-s.defScalar("recipient_name", sql`user.first_name || ' ' || user.last_name`);
-s.defScalar("message_body", sql.lit`Your project has a new update.`);
-s.defScalar("action_url", sql.lit`https://app.example.com/projects`);
-
-// 3. Render template with variable substitution
-s.renderTemplate({
-  template,
-  scope: {
-    recipient_name: "recipient_name",
-    message_body: "message_body",
-    action_url: "action_url",
-  },
-  htmlEscaped: true,
-  defOutputScalar: "mjml_rendered",
-});
-
-// 4. Convert MJML to HTML
-s.renderMjml({
-  mjml: sql`mjml_rendered`,
-  defOutputScalar: "email_html",
-});
-
-// 5. Send via Postmark
-postmark.sendEmail(s, {
-  from: "notifications@yourapp.com",
-  to: sql`user.email`,
-  subject: sql.lit`Project Update`,
-  htmlBody: sql`email_html`,
-});
-```
+Render the body with `s.renderTemplate` and `s.renderMjml`, then pass the
+resulting HTML scalar as `htmlBody`. See
+[Rendering and Sending Emails](../concepts/email_templates.md#rendering-and-sending-emails)
+for the full pattern.
 
 ### All sendEmail Options
 
@@ -129,19 +80,16 @@ postmark.sendEmail(s, {
   replyTo: sql`reply_to_email`,       // Reply-to address
   tag: sql.lit`notification`,         // Tag for Postmark analytics
   messageStream: sql.lit`outbound`,   // Message stream (default: Postmark account default)
+  optIn: sql.true,                    // See External-Service Opt-In (solution_services.md)
 
   // Tracking
   trackOpens: true,                   // Track email opens
   trackLinks: "HtmlAndText",          // "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
 
-  // Error handling
-  emailIsCritical: sql`true`,         // Throw error on invalid email (default: false)
+  // Error handling (every non-200 response throws; see Error Handling)
+  emailIsCritical: sql`true`,         // 406 throws a "check the email address" message
   ifFails: (s) => {
-    // Custom error handling
-    s.modify(sql`
-      insert into db.email_errors (email, error, created_at)
-      values (recipient_email, 'Send failed', now())
-    `);
+    // Side effects to run before the error is thrown
   },
 
   // Custom email headers (Postmark JSON Headers, not HTTP request headers)
@@ -226,7 +174,7 @@ system.scheduledProc({
             ''
           )
           from db.projects p
-          where p.manager = user.employee_id
+          where p.manager = user_record.employee_id
             and p.due_date < current_date()
             and p.status not in ('completed', 'cancelled')),
           ''
@@ -237,8 +185,8 @@ system.scheduledProc({
       s.renderTemplate({
         template: overdueTemplate,
         scope: {
-          name: "user.name",
-          count: "user.overdue_count",
+          name: "user_record.name",
+          count: "user_record.overdue_count",
           items_html: "items_html",
         },
         htmlEscaped: true,
@@ -253,8 +201,8 @@ system.scheduledProc({
       // Send email
       postmark.sendEmail(s, {
         from: "notifications@yourapp.com",
-        to: sql`user.email`,
-        subject: sql`'You have ' || user.overdue_count || ' overdue projects'`,
+        to: sql`user_record.email`,
+        subject: sql`'You have ' || user_record.overdue_count || ' overdue projects'`,
         htmlBody: sql`email_html`,
         tag: sql.lit`overdue-notification`,
         trackOpens: true,
@@ -282,7 +230,7 @@ postmark.webhooks.create(s, {
   },
   httpAuth: {
     username: sql.lit`webhook_user`,
-    password: sql`webhook_secret`,
+    password: getStaticSecret(sql.lit`POSTMARK_WEBHOOK_PASSWORD`),
   },
   responseRecord: "webhook_result",
 });
@@ -309,30 +257,37 @@ postmark.webhooks.delete(s, sql`webhook_id`);
 
 The Postmark service handles errors automatically:
 
-- **Status 406** (Invalid email): Runs `ifFails` and results in an error.
-  `emailIsCritical` controls whether the service throws a friendlier critical
-  email error before the general non-200 error path.
-- **Other errors**: Throws with the Postmark error message.
-- **Custom handling**: Use `ifFails` callback for custom failure-side effects.
+- **Status 406** (invalid email): Runs `ifFails` and throws. When
+  `emailIsCritical` is true, the error message asks the user to check the
+  email address; otherwise the generic send-failure error below is thrown.
+  `emailIsCritical` defaults to false.
+- **Other non-200 responses**: Runs `ifFails` and throws with the Postmark
+  status and error message.
+- **Custom handling**: Use the `ifFails` callback for failure-side effects.
+  Every failure still throws afterward, so `sendEmail` never fails silently.
 
 ```typescript
 postmark.sendEmail(s, {
   from: "noreply@example.com",
-  to: sql`user.email`,
+  to: sql`user_record.email`,
   subject: sql.lit`Important notification`,
   htmlBody: sql`email_html`,
-  emailIsCritical: sql`user.is_admin`,  // Only throw for admin emails
+  emailIsCritical: sql`user_record.is_admin`,  // Only throw for admin emails
   ifFails: (s) => {
+    s.startTransaction();
     s.modify(sql`
       update db.notifications
-      set delivery_status = 'failed', failed_at = now()
+      set delivery_status = 'failed'
       where id = notification_id
     `);
+    s.commitTransaction();
   },
 });
 ```
 
 ## See Also
+
+- [External-Service Opt-In](./solution_services.md#external-service-opt-in) - `optIn` on `sendEmail` and webhook calls
 
 - [Email Templates with MJML](../concepts/email_templates.md) - Template design patterns
 - [Scheduled Jobs](../concepts/scheduled_jobs.md) - Running email jobs on a schedule

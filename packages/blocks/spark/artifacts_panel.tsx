@@ -6,18 +6,18 @@ import { ActionButton } from "std/action_button";
 import { Data } from "std/data";
 import { type Sql, sql } from "std/sql_utils";
 import type { UiServerStatements } from "std/statements";
+import { system } from "std/system";
 import { Each, Show } from "std/ui";
 import { visibleConversationId } from "./helpers";
 
 function loadArtifact(s: UiServerStatements, id: Sql) {
-  s.defRecord(
-    "chosen_file",
-    sql`select f.* from db.spark_attachments f join db.spark_agent_events e on e.id = f.spark_event_id
-              join db.spark_agents a on a.id = e.spark_agent_id where f.id = ${id} and f.expires_at > now()
-              and a.spark_conversation_id = ${
-      visibleConversationId(sql`active_conversation_id`)
-    }`,
-  );
+  s.callStoredProcedure("spark_find_visible_artifact", {
+    inputScalars: {
+      p_artifact_id: id,
+      active_conversation_id: sql`active_conversation_id`,
+    },
+    outputRecords: { chosen_file: "chosen_file" },
+  });
   s.if(
     sql`chosen_file.id is null`,
     (s) => s.throwError(sql.lit`File is unavailable.`),
@@ -37,6 +37,37 @@ function loadArtifact(s: UiServerStatements, id: Sql) {
   s.setScalar("ui.selected_artifact", sql`chosen_file.id`);
   s.setScalar("ui.artifact_name", sql`chosen_file.name`);
   s.setScalar("ui.artifact_mime", sql`chosen_file.mime_type`);
+}
+
+// A stored procedure keeps the visibility lookup out of every Spark route.
+export function registerSparkArtifactProcedures() {
+  system.storedProcedure({
+    name: "spark_find_visible_artifact",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_artifact_id", type: "BigInt" },
+      { name: "active_conversation_id", type: "BigInt" },
+    ],
+    outputRecords: [{
+      name: "chosen_file",
+      fields: [
+        { name: "id", type: "BigInt" },
+        { name: "name", type: { type: "String", maxLength: 500 } },
+        { name: "mime_type", type: { type: "String", maxLength: 200 } },
+        { name: "text_content", type: { type: "String", maxLength: 50000 } },
+        { name: "blob_hash", type: { type: "Bytes", maxLength: 32 } },
+      ],
+    }],
+    procedure: (s) => {
+      s.modify(sql`insert into chosen_file
+        select f.id, f.name, f.mime_type, f.text_content, f.blob_hash
+        from db.spark_attachments f join db.spark_agent_events e on e.id = f.spark_event_id
+              join db.spark_agents a on a.id = e.spark_agent_id where f.id = p_artifact_id and f.expires_at > now()
+              and a.spark_conversation_id = ${
+        visibleConversationId(sql`active_conversation_id`)
+      }`);
+    },
+  });
 }
 
 /** Files are evidence: undo never deletes a saved deliverable. */

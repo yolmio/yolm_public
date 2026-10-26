@@ -34,15 +34,26 @@ If an existing system or example solves the problem, use the relevant parts of i
 ## Database Design
 
 Keep the persistent model compact. Every table, field, enum value, and
-relationship should have a concrete purpose, reader, and writer. Prefer values
-derived by a query or virtual field over duplicated stored values when the
-calculation is inexpensive.
+relationship should have a concrete purpose, reader, and writer. Removing a
+field later leaves its physical slot and data behind as an orphan until a
+transform rebuilds the database, so add only
+what the workflow needs.
 
 - Use meaningful and descriptive names for tables, fields, and variables
 - Follow naming conventions (snake_case, plural table names)
 - Prefer block-provided schema over overlapping custom tables
+- Derive values computable from other data (totals, rollups, copies,
+  statuses such as overdue) with queries, virtual fields, or views instead of
+  storing them; store authoritative workflow state once
 - Do not add cache, summary, or denormalized tables as speculative query
   optimization
+- Use [transaction queries](../sql/transaction_queries.md) for change history
+  instead of audit, log, and history tables. Add `created_at`/`created_by`
+  style fields only when a frequent query, the UI, or a workflow reads them:
+  the transaction log scans each table's retained history (subject to
+  `autoCompact`), so it suits forensics, not routine reads
+- Use procedure tables for intermediate data instead of persistent staging
+  tables
 - Do not design around secondary indexes or physical partition, cluster, or
   sort keys; Yolm does not expose them
 
@@ -52,3 +63,4 @@ calculation is inexpensive.
 - Prefer the theme and existing style utilities. Add scoped typography, color,
   state, responsive, and accessibility styles when the product requires them;
   keep layout and spacing styles local to the component.
+- Set density and copy by users and device; see [UX](../ai/review.md#ux).

@@ -1,8 +1,14 @@
 import { Button } from "components/button";
 import { ButtonGroup } from "components/button_group";
 import { IconButton } from "components/icon_button";
-import { LexicalRichTextDisplay } from "components/lexical/components/lexical_editor";
-import { ensureLexicalRichTextFunctions } from "components/lexical/components/lexical_scalar_functions";
+import {
+  lexicalDocumentFormattingStyles,
+  LexicalRichTextDisplay,
+} from "components/lexical/components/lexical_editor";
+import {
+  ensureLexicalRichTextFunctions,
+  ensureLexicalStandardDocumentFunction,
+} from "components/lexical/components/lexical_scalar_functions";
 import { editorContentStyles } from "components/lexical/components/word_editor/editor_styles";
 import { Ribbon } from "components/lexical/components/word_editor/ribbon";
 import { StatusBar } from "components/lexical/components/word_editor/status_bar";
@@ -12,10 +18,15 @@ import { Data } from "std/data";
 import { useJsModule } from "std/js_modules";
 import { sql } from "std/sql_utils";
 import type { AnyExpr, Sql } from "std/sql_utils";
-import type { ServerStatementsBase } from "std/statements";
+import type {
+  EndpointStatements,
+  GeneralServerStatements,
+  ServerStatementsBase,
+} from "std/statements";
 import { system } from "std/system";
 import { storedScheduledProc } from "std/scheduled_utils";
 import { Show, useUniqueId } from "std/ui";
+import type { Node } from "std/ui";
 import type {
   DriveBlockContract,
   DriveExtension,
@@ -35,36 +46,79 @@ function contentTypeIsNotSupportedImage(contentType: Sql) {
   )`;
 }
 
-export function NativeDocumentPage(
-  { value, contentId, pageId = "native-document-page" }: {
-    value: Sql;
-    contentId?: string;
-    pageId?: string;
-  },
+export interface NativeDocumentLayoutProps {
+  /** A caller-authorized export route, e.g. an assigned training task. */
+  pdfHref?: Sql;
+  controlledRevisionId?: Sql;
+  children: Node;
+  fileVersionId: Sql;
+  pageId: string | Sql;
+}
+
+export function NativeDocumentSheet(
+  props: { children: Node; pageId: string | Sql },
 ) {
   return (
     <div className="flex justify-center overflow-auto bg-neutral-200 px-3 py-6 md:px-8">
       <Sheet
-        id={pageId}
-        className="min-h-[1056px] w-full max-w-[816px] shadow-md"
+        id={props.pageId}
+        className="min-h-[1056px] w-full max-w-[816px] p-6 shadow-md sm:p-12 md:p-24"
       >
-        <LexicalRichTextDisplay
-          id={contentId}
-          value={value}
-          sx={{
-            ...editorContentStyles,
-            display: "flow-root",
-            minHeight: "1056px",
-            padding: "96px",
-            boxSizing: "border-box",
-          }}
-        />
+        {props.children}
       </Sheet>
     </div>
   );
 }
 
+export function NativeDocumentPage(
+  {
+    value,
+    contentId,
+    pageId = "native-document-page",
+    documents,
+    fileVersionId,
+    controlledRevisionId,
+    pdfHref,
+    imageSrcPrefixRewrite,
+  }: {
+    value: Sql;
+    contentId?: string;
+    pageId?: string | Sql;
+    documents?: NativeDocumentExtension;
+    fileVersionId?: Sql;
+    controlledRevisionId?: Sql;
+    pdfHref?: Sql;
+    imageSrcPrefixRewrite?: { prefix: Sql; replacement: Sql };
+  },
+) {
+  const children = (
+    <LexicalRichTextDisplay
+      id={contentId}
+      value={documents?.normalizeContent(value) ?? value}
+      imageSrcPrefixRewrite={imageSrcPrefixRewrite}
+      sx={{
+        ...editorContentStyles,
+        ...(documents?.opts.standardFormatting
+          ? lexicalDocumentFormattingStyles
+          : {}),
+        display: "flow-root",
+        boxSizing: "border-box",
+      }}
+    />
+  );
+  return documents && fileVersionId
+    ? documents.renderPage({
+      children,
+      fileVersionId,
+      controlledRevisionId,
+      pdfHref,
+      pageId,
+    })
+    : <NativeDocumentSheet pageId={pageId}>{children}</NativeDocumentSheet>;
+}
+
 export interface NativeDocumentEditorProps {
+  controlledRevisionId?: Sql;
   files: DriveBlockContract;
   documents: NativeDocumentExtension;
   fileItemId: AnyExpr;
@@ -85,6 +139,35 @@ export class NativeDocumentExtension implements DriveExtension {
   readonly versionImageTable = "native_document_file_version_images";
   #files?: DriveBlockContract;
 
+  constructor(
+    readonly opts: {
+      /** Presentation only; never put letterhead or publication metadata in the editable body. */
+      renderPage?: (props: NativeDocumentLayoutProps) => Node;
+      /** Render an exact revision already authorized by the caller. No ambient transaction. */
+      renderAuthorizedPdf?: (
+        s: GeneralServerStatements | EndpointStatements,
+        props: {
+          fileVersionId: Sql;
+          controlledRevisionId: Sql;
+          intoBytes: string;
+        },
+      ) => void;
+      /** Shared semantic typography for editing, display, and print; no inline CSS. */
+      standardFormatting?: boolean;
+    } = {},
+  ) {}
+
+  normalizeContent(value: Sql): Sql {
+    return this.opts.standardFormatting
+      ? sql`fn.lexical_standard_document(${value})`
+      : value;
+  }
+
+  renderPage(props: NativeDocumentLayoutProps): Node {
+    return this.opts.renderPage?.(props) ??
+      <NativeDocumentSheet {...props} />;
+  }
+
   readonly viewer: FileViewerContribution = {
     name: "native_document",
     canView: (version) =>
@@ -95,13 +178,16 @@ export class NativeDocumentExtension implements DriveExtension {
         documents={this}
         fileItemId={props.fileItemId}
         fileVersionId={props.fileVersionId}
+        controlledRevisionId={props.controlledRevisionId}
         readOnly={props.readOnly}
         allowNewVersionFromHistorical={props.allowNewVersionFromHistorical}
       />
     ),
     renderReadOnly: (props) => (
       <NativeDocumentReadOnly
+        documents={this}
         fileVersionId={props.fileVersionId}
+        controlledRevisionId={props.controlledRevisionId}
         fileName={props.fileName}
         versionNumber={props.versionNumber}
       />
@@ -111,6 +197,9 @@ export class NativeDocumentExtension implements DriveExtension {
   initialize(files: DriveBlockContract) {
     this.#files = files;
     ensureLexicalRichTextFunctions(system);
+    if (this.opts.standardFormatting) {
+      ensureLexicalStandardDocumentFunction(system);
+    }
     system.db.table(this.contentTable, (table) => {
       table.fk("file_version_id", files.versionTable).notNull().unique()
         .onDelete("Cascade");
@@ -135,6 +224,47 @@ export class NativeDocumentExtension implements DriveExtension {
       );
       table.unique(["file_version_id", "native_document_image_id"]);
       table.skipAutoApi();
+    });
+    system.db.scalarFunction({
+      name: "native_document_restore_image_hashes",
+      parameters: [{ name: "node", type: "Json" }, {
+        name: "item_id",
+        type: "BigInt",
+      }],
+      returnType: "Json",
+      procedure: (s) => {
+        s.defScalar("result", sql`input.node`);
+        s.if(sql`input.node->>'type' = 'image'`, (s) => {
+          s.defScalar(
+            "registered_hash",
+            sql`(select bytes.to_hex(image.blob_hash)
+            from db.native_document_images image
+            where image.file_item_id = input.item_id
+              and input.node->>'src' = '/api/files/native-images/' || input.item_id::string || '/' || bytes.to_hex(image.blob_hash)
+              and (image.pending_until is null or image.pending_until > now()))`,
+          );
+          s.setScalar(
+            "result",
+            sql`result || json_build_object('blobHash', registered_hash)`,
+          );
+        });
+        s.if(sql`input.node->'root' is not null`, (s) => {
+          s.setScalar(
+            "result",
+            sql`result || json_build_object('root', fn.native_document_restore_image_hashes(input.node->'root', input.item_id))`,
+          );
+        });
+        s.if(sql`input.node->'children' is not null`, (s) => {
+          s.setScalar(
+            "result",
+            sql`result || json_build_object('children', coalesce((
+            select json_array_agg(fn.native_document_restore_image_hashes(child.value, input.item_id) order by child.index)
+            from json.array_each(input.node->'children') child
+          ), '[]'::json))`,
+          );
+        });
+        s.return(sql`result`);
+      },
     });
     storedScheduledProc({
       name: "native_document_image_cleanup",
@@ -538,7 +668,7 @@ export class NativeDocumentExtension implements DriveExtension {
         rich_content
       ) values (
         ${sql.ref(versionResult)},
-        ${opts.content}
+        ${this.normalizeContent(opts.content)}
       )
     `);
   }
@@ -607,7 +737,7 @@ export class NativeDocumentExtension implements DriveExtension {
         rich_content
       ) values (
         ${sql.ref(versionResult)},
-        ${opts.content}
+        ${this.normalizeContent(opts.content)}
       )
     `);
     const imageBlobHashes = opts.imageBlobHashes ?? sql`json_build_array()`;
@@ -668,6 +798,8 @@ export class NativeDocumentExtension implements DriveExtension {
  * representation payload by version id, with no second access predicate.
  */
 function NativeDocumentReadOnly(props: {
+  controlledRevisionId?: Sql;
+  documents: NativeDocumentExtension;
   fileVersionId: Sql;
   fileName: Sql;
   versionNumber: Sql;
@@ -696,6 +828,9 @@ function NativeDocumentReadOnly(props: {
             </p>
           </header>
           <NativeDocumentPage
+            documents={props.documents}
+            fileVersionId={props.fileVersionId}
+            controlledRevisionId={props.controlledRevisionId}
             value={sql`native_document_display.rich_content`}
           />
         </section>
@@ -751,7 +886,9 @@ export function NativeDocumentEditor(props: NativeDocumentEditorProps) {
         s.defScalar("save_status", sql.lit``);
         s.defTable(
           "fonts",
-          sql`select * from (values ('Arial'), ('Calibri'), ('Courier New'), ('Georgia'), ('Helvetica'), ('Times New Roman'), ('Verdana')) as t(name)`,
+          props.documents.opts.standardFormatting
+            ? sql`select ${sql.lit`Noto Sans`} as name`
+            : sql`select * from (values ('Arial'), ('Calibri'), ('Courier New'), ('Georgia'), ('Helvetica'), ('Times New Roman'), ('Verdana')) as t(name)`,
         );
       }}
     >
@@ -987,11 +1124,17 @@ export function NativeDocumentEditor(props: NativeDocumentEditorProps) {
             <Show
               when={sql`ui.native_document_editing`}
               fallback={
-                <NativeDocumentPage value={sql`native_document.rich_content`} />
+                <NativeDocumentPage
+                  documents={props.documents}
+                  fileVersionId={sql`native_document.displayed_file_version_id`}
+                  controlledRevisionId={props.controlledRevisionId}
+                  value={sql`native_document.rich_content`}
+                />
               }
             >
               <div className="flex min-h-[720px] flex-col">
                 <Ribbon
+                  standardFormatting={props.documents.opts.standardFormatting}
                   pictureControl={
                     <Button
                       size="sm"
@@ -1077,19 +1220,21 @@ export function NativeDocumentEditor(props: NativeDocumentEditorProps) {
                     {sql`ui.native_document_image_upload_status`}
                   </div>
                 </Show>
-                <div className="flex flex-1 justify-center overflow-auto bg-neutral-200 px-3 py-6 md:px-8">
-                  <Sheet
-                    id="native-document-page"
-                    className="min-h-[1056px] w-full max-w-[816px] shadow-md"
-                  >
+                {props.documents.renderPage({
+                  fileVersionId: sql`native_document.displayed_file_version_id`,
+                  controlledRevisionId: props.controlledRevisionId,
+                  pageId: "native-document-page",
+                  children: (
                     <div
                       contentEditable
                       id={editorContainerId}
                       sx={{
                         ...editorContentStyles,
+                        ...(props.documents.opts.standardFormatting
+                          ? lexicalDocumentFormattingStyles
+                          : {}),
                         display: "flow-root",
-                        minHeight: "1056px",
-                        padding: "96px",
+                        minHeight: "600px",
                         boxSizing: "border-box",
                         "& a": { pointerEvents: "none" },
                       }}
@@ -1219,7 +1364,17 @@ export function NativeDocumentEditor(props: NativeDocumentEditorProps) {
                           argJson: sql`json_build_object(
                             'handle', ui.editor_handle,
                             'containerId', ${editorContainerId},
-                            'initialContent', ui.native_document_content
+                            'initialContent', ${
+                            props.documents.normalizeContent(
+                              sql`ui.native_document_content`,
+                            )
+                          },
+                            'standardFormatting', ${!!props.documents.opts
+                            .standardFormatting},
+                            'preserveStoredTextStyles', ${!props.documents.opts
+                            .standardFormatting},
+                            'preservePastedTextStyles', ${!props.documents.opts
+                            .standardFormatting}
                           )`,
                         });
                         s.jsCall({
@@ -1238,8 +1393,8 @@ export function NativeDocumentEditor(props: NativeDocumentEditorProps) {
                         });
                       }}
                     />
-                  </Sheet>
-                </div>
+                  ),
+                })}
                 <StatusBar />
               </div>
             </Show>

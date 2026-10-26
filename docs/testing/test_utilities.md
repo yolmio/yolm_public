@@ -58,15 +58,22 @@ export function createOrder(
   s: TestStatements,
   opts: { reference: string; status?: string },
 ) {
+  s.startTransaction();
   s.modify(sql`
     insert into db.orders (reference, status)
     values (${sql.lit(opts.reference)}, ${sql.lit(opts.status ?? "pending")})
   `);
+  s.commitTransaction();
   s.defScalar("order_id", sql`
     select id from db.orders where reference = ${sql.lit(opts.reference)}
   `);
 }
 ```
+
+Helpers called from a test procedure own their transaction, because test
+procedures start outside one; data-set procedures run in an implicit transaction
+instead. See
+[Transactions and isolation](./test_statements.md#transactions-and-isolation).
 
 Keep helpers deterministic: pass references, ids, dates, and statuses
 explicitly instead of using `Date.now()` or random values.
@@ -74,7 +81,7 @@ explicitly instead of using `Date.now()` or random values.
 ## Scenario Test Pattern
 
 ```ts
-system.test.test({
+system.test({
   name: "orders: confirm moves pending order to confirmed",
   data: "minimal",
   time: new Date("2025-01-15T10:00:00-05:00"),
@@ -100,14 +107,14 @@ system.test.test({
 ```
 
 Use `s.flushReactors()` before assertions when the action should trigger
-reactor work.
+reactor work; see [flushReactors](./test_statements.md#flushreactors).
 
 ## Utility Rules
 
 - Prefer a few focused insert helpers over broad fixture builders.
 - Use multi-row SQL inserts for static data.
 - Freeze time with the test `time` field.
-- Assert durable database state after calling helpers or APIs.
+- Assert durable database state after calling production procedures or APIs.
 - Keep helper names domain-specific: `createPendingOrder`, `grantAdminRole`,
   `insertIntegrationConfig`.
 - Avoid test utilities that reimplement production logic; call the production

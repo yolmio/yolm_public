@@ -59,11 +59,12 @@ select -5;       -- -5 (negation)
 
 ### round
 
-Rounds to nearest integer or specified decimal places.
+Rounds to nearest integer or specified decimal places. Ties round half away
+from zero (`42.5` becomes `43`, `-42.5` becomes `-43`).
 
 ```sql
 select round(42.4);       -- 42
-select round(42.5);       -- 43 (rounds half up)
+select round(42.5);       -- 43
 select round(42.4382, 2); -- 42.44
 select round(-42.5);      -- -43
 ```
@@ -228,28 +229,12 @@ select pi();  -- 3.14159265358979...
 
 ## Greatest and Least
 
-Returns largest/smallest value from a list.
-
-```sql
-select greatest(1, 5, 3, 9, 2);  -- 9
-select least(1, 5, 3, 9, 2);     -- 1
-
--- With NULLs (returns NULL if any argument is NULL)
-select greatest(1, null, 3);     -- null
-select least(1, null, 3);        -- null
-```
+`greatest` and `least` (including clamping a value to a range) are documented
+in [Global SQL Functions](./global_functions.md#least-greatest).
 
 ## Random Numbers
 
-See [Random Functions](./random_functions.md) for details.
-
-```sql
-select random.real();     -- random float [0, 1)
-select random.int();      -- random 32-bit integer
-select random.bigint();   -- random 64-bit integer
-select random.bool();     -- random boolean
-select random.uuid();     -- random UUID v4
-```
+See [Random Functions](./random_functions.md).
 
 ## Type Conversion
 
@@ -293,23 +278,16 @@ from points;
 
 ### Safe Division
 
+Division by zero returns null (see
+[Numeric Type Behavior](#numeric-type-behavior)). Use `case` when you need a
+different fallback value:
+
 ```sql
 select case
   when denominator = 0 then 0
   else numerator::decimal / denominator
 end as safe_ratio
 from values;
-
--- Or using NULLIF
-select numerator::decimal / nullif(denominator, 0) as ratio
-from values;
-```
-
-### Clamp Value to Range
-
-```sql
-select greatest(0, least(100, value)) as clamped_value
-from data;
 ```
 
 ### Integer Division with Remainder
@@ -326,11 +304,13 @@ from numbers;
 - Integer division returns integer: `10 / 3 = 3`
 - At least one decimal operand returns decimal: `10.0 / 3 = 3.333...`
 - Integer overflow wraps around (two's complement); it does not raise an error
-- Division or modulo by zero returns NULL (not an error)
+- Division or modulo by zero returns null (not an error)
+- `%` and `mod` return a remainder with the sign of the dividend:
+  `-7 % 3 = -1`
 
 ## Null Handling
 
-Most math functions return NULL if any input is NULL:
+Most math functions return null if any input is null:
 
 ```sql
 select 5 + null;      -- null

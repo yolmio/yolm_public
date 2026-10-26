@@ -14,12 +14,14 @@ Scalar functions are user-defined SQL functions that return a single value. They
 
 Use `system.db.scalarFunction(...)` when the function reads database tables.
 Use `system.scalarFunction(...)` for pure functions that do not access the
-database.
+database. The examples below follow this rule: pure formatting and arithmetic
+helpers use `system.scalarFunction(...)`, and functions that query `db.*`
+tables use `system.db.scalarFunction(...)`. Both are called as `fn.<name>`.
 
 ## Basic Definition
 
 ```typescript
-system.db.scalarFunction({
+system.scalarFunction({
   name: "calculate_discount",
   returnType: { type: "Decimal", precision: 10, scale: 2, signed: true },
   parameters: [
@@ -47,7 +49,7 @@ Scalar-function parameters support Yolm field types, including `String`,
 numeric types, dates/times, enums, JSON, bytes, and foreign keys:
 
 ```typescript
-system.db.scalarFunction({
+system.scalarFunction({
   name: "format_phone",
   returnType: "String",
   parameters: [
@@ -103,9 +105,9 @@ system.db.scalarFunction({
   returnType: "String",
   parameters: [{ name: "user_id", type: "BigInt" }],
   procedure: (s) => {
-    s.defRecord("user", sql`select * from db.users where id = input.user_id`);
+    s.defRecord("user_record", sql`select * from db.users where id = input.user_id`);
 
-    s.if(sql`user.id is null`, (s) => {
+    s.if(sql`user_record.id is null`, (s) => {
       s.return(sql.lit`unknown`);
     });
 
@@ -265,22 +267,18 @@ returnType: { type: "Enum", enum: "order_status" }
 ## State Changes
 
 Scalar functions must declare a `returnType` and return a single value. Do not
-use them for side effects such as inserting audit rows or updating records.
+use them for side effects such as inserting or updating records.
 
 Put state-changing logic in a stored procedure, API endpoint, scheduled job, or
 reactor instead:
 
 ```typescript
 system.storedProcedure({
-  name: "log_event",
-  inputScalars: [
-    { name: "event_type", type: "String" },
-    { name: "user_id", type: "BigInt" },
-  ],
+  name: "close_ticket",
+  inputScalars: [{ name: "ticket_id", type: "BigInt" }],
   procedure: (s) => {
     s.modify(sql`
-      insert into db.event_log (type, user_id, occurred_at)
-      values (input.event_type, input.user_id, now())
+      update db.tickets set closed_at = now() where id = input.ticket_id
     `);
   },
 });
@@ -299,31 +297,38 @@ system.storedProcedure({
 
 ### URL Building
 
+Build only the non-secret part of a URL in a function. Send API keys in a
+request header read from a static secret, never in a query string:
+
 ```typescript
-system.db.scalarFunction({
+import { getStaticSecret } from "std/services";
+
+system.scalarFunction({
   name: "build_api_url",
   returnType: "String",
-  parameters: [
-    { name: "endpoint", type: "String" },
-    { name: "api_key", type: "String" },
-  ],
+  parameters: [{ name: "endpoint", type: "String" }],
   procedure: (s) => {
-    s.return(
-      sql.concat(
-        "https://api.example.com/",
-        sql`input.endpoint`,
-        "?key=",
-        sql`input.api_key`
-      )
-    );
+    s.return(sql.concat("https://api.example.com/", sql`input.endpoint`));
   },
 });
+
+// In a procedure that makes the request
+s.request({
+  uri: sql`fn.build_api_url('orders')`,
+  headers: [{
+    name: sql.lit`Authorization`,
+    value: sql.concat("Bearer ", getStaticSecret(sql.lit`EXAMPLE_API_KEY`)),
+  }],
+  defResponseRecord: "response",
+});
 ```
+
+Keep secret values on the server in encrypted static storage.
 
 ### Data Formatting
 
 ```typescript
-system.db.scalarFunction({
+system.scalarFunction({
   name: "format_currency",
   returnType: "String",
   parameters: [

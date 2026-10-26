@@ -1,3 +1,13 @@
+import {
+  registerTranslationReviews,
+  renderTranslationReviewFile,
+  translationReviewAccessSql,
+} from "./translation_reviews";
+import { registerTrainingTranslationProcedures } from "./translations";
+import {
+  registerCourseIntroductionProcedures,
+  renderCourseIntroductionImage,
+} from "./course_introduction";
 import { AuthBlock, userHasPermission } from "blocks/auth";
 import type { UserNotificationSourceConfig } from "blocks/user_notifications";
 import type { WorkforceProvider } from "blocks/workforce";
@@ -14,8 +24,11 @@ import type { TrainingBlockOpts } from "./types";
 import { taskDerivedStateViewQuery } from "./assessment_helpers";
 import { registerTrainingDocumentPublicationConsumer } from "./document_publication_consumer";
 import { registerTrainingStoredProcedures } from "./stored_procedures";
+import { registerCourseLifecycleStoredProcedures } from "./course_lifecycle";
 import { TrainingAdminRoutes } from "./admin/routes";
 import { registerCourseEditorStoredProcedures } from "./admin/course_editor";
+import { registerAssignmentWorkspaceStoredProcedures } from "./admin/assignment_workspace";
+import { registerNotificationStoredProcedures } from "./admin/notifications";
 import {
   TrainingAccessRoutes,
   TrainingEmployeeRoutes,
@@ -37,7 +50,6 @@ import {
   completedTrainingAssignmentWhereSql,
   currentEmployeeId,
   employeeName,
-  expandedCourseItemsViewQuery,
   finalizeNewAssignmentsSql,
   formatDateSql,
   formatDateTimeSql,
@@ -112,7 +124,13 @@ export function trainingNotificationSourceConfig(
           sql`${notification}.href`,
     },
     canUserAccess: ({ userId, recordKey }) =>
-      sql`exists (
+      sql`(${
+        translationReviewAccessSql(
+          args.workforce,
+          sql`case when ${recordKey} like 'translation-review:%' then try_cast(substring(${recordKey} from 20) as bigint) end`,
+          userId,
+        )
+      }) or exists (
         select 1
         from db.training_assignments assignment
         join db.${sql.ref(args.workforce.personTable)} person
@@ -388,6 +406,7 @@ export class TrainingBlock implements Block {
     s.commitTransaction();
   }
 
+  /** Upserts a document's Training settings; the caller owns the transaction. */
   updateTrainingDocumentSettings(
     s: ServerStatementsBase<any>,
     args: {
@@ -414,10 +433,12 @@ export class TrainingBlock implements Block {
       sql`not exists (
         select 1 from db.training_content_documents
         where id = ${args.documentId} and is_active
+          and ${
+        this.opts.content.canReadDocument(args.documentId, sql`current_user`)
+      }
       )`,
       sql.lit`Training settings can be changed only on an active document.`,
     );
-    s.startTransaction();
     s.modify(sql`insert into db.training_document_settings
       (document_id, requires_essay, default_essay_prompt,
        due_within_days, reminder_after_days, reminder_repeat_every_days,
@@ -440,7 +461,6 @@ export class TrainingBlock implements Block {
         reminder_repeat_every_days = excluded.reminder_repeat_every_days,
         overdue_after_days = excluded.overdue_after_days,
         overdue_repeat_every_days = excluded.overdue_repeat_every_days`);
-    s.commitTransaction();
   }
 
   getNotificationTemplateVariables() {
@@ -654,8 +674,7 @@ export class TrainingBlock implements Block {
    * template (nullable — `p_message` then carries the body) and rule id;
    * non-direct rows fan out to every active rule for their `event_code`
    * that has not already published for the assignment. The internal loop only runs inline statements, so the
-   * cursor never suspends into a nested procedure call (see
-   * internal_docs/bugs/ui_server_cursor_loops_over_local_state_fail.md).
+   * cursor never suspends into a nested procedure call.
    */
   private registerNotificationPublicationProcedure() {
     system.storedProcedure({
@@ -862,7 +881,7 @@ export class TrainingBlock implements Block {
     );
     // Explicit materialized candidate table: the loop below suspends into
     // stored procedure calls, which breaks cursors backed by lazy query
-    // CTEs (internal_docs/bugs/ui_server_cursor_loops_over_local_state_fail.md).
+    // CTEs.
     s.defTable("auto_assignment_candidates", {
       fields: [
         { name: "person_id", type: "BigInt", notNull: true },
@@ -921,6 +940,7 @@ export class TrainingBlock implements Block {
               left join db.training_courses course
                 on course.id = r.training_course_id
               where r.is_active
+                and (r.training_course_id is null or course.is_active)
                 and exists (
                   select 1
                   from p_requirement_scope scope
@@ -1046,13 +1066,16 @@ export class TrainingBlock implements Block {
                      case
                        when language_base.training_course_id is null then null
                        else ${
-        activeCourseVersionSql(sql`language_base.training_course_id`)
+        activeCourseVersionSql(
+          sql`language_base.training_course_id`,
+          sql`language_base.assignment_language`,
+        )
       }
                      end as active_course_version_id,
                      case
                        when language_base.training_course_id is null then null
                        else (
-                         select root_section.training_course_version_id
+                         select coalesce(a.training_course_version_id, root_section.training_course_version_id)
                          from db.training_assignments a
                          join db.training_employee_tasks root_task
                            on root_task.training_assignment_id = a.id
@@ -1107,6 +1130,22 @@ export class TrainingBlock implements Block {
               select *
               from assignment_status
               where not has_open_assignment
+                and not exists (
+                  select 1 from db.training_assignments withdrawn
+                  where withdrawn.status = 'waived'
+                    and withdrawn.person_id = assignment_status.person_id
+                    and withdrawn.training_course_id = assignment_status.training_course_id
+                    and withdrawn.training_language = assignment_status.assignment_language
+                    and withdrawn.training_course_version_id = assignment_status.active_course_version_id
+                    and (
+                      assignment_status.last_completed_at is null
+                      or coalesce((
+                        select max(task.waived_at)
+                        from db.training_employee_tasks task
+                        where task.training_assignment_id = withdrawn.id
+                      ), withdrawn.assigned_at) >= assignment_status.last_completed_at
+                    )
+                )
                 and assignment_reason_code in ('missing', 'renewal', 'version_update')
                 and (
                   (
@@ -1119,11 +1158,13 @@ export class TrainingBlock implements Block {
                     and ${
         missingActiveVersionCountSql(
           sql`assignment_status.training_course_id`,
+          sql`assignment_status.assignment_language`,
         )
       } = 0
                     and ${
         assignableCourseItemCountSql(
           sql`assignment_status.training_course_id`,
+          sql`assignment_status.assignment_language`,
         )
       } > 0
                   )
@@ -1192,11 +1233,16 @@ export class TrainingBlock implements Block {
         (s) => {
           s.modify(sql`
                 insert into db.training_assignments
-                  (person_id, training_course_id,
+                  (person_id, training_course_id, training_course_version_id,
                    training_language, training_requirement_id, due_date, reason,
                    assignment_source)
                 values
-                  (candidate.person_id, candidate.training_course_id,
+                  (candidate.person_id, candidate.training_course_id, ${
+            activeCourseVersionSql(
+              sql`candidate.training_course_id`,
+              sql`candidate.assignment_language`,
+            )
+          },
                    candidate.assignment_language,
                    candidate.requirement_id, candidate.due_date,
                    'Automatic ' || candidate.assignment_reason_code || ': ' || candidate.requirement_name,
@@ -1438,12 +1484,13 @@ export class TrainingBlock implements Block {
             sql.ref(personTable(this.opts))
           } person on person.id = a.person_id
             where ${openTrainingAssignmentWhereSql(sql`a`)}
-              and exists (
+              and a.status in ('pending', 'in_progress')
+              and (a.training_course_id is not null or exists (
                 select 1
                 from db.training_employee_tasks actionable_task
                 where actionable_task.training_assignment_id = a.id
                   and actionable_task.status in ('assigned', 'in_progress')
-              )
+              ))
           ),
           candidate_rules as (
             select a.assignment_id,
@@ -1622,6 +1669,14 @@ export class TrainingBlock implements Block {
       "Governed document identities normalized for Training.",
     );
     system.db.view(
+      "training_readable_content_documents",
+      sql`select document.* from db.training_content_documents document
+        where ${
+        this.opts.content.canReadDocument(sql`document.id`, sql`current_user`)
+      }`,
+      "Training resources readable by the current user.",
+    );
+    system.db.view(
       "training_content_language_variants",
       this.opts.content.trainingLanguageVariantsQuery(),
       "Governed document language variants normalized for Training.",
@@ -1635,6 +1690,11 @@ export class TrainingBlock implements Block {
       "training_content_languages",
       this.opts.content.trainingLanguagesQuery(),
       "Immutable governed-content language metadata used by Training.",
+    );
+    system.db.view(
+      "training_task_item_document_versions",
+      this.opts.content.courseSupportingDocumentDisplayVersionsQuery(),
+      "Display revisions for linked course files; Company Files media follows its latest published language version.",
     );
     if (complianceEnabled) {
       system.enum_({
@@ -1908,6 +1968,15 @@ export class TrainingBlock implements Block {
     });
 
     system.db.table("training_course_versions", (table) => {
+      table.enum("language", "controlled_file_language").notNull().default(
+        sql.lit(this.opts.content.opts.defaultLanguage),
+      );
+      table.fk("source_version_id", "training_course_versions").onDelete(
+        "Restrict",
+      );
+      table.string("localized_name", 200);
+      table.string("localized_description", 2000).multiline();
+      table.json("introduction");
       table.fk("training_course_id", "training_courses").notNull().onDelete(
         "Restrict",
       );
@@ -1923,6 +1992,15 @@ export class TrainingBlock implements Block {
       );
       table.timestampUtc("published_at");
       table.timestampUtc("archived_at");
+    });
+
+    system.db.table("training_course_introduction_images", (table) => {
+      table.fk("training_course_version_id", "training_course_versions")
+        .notNull().onDelete("Cascade");
+      table.fk("file_version_id", "file_versions").notNull().onDelete(
+        "Restrict",
+      );
+      table.unique(["training_course_version_id", "file_version_id"]);
     });
 
     system.db.table("training_course_sections", (table) => {
@@ -2038,6 +2116,14 @@ export class TrainingBlock implements Block {
     });
 
     system.db.table("training_assessment_versions", (table) => {
+      table.enum("language", "controlled_file_language").notNull().default(
+        sql.lit(this.opts.content.opts.defaultLanguage),
+      );
+      table.fk("source_version_id", "training_assessment_versions").onDelete(
+        "Restrict",
+      );
+      table.string("localized_name", 200);
+      table.string("localized_description", 2000).multiline();
       table.fk("training_assessment_id", "training_assessments").notNull()
         .onDelete("Restrict");
       table.string("version_label", 80).notNull();
@@ -2370,14 +2456,16 @@ export class TrainingBlock implements Block {
         "workforce_job_profile_id",
         this.opts.workforce.jobProfilesTable,
       ).onDelete("Restrict");
-      table.fk(
-        "employer_workforce_organization_id",
-        this.opts.workforce.organizationsTable,
-      ).onDelete("Restrict");
-      table.fk(
-        "host_workforce_organization_id",
-        this.opts.workforce.organizationsTable,
-      ).onDelete("Restrict");
+      if (this.opts.workforce.organizationsTable) {
+        table.fk(
+          "employer_workforce_organization_id",
+          this.opts.workforce.organizationsTable,
+        ).onDelete("Restrict");
+        table.fk(
+          "host_workforce_organization_id",
+          this.opts.workforce.organizationsTable,
+        ).onDelete("Restrict");
+      }
       if (this.opts.workforce.orgUnitsTable) {
         table.fk("workforce_org_unit_id", this.opts.workforce.orgUnitsTable)
           .onDelete("Restrict");
@@ -2442,6 +2530,8 @@ export class TrainingBlock implements Block {
     });
 
     system.db.table("training_assignments", (table) => {
+      table.fk("training_course_version_id", "training_course_versions")
+        .onDelete("Restrict");
       table.fk("person_id", personTable(this.opts)).notNull().onDelete(
         "Restrict",
       );
@@ -2790,11 +2880,6 @@ export class TrainingBlock implements Block {
       "Assignments pending validation with per-stage missing-sign-off flags.",
     );
     system.db.view(
-      "training_expanded_course_items",
-      expandedCourseItemsViewQuery(),
-      "Recursive expansion of every course's current published version into its items.",
-    );
-    system.db.view(
       "training_task_derived_state",
       taskDerivedStateViewQuery(),
       "Derived assessment state per training task.",
@@ -2803,8 +2888,14 @@ export class TrainingBlock implements Block {
     this.registerContentProcedures();
     this.registerNotificationPublicationProcedure();
     this.registerAutomaticAssignmentProcedures();
+    registerTranslationReviews(this.opts);
     registerTrainingStoredProcedures(this.opts);
+    registerTrainingTranslationProcedures(this.opts);
+    registerCourseIntroductionProcedures(this.opts);
+    registerCourseLifecycleStoredProcedures(this.opts);
     registerCourseEditorStoredProcedures();
+    registerAssignmentWorkspaceStoredProcedures(this.opts);
+    registerNotificationStoredProcedures(this.opts);
     this.registerAutoAssignmentJob();
     if (complianceEnabled) {
       this.registerCompletedCourseCertificationJob();
@@ -2890,6 +2981,13 @@ export class TrainingBlock implements Block {
                 where snapshot.training_employee_task_id = task.id
                   and snapshot.document_version_id = version.id
               )
+              or ${
+          this.opts.content.canReadCourseSupportingMediaVersion({
+            taskId: sql`task.id`,
+            versionId: sql`version.id`,
+            language: sql`assignment.training_language`,
+          })
+        }
             )
             and (
               (p_user_id is not null
@@ -2983,6 +3081,30 @@ export class TrainingBlock implements Block {
   private registerApi(domain: string) {
     const complianceEnabled = trainingFeatureEnabled(this.opts, "compliance");
     const api = system.api({ prefix: "/api", domain });
+    api.get(
+      "/training/translation-reviews/{review_id}/files/{file_version_id}",
+      {
+        procedure: (s) => renderTranslationReviewFile(s, this.opts),
+      },
+    );
+    api.get(
+      "/training/translation-reviews/{review_id}/documents/{version_id}/native-images/{image_file_item_id}/{hash_hex}",
+      {
+        procedure: (s) =>
+          renderTranslationReviewFile(s, this.opts, "nativeImage"),
+      },
+    );
+
+    if (this.opts.content.config.nativeDocuments.opts.renderAuthorizedPdf) {
+      api.get(
+        "/training/translation-reviews/{review_id}/documents/{version_id}/pdf",
+        {
+          procedure: (s) =>
+            renderTranslationReviewFile(s, this.opts, "nativePdf"),
+        },
+      );
+    }
+
     const loadTrainingDocument = (
       s: EndpointStatements,
       accessToken?: Sql,
@@ -3017,6 +3139,22 @@ export class TrainingBlock implements Block {
       accessToken?: Sql,
     ) => {
       loadTrainingDocument(s, accessToken);
+      if (this.opts.content.config.nativeDocuments.opts.renderAuthorizedPdf) {
+        s.if(
+          sql`training_document_content.content_mode = 'native_yolm'`,
+          (s) => {
+            this.opts.content.renderAuthorizedDocumentPdf(
+              s,
+              sql`version_id::bigint`,
+              "training_policy_pdf",
+            );
+            s.setHeader(sql.lit`Content-Type`, sql.lit`application/pdf`);
+            s.setHeader(sql.lit`Cache-Control`, sql.lit`private, no-store`);
+            s.setHeader(sql.lit`X-Content-Type-Options`, sql.lit`nosniff`);
+            s.return(sql`training_policy_pdf`);
+          },
+        );
+      }
       s.if(
         sql`training_document_content.content_mode = 'external_link'
             and training_document_content.external_url is not null`,
@@ -3111,6 +3249,34 @@ export class TrainingBlock implements Block {
       s.setHttpStatus(303);
       s.return();
     };
+    api.get("/training/introduction-images/{requested_file_version_id}", {
+      procedure: (s) => renderCourseIntroductionImage(s, this.opts),
+    });
+    api.get(
+      "/training/assignments/{assignment_id}/introduction-images/{requested_file_version_id}",
+      {
+        procedure: (s) =>
+          renderCourseIntroductionImage(
+            s,
+            this.opts,
+            sql`try_cast(assignment_id as bigint)`,
+          ),
+      },
+    );
+    if (trainingFeatureEnabled(this.opts, "inviteAccess")) {
+      api.get(
+        "/training/invite/{access_token}/assignments/{assignment_id}/introduction-images/{requested_file_version_id}",
+        {
+          procedure: (s) =>
+            renderCourseIntroductionImage(
+              s,
+              this.opts,
+              sql`try_cast(assignment_id as bigint)`,
+              sql`access_token`,
+            ),
+        },
+      );
+    }
     api.get(
       "/training/tasks/{task_id}/documents/{version_id}/file",
       { procedure: (s) => renderTrainingDocumentFile(s) },

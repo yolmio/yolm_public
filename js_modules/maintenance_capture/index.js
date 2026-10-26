@@ -1,5 +1,48 @@
 // Browser-only capture and durable outbox. Business rules live in SQL endpoints.
 const sessions = new Map();
+const spanish = {
+  draftSaveFailed:
+    "Este navegador no pudo guardar el borrador. Mantenga esta página abierta hasta que se reciba el reporte.",
+  preparingDraft: "Preparando borrador…",
+  storageUnavailable:
+    "El almacenamiento de borradores no está disponible. Mantenga esta página abierta hasta que se reciba el reporte.",
+  received: "Recibido por mantenimiento",
+  draftSaved: "Borrador guardado en este teléfono · no enviado",
+  draftNotSaved: "Borrador no guardado en este teléfono",
+  fileLimit:
+    "No se pudo agregar {name}: máximo de 100 MB por archivo, 20 archivos y 300 MB por reporte. Se conservaron los archivos existentes.",
+  signInAgain:
+    "Inicie sesión otra vez y vuelva a abrir este reporte para reintentar.",
+  sendFailed:
+    "No se pudo enviar. Su borrador fue guardado; reintente cuando tenga conexión.",
+  uploadFailed: "La carga falló ({status}). Su borrador fue guardado.",
+  connectionLost:
+    "Se perdió la conexión. Su borrador fue guardado; reintente cuando tenga conexión.",
+  uploadPaused: "Carga pausada. Vuelva a abrir el reporte para reintentar.",
+  addEvidence: "Agregue una descripción, foto, video o archivo.",
+  chooseCondition: "Seleccione la condición del equipo o No estoy seguro.",
+  sending: "Enviando reporte…",
+  uploading: "Cargando {current} de {total}: {name}",
+  confirming: "Confirmando recepción…",
+  receiptNotConfirmed:
+    "La recepción no fue confirmada. Reintente para verificar la entrega.",
+  notConfirmed: "No confirmado · borrador guardado para reintentar",
+  discardNotConfirmed:
+    "El descarte no fue confirmado. Se conservó el borrador.",
+  discardFailed: "Descarte no confirmado · borrador guardado para reintentar",
+  mediaReport: "Reporte con archivos",
+  draftsUnreadable:
+    "No se pudieron leer los borradores locales de este teléfono.",
+};
+function message(language, key, english, values = {}) {
+  let value = language === "es" ? spanish[key] || english : english;
+  for (const [name, replacement] of Object.entries(values)) {
+    value = value.replace(`{${name}}`, replacement);
+  }
+  return value;
+}
+const sessionMessage = (s, key, english, values) =>
+  message(s.language, key, english, values);
 const database = () =>
   new Promise((resolve, reject) => {
     const request = indexedDB.open("yolm-maintenance-outbox", 1);
@@ -29,11 +72,46 @@ async function storage(key, value, remove = false) {
     db.close();
   }
 }
-function fresh() {
+async function draftEntries() {
+  const db = await database();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction("drafts", "readonly");
+      const store = tx.objectStore("drafts");
+      const keys = store.getAllKeys(), values = store.getAll();
+      tx.oncomplete = () =>
+        resolve(keys.result.map((key, i) => [key, values.result[i]]));
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+function draftContext(key) {
+  const [userId, part, id, workId, locationId] = String(key).split(":");
+  if (part === "issue" || part === "work") {
+    return {
+      userId,
+      issueId: part === "issue" ? id : "",
+      workId: part === "work" ? id : "",
+    };
+  }
+  return { userId, equipmentId: part, issueId: id, workId, locationId };
+}
+function followupKey(args, draft) {
+  return `${args.userId}:${args.issueId != null ? "issue" : "work"}:${
+    args.issueId ?? args.workId
+  }:${draft.client_id}`;
+}
+function fresh(args) {
   return {
     client_id: crypto.randomUUID(),
     summary: "",
-    condition: "",
+    condition: args.optionalCondition ? "unknown" : "",
+    equipmentId: args.equipmentId ?? null,
+    locationId: args.locationId ?? null,
+    sendAttempted: false,
     files: [],
     received: null,
   };
@@ -44,6 +122,9 @@ function notify(s) {
     handle: s.handle,
     json: {
       summary: s.draft.summary,
+      equipmentId: s.draft.equipmentId,
+      locationId: s.draft.locationId,
+      contextLocked: !!s.draft.sendAttempted,
       condition: s.draft.condition,
       busy: s.busy,
       ready: true,
@@ -76,39 +157,82 @@ async function persist(s) {
     if (revision === s.revision) s.durable = true;
   } catch {
     s.durable = false;
-    s.error =
-      "This browser could not save the draft. Keep this page open until the report is received.";
+    s.error = sessionMessage(
+      s,
+      "draftSaveFailed",
+      "This browser could not save the draft. Keep this page open until the report is received.",
+    );
   }
 }
 async function initialize(args) {
-  const key = `${args.userId}:${args.equipmentId}:${args.issueId ?? ""}:${
+  const key = `${args.userId}:${args.equipmentId ?? ""}:${args.issueId ?? ""}:${
     args.workId ?? ""
-  }`;
+  }${args.locationId != null ? `:${args.locationId}` : ""}`;
   const s = {
     ...args,
     key,
-    draft: fresh(),
+    draft: fresh(args),
     urls: new Map(),
     busy: false,
     durable: false,
-    status: "Preparing draft…",
+    language: args.language === "es" ? "es" : "en",
+    status: message(args.language, "preparingDraft", "Preparing draft…"),
     error: "",
     disposed: false,
   };
   sessions.set(args.handle, s);
   try {
-    s.draft = await storage(key) || fresh();
+    if (args.issueId != null || args.workId != null) {
+      const requestedDraft = args.draftClientId ||
+        new URL(window.location.href).searchParams.get("draft_client_id");
+      const matches = (await draftEntries()).filter(([entryKey, value]) => {
+        const context = draftContext(entryKey);
+        return context.userId === String(args.userId) &&
+          (args.issueId != null
+            ? context.issueId === String(args.issueId)
+            : !context.issueId && context.workId === String(args.workId)) &&
+          (!requestedDraft || value.client_id === requestedDraft);
+      });
+      // Preserve every legacy draft. A recovery link selects an exact client ID.
+      const selected = matches.find(([, value]) =>
+        !value.received && (value.summary || value.files.length)
+      ) || matches.at(-1);
+      s.draft = selected?.[1] || fresh(args);
+      s.key = followupKey(args, s.draft);
+      if (selected && selected[0] !== s.key) {
+        await storage(s.key, s.draft);
+        await storage(selected[0], undefined, true);
+      }
+    } else {
+      s.draft = await storage(key) || fresh(args);
+    }
+    if (!("equipmentId" in s.draft)) {
+      s.draft.equipmentId = args.equipmentId ?? null;
+    }
+    if (!("locationId" in s.draft)) {
+      s.draft.locationId = args.locationId ?? null;
+    }
+    if (args.issueId != null || args.workId != null) {
+      s.draft.equipmentId = args.equipmentId ?? null;
+      s.draft.locationId = args.locationId ?? null;
+    }
+    if (args.optionalCondition && !s.draft.condition) {
+      s.draft.condition = "unknown";
+    }
     s.durable = true;
   } catch {
-    s.error =
-      "Draft storage is unavailable. Keep this page open until the report is received.";
+    s.error = sessionMessage(
+      s,
+      "storageUnavailable",
+      "Draft storage is unavailable. Keep this page open until the report is received.",
+    );
   }
   for (const f of s.draft.files) s.urls.set(f.id, URL.createObjectURL(f.blob));
   s.status = s.draft.received
-    ? "Received by maintenance"
+    ? sessionMessage(s, "received", "Received by maintenance")
     : s.durable
-    ? "Draft saved on this phone · not sent"
-    : "Draft not saved on this phone";
+    ? sessionMessage(s, "draftSaved", "Draft saved on this phone · not sent")
+    : sessionMessage(s, "draftNotSaved", "Draft not saved on this phone");
   s.beforeUnload = (e) => {
     if (s.busy || (!s.durable && (s.draft.summary || s.draft.files.length))) {
       e.preventDefault();
@@ -127,8 +251,20 @@ async function update(args) {
   if (typeof args.condition === "string") s.draft.condition = args.condition;
   await persist(s);
   s.status = s.durable
-    ? "Draft saved on this phone · not sent"
-    : "Draft not saved on this phone";
+    ? sessionMessage(s, "draftSaved", "Draft saved on this phone · not sent")
+    : sessionMessage(s, "draftNotSaved", "Draft not saved on this phone");
+  notify(s);
+}
+async function setContext(args) {
+  const s = sessions.get(args.handle);
+  if (
+    !s || s.busy || s.draft.received || s.draft.sendAttempted ||
+    s.issueId != null || s.workId != null
+  ) return;
+  s.draft.equipmentId = args.equipmentId ?? null;
+  s.draft.locationId = args.locationId ?? null;
+  s.draft.condition = s.optionalCondition ? "unknown" : "";
+  await persist(s);
   notify(s);
 }
 function pick(args) {
@@ -150,8 +286,12 @@ function pick(args) {
         s.draft.files.reduce((sum, f) => sum + f.blob.size, 0) + file.size >
           300 * 1024 * 1024
       ) {
-        s.error =
-          `Could not add ${file.name}: maximum 100 MB per file, 20 files and 300 MB per report. Existing files are kept.`;
+        s.error = sessionMessage(
+          s,
+          "fileLimit",
+          "Could not add {name}: maximum 100 MB per file, 20 files and 300 MB per report. Existing files are kept.",
+          { name: file.name },
+        );
         continue;
       }
       const f = {
@@ -192,8 +332,16 @@ async function jsonRequest(path, body, s) {
     throw Error(
       value?.error ||
         (response.status === 401
-          ? "Sign in again, then reopen this report to retry."
-          : "Could not send. Your draft is kept; retry when connected."),
+          ? sessionMessage(
+            s,
+            "signInAgain",
+            "Sign in again, then reopen this report to retry.",
+          )
+          : sessionMessage(
+            s,
+            "sendFailed",
+            "Could not send. Your draft is kept; retry when connected.",
+          )),
     );
   }
   return value;
@@ -221,16 +369,35 @@ function upload(s, file, path) {
       else {reject(
           Error(
             result?.error ||
-              `Upload failed (${xhr.status}). Your draft is kept.`,
+              sessionMessage(
+                s,
+                "uploadFailed",
+                "Upload failed ({status}). Your draft is kept.",
+                { status: String(xhr.status) },
+              ),
           ),
         );}
     };
     xhr.onerror = () =>
       reject(
-        Error("Connection lost. Your draft is kept; retry when connected."),
+        Error(
+          sessionMessage(
+            s,
+            "connectionLost",
+            "Connection lost. Your draft is kept; retry when connected.",
+          ),
+        ),
       );
     xhr.onabort = () =>
-      reject(Error("Upload paused. Reopen the report to retry."));
+      reject(
+        Error(
+          sessionMessage(
+            s,
+            "uploadPaused",
+            "Upload paused. Reopen the report to retry.",
+          ),
+        ),
+      );
     xhr.send(file.blob);
   });
 }
@@ -238,30 +405,40 @@ async function send(args) {
   const s = sessions.get(args.handle);
   if (!s || s.busy || s.draft.received) return;
   if (!s.draft.summary.trim() && !s.draft.files.length) {
-    s.error = "Add a description, photo, video or file.";
+    s.error = sessionMessage(
+      s,
+      "addEvidence",
+      "Add a description, photo, video or file.",
+    );
     notify(s);
     return;
   }
   if (
-    !s.issueId && !s.workId &&
+    s.issueId == null && s.workId == null && s.draft.equipmentId != null &&
     !["operational", "degraded", "unavailable", "unknown"].includes(
       s.draft.condition,
     )
   ) {
-    s.error = "Choose the equipment condition, or Not sure.";
+    s.error = sessionMessage(
+      s,
+      "chooseCondition",
+      "Choose the equipment condition, or Not sure.",
+    );
     notify(s);
     return;
   }
   s.busy = true;
+  s.draft.sendAttempted = true;
   s.error = "";
   s.abort = new AbortController();
-  s.status = "Sending report…";
+  s.status = sessionMessage(s, "sending", "Sending report…");
   notify(s);
   await persist(s);
   try {
     const start = await jsonRequest("/api/problem-messages/start", {
       client_id: s.draft.client_id,
-      equipment_id: s.equipmentId,
+      equipment_id: s.draft.equipmentId,
+      location_id: s.draft.locationId,
       issue_id: s.issueId,
       work_id: s.workId,
       summary: s.draft.summary,
@@ -276,7 +453,16 @@ async function send(args) {
           f.uploaded = true;
           continue;
         }
-        s.status = `Uploading ${i + 1} of ${s.draft.files.length}: ${f.name}`;
+        s.status = sessionMessage(
+          s,
+          "uploading",
+          "Uploading {current} of {total}: {name}",
+          {
+            current: String(i + 1),
+            total: String(s.draft.files.length),
+            name: f.name,
+          },
+        );
         s.progress = 0;
         notify(s);
         await upload(
@@ -289,25 +475,35 @@ async function send(args) {
         f.uploaded = true;
         await persist(s);
       }
-      s.status = "Confirming receipt…";
+      s.status = sessionMessage(s, "confirming", "Confirming receipt…");
       notify(s);
       receipt = await jsonRequest(`/api/problem-messages/${start.id}/send`, {
         files: s.draft.files.map((f) => f.id),
       }, s);
     }
     if (!receipt.received) {
-      throw Error("Receipt was not confirmed. Retry to check delivery.");
+      throw Error(
+        sessionMessage(
+          s,
+          "receiptNotConfirmed",
+          "Receipt was not confirmed. Retry to check delivery.",
+        ),
+      );
     }
     s.draft.received = receipt;
     s.draft.files = [];
     await persist(s);
-    s.status = "Received by maintenance";
+    s.status = sessionMessage(s, "received", "Received by maintenance");
     s.progress = 100;
     for (const url of s.urls.values()) URL.revokeObjectURL(url);
     s.urls.clear();
   } catch (e) {
     s.error = e.message;
-    s.status = "Not confirmed · draft kept for retry";
+    s.status = sessionMessage(
+      s,
+      "notConfirmed",
+      "Not confirmed · draft kept for retry",
+    );
   } finally {
     s.busy = false;
     notify(s);
@@ -316,13 +512,67 @@ async function send(args) {
 async function discard(args) {
   const s = sessions.get(args.handle);
   if (!s || s.busy) return;
-  for (const url of s.urls.values()) URL.revokeObjectURL(url);
-  s.urls.clear();
-  s.draft = fresh();
+  s.busy = true;
   s.error = "";
-  await persist(s);
-  s.status = "Draft saved on this phone · not sent";
+  s.abort = new AbortController();
   notify(s);
+  try {
+    if (s.draft.sendAttempted && !s.draft.received) {
+      const result = await jsonRequest(
+        `/api/problem-messages/${s.draft.client_id}/discard`,
+        {},
+        s,
+      );
+      if (result.received) {
+        s.draft.received = result;
+        s.draft.files = [];
+        await persist(s);
+        for (const url of s.urls.values()) URL.revokeObjectURL(url);
+        s.urls.clear();
+        s.status = sessionMessage(s, "received", "Received by maintenance");
+        return;
+      }
+      if (!result.discarded) {
+        throw Error(
+          sessionMessage(
+            s,
+            "discardNotConfirmed",
+            "Discard was not confirmed. Your draft is kept.",
+          ),
+        );
+      }
+    }
+    const oldKey = s.key;
+    const oldClientId = s.draft.client_id;
+    for (const url of s.urls.values()) URL.revokeObjectURL(url);
+    s.urls.clear();
+    s.draft = fresh(s);
+    if (s.issueId != null || s.workId != null) s.key = followupKey(s, s.draft);
+    await persist(s);
+    if (s.durable && oldKey !== s.key) {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("draft_client_id") === oldClientId) {
+        url.searchParams.set("draft_client_id", s.draft.client_id);
+        window.history.replaceState(window.history.state, "", url);
+      }
+      await storage(oldKey, undefined, true);
+    }
+    s.status = sessionMessage(
+      s,
+      "draftSaved",
+      "Draft saved on this phone · not sent",
+    );
+  } catch (e) {
+    s.error = e.message;
+    s.status = sessionMessage(
+      s,
+      "discardFailed",
+      "Discard not confirmed · draft kept for retry",
+    );
+  } finally {
+    s.busy = false;
+    notify(s);
+  }
 }
 function cleanup(args) {
   const s = sessions.get(args.handle);
@@ -336,37 +586,31 @@ function cleanup(args) {
 }
 async function listDrafts(args) {
   try {
-    const db = await database();
-    const drafts = await new Promise((resolve, reject) => {
-      const tx = db.transaction("drafts", "readonly");
-      const store = tx.objectStore("drafts");
-      const keys = store.getAllKeys(), values = store.getAll();
-      tx.oncomplete = () =>
-        resolve(keys.result.flatMap((key, index) => {
-          const value = values.result[index];
-          if (
-            !String(key).startsWith(`${args.userId}:`) || value.received ||
-            (!value.summary && !value.files.length)
-          ) return [];
-          const [, equipmentId, issueId, workId] = String(key).split(":");
-          return [{
-            equipmentId,
-            issueId,
-            workId,
-            summary: value.summary || "Media report",
-            fileCount: value.files.length,
-          }];
-        }));
-      tx.onerror = () => reject(tx.error);
+    const drafts = (await draftEntries()).flatMap(([key, value]) => {
+      const context = draftContext(key);
+      if (
+        context.userId !== String(args.userId) || value.received ||
+        (!value.summary && !value.files.length)
+      ) return [];
+      return [{
+        ...context,
+        clientId: value.client_id,
+        summary: value.summary ||
+          message(args.language, "mediaReport", "Media report"),
+        fileCount: value.files.length,
+      }];
     });
-    db.close();
     emit("draftsListed", { handle: args.handle, json: { drafts } });
   } catch {
     emit("draftsListed", {
       handle: args.handle,
       json: {
         drafts: [],
-        error: "Phone-local drafts could not be read in this browser.",
+        error: message(
+          args.language,
+          "draftsUnreadable",
+          "Phone-local drafts could not be read in this browser.",
+        ),
       },
     });
   }
@@ -374,6 +618,7 @@ async function listDrafts(args) {
 registerModule({
   initialize,
   update,
+  setContext,
   pick,
   remove,
   send,

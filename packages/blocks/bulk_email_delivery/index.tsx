@@ -25,12 +25,20 @@ const MAX_BULK_EMAIL_RECIPIENTS = 500;
 const MAX_ATTACHMENTS_PER_DELIVERY = 10;
 const MAX_REQUEST_BYTES = 10_000_000;
 const UNSUBSCRIBE_TOKEN_HEX_LENGTH = 64;
+// One unquoted mailbox per tracked recipient. Display names and address lists
+// cannot be correlated to the provider's individual recipient events.
+// Postmark's mailbox validator excludes '?', even though RFC 5322 permits it:
+// https://postmarkapp.com/support/article/what-regex-does-postmark-use
+const RECIPIENT_EMAIL_PATTERN =
+  "^[a-zA-Z0-9!#$%&'*+/=^_`{|}~-]+(?:\\.[a-zA-Z0-9!#$%&'*+/=^_`{|}~-]+)*@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$";
+const INVALID_RECIPIENT_EMAIL_ERROR =
+  "Invalid recipient email format; use one plain email address";
 const HTML_UNSUBSCRIBE_FOOTER =
   '<div style="margin-top:32px;padding-top:16px;border-top:1px solid #ddd;font-size:12px;line-height:1.5;color:#666;">You are receiving this message because you are subscribed to bulk emails. <a href="{{unsubscribe_url}}">Unsubscribe</a></div>';
 const TEXT_UNSUBSCRIBE_FOOTER =
   "\n\nYou are receiving this message because you are subscribed to bulk emails. Unsubscribe: {{{unsubscribe_url}}}";
 
-function withHtmlUnsubscribeFooter(html: AnyExpr) {
+export function withHtmlUnsubscribeFooter(html: AnyExpr) {
   return sql`case when ${html} is null then null
     when regex.is_match(
       ${html},
@@ -50,7 +58,7 @@ function withHtmlUnsubscribeFooter(html: AnyExpr) {
     else ${html} || ${sql.lit(HTML_UNSUBSCRIBE_FOOTER)} end`;
 }
 
-function withTextUnsubscribeFooter(text: AnyExpr) {
+export function withTextUnsubscribeFooter(text: AnyExpr) {
   return sql`case when ${text} is null then null
     else ${text} || ${sql.lit(TEXT_UNSUBSCRIBE_FOOTER)} end`;
 }
@@ -136,8 +144,8 @@ export interface BulkEmailDeliveryBlockOptions {
   /** Used by isolated examples and tests in place of the platform operation. */
   platformBulkMockProcedure?: EndpointStatementsOrFn;
   /**
-   * Retain open/click aggregates and accept those canonical platform events.
-   * Disable for delivery-only workflows that do not use engagement analytics.
+   * Retain open/click aggregates. When disabled, valid canonical engagement
+   * events are acknowledged without storing them or invoking source callbacks.
    */
   engagementTracking?: boolean;
 }
@@ -197,7 +205,7 @@ export class BulkEmailDeliverySource {
 }
 
 /**
- * Immutable, provider-neutral bulk delivery through the platform
+ * Frozen, provider-neutral bulk delivery through the platform
  * `email.send_bulk` operation. It deliberately owns neither templates,
  * marketing preferences, provider credentials, nor provider webhook setup.
  */
@@ -275,7 +283,6 @@ export class BulkEmailDeliveryBlock implements Block {
           select 1 from ${sql.ref("recipients")}
           where source_recipient_key is null
              or length(source_recipient_key) > 200
-             or email is null or email = ''
              or json_typeof(variables) != 'object'
              or exists (select 1 from json.object_each(variables)
                         where key in (
@@ -290,7 +297,7 @@ export class BulkEmailDeliveryBlock implements Block {
           select source_recipient_key from ${sql.ref("recipients")}
           group by source_recipient_key having count(*) > 1
         ) or exists (
-          select email from ${sql.ref("recipients")}
+          select email from ${sql.ref("recipients")} where email is not null
           group by email having count(*) > 1
         )`,
           sql.lit`Bulk delivery contains duplicate recipients`,
@@ -317,12 +324,16 @@ export class BulkEmailDeliveryBlock implements Block {
             unsubscribe_token, status, error
           ) select ${sql.ref("p_delivery_id")}, source_recipient_key,
                    email, variables, bytes.to_hex(crypto.random_bytes(32)),
-                   case when exists (
+                   case when email is null then 'excluded'::enums.bulk_email_recipient_status
+                   when exists (
                      select 1 from bulk_email_suppressions suppression
                      where suppression.email = ${sql.ref("recipients")}.email
                    ) then 'excluded'::enums.bulk_email_recipient_status
                    else 'pending'::enums.bulk_email_recipient_status end,
-                   case when exists (
+                   case when email is null then ${
+              sql.lit(INVALID_RECIPIENT_EMAIL_ERROR)
+            }
+                   when exists (
                      select 1 from bulk_email_suppressions suppression
                      where suppression.email = ${sql.ref("recipients")}.email
                    ) then 'Excluded by system-wide bulk-email suppression'
@@ -369,6 +380,12 @@ export class BulkEmailDeliveryBlock implements Block {
         });
       },
     });
+  }
+
+  /** Shared marketing opt-out check, including connected-account mail merges. */
+  isSuppressed(email: AnyExpr) {
+    return sql`exists(select 1 from bulk_email_suppressions suppression
+      where suppression.email = lower(trim(${email})))`;
   }
 
   private unsubscribeUrl(token: AnyExpr, oneClick = false) {
@@ -483,16 +500,10 @@ export class BulkEmailDeliveryBlock implements Block {
   }
 
   private initializePlatformEventEndpoint() {
-    const unsupportedEventType = this.opts.engagementTracking === false
-      ? sql`bulk_event_type not in (
-          'delivered', 'bounce', 'complaint', 'unsubscribe'
-        )`
-      : sql`bulk_event_type not in (
-          'delivered', 'open', 'click', 'bounce', 'complaint', 'unsubscribe'
-        )`;
-    const engagementPayloadValidation = this.opts.engagementTracking === false
-      ? sql``
-      : sql`
+    const unsupportedEventType = sql`bulk_event_type not in (
+      'delivered', 'open', 'click', 'bounce', 'complaint', 'unsubscribe'
+    )`;
+    const engagementPayloadValidation = sql`
           when length(coalesce(bulk_platform_event->>'url', '')) > 4000
             then 'url_too_long'
           when length(coalesce(
@@ -675,7 +686,7 @@ export class BulkEmailDeliveryBlock implements Block {
             when bulk_event_recipient.id is null then 'recipient_not_found'
             when bulk_event_recipient.delivery_id + 1 != bulk_event_campaign_id
               then 'delivery_mismatch'
-            when lower(trim(bulk_event_recipient.email)) != bulk_event_email
+            when lower(trim(bulk_event_recipient.email)) is distinct from bulk_event_email
               then 'recipient_email_mismatch'
             else null end`,
         );
@@ -706,6 +717,16 @@ export class BulkEmailDeliveryBlock implements Block {
             );
           },
         );
+        if (this.opts.engagementTracking === false) {
+          // Tracking is a retention policy, not a restriction on valid events.
+          // Validate and correlate first, then acknowledge without any writes.
+          s.if(sql`bulk_event_type in ('open', 'click')`, (s) => {
+            s.return(sql`json_build_object(
+              'ok', true, 'ignored', true,
+              'reason', 'engagement_tracking_disabled'
+            )`);
+          });
+        }
         s.defScalar(
           "bulk_event_terminal_bounce",
           sql`coalesce(
@@ -827,7 +848,9 @@ export class BulkEmailDeliveryBlock implements Block {
         "Restrict",
       );
       table.string("source_recipient_key", 200).notNull();
-      table.email("email").notNull();
+      // Missing addresses are retained as excluded recipients, including more
+      // than one missing address in the same delivery's unique email key.
+      table.email("email");
       table.json("variables").notNull().default(sql`json_build_object()`);
       table.enum("status", "bulk_email_recipient_status").notNull().default(
         sql.lit`pending`,
@@ -924,7 +947,7 @@ export class BulkEmailDeliveryBlock implements Block {
       s.modify(
         sql`insert into ${sql.ref(candidates)} select
               cast(candidate.source_recipient_key as string) as source_recipient_key,
-              lower(trim(candidate.email)) as email,
+              nullif(lower(trim(candidate.email)), '') as email,
               coalesce(candidate.variables, json_build_object()) as variables
             from (${opts.recipientsQuery}) candidate
             limit ${MAX_BULK_EMAIL_RECIPIENTS + 1}`,
@@ -1399,7 +1422,7 @@ export class BulkEmailDeliveryBlock implements Block {
       "bulk_delivery_snapshot",
       sql`select id, source, source_record_key, from_email, reply_to_email,
                  subject_template, html_template, text_template,
-                 submission_attempt_count, request_hash
+                 submission_attempt_count, request_hash, provider_bulk_id
           from bulk_email_deliveries
           where id = bulk_claimed_delivery_id`,
     );
@@ -1433,10 +1456,6 @@ export class BulkEmailDeliveryBlock implements Block {
             and bulk_delivery_snapshot.request_hash is null`);
         this.validateStoredDeliveryBounds(s);
         this.defineRequest(s);
-        s.throwErrorIf(
-          sql`octet_length(string.to_utf8(cast(bulk_request as string))) > ${MAX_REQUEST_BYTES}`,
-          sql.lit`Bulk email request exceeds the platform size limit`,
-        );
         s.setScalar(
           "bulk_request_hash",
           sql`bytes.to_hex(crypto.sha256(cast(bulk_request as string)))`,
@@ -1450,6 +1469,13 @@ export class BulkEmailDeliveryBlock implements Block {
         s.throwErrorIf(
           sql`bulk_frozen_owner_id is null`,
           sql.lit`Frozen bulk request changed between attempts`,
+        );
+        this.filterRecipientAddresses(s);
+        // Bound the payload actually dispatched, after filtering. Frozen
+        // retries still have to match their original hash before this point.
+        s.throwErrorIf(
+          sql`octet_length(string.to_utf8(cast(bulk_request as string))) > ${MAX_REQUEST_BYTES}`,
+          sql.lit`Bulk email request exceeds the platform size limit`,
         );
         s.commitTransaction();
         s.setScalar("bulk_request_frozen", sql`true`);
@@ -1592,6 +1618,85 @@ export class BulkEmailDeliveryBlock implements Block {
         (bulk_result->>'submitted_at')::timestamp,
         now()
       )`,
+    });
+  }
+
+  private filterRecipientAddresses<T extends IServerBaseStatements>(s: T) {
+    s.defTable(
+      "bulk_invalid_recipients",
+      sql`select id
+      from bulk_email_delivery_recipients recipient
+      where delivery_id = bulk_delivery_snapshot.id and status = 'pending'
+        and not coalesce(
+          length(recipient.email) <= 254
+          and length(split_part(recipient.email, '@', 1)) <= 64
+          and regex.is_match(recipient.email, ${
+        sql.lit(RECIPIENT_EMAIL_PATTERN)
+      }),
+          false
+        )`,
+    );
+    s.if(sql`exists (select 1 from bulk_invalid_recipients)`, (s) => {
+      // The original request has already passed the frozen-hash guard. Only
+      // prepared retries (created exclusively by explicit not_sent responses)
+      // may refreeze after a validator upgrade. Never refreeze uncertain work
+      // or a request contradicted by recipient submission evidence.
+      s.throwErrorIf(
+        sql`(bulk_delivery_snapshot.request_hash is not null
+          and bulk_delivery_snapshot.submission_attempt_count not between 2 and ${MAX_SUBMISSION_ATTEMPTS})
+          or bulk_delivery_snapshot.provider_bulk_id is not null
+          or exists (select 1 from bulk_email_delivery_recipients recipient
+            where delivery_id = bulk_delivery_snapshot.id
+              and (status not in ('pending', 'excluded')
+                or ${this.submissionEvidence(sql.ref("recipient"))}))`,
+        sql
+          .lit`Cannot filter a frozen bulk request without confirmed non-dispatch`,
+      );
+      s.modify(sql`update bulk_email_delivery_recipients
+        set status = 'excluded', error = ${
+        sql.lit(INVALID_RECIPIENT_EMAIL_ERROR)
+      }
+        where delivery_id = bulk_delivery_snapshot.id and status = 'pending'
+          and id in (select id from bulk_invalid_recipients)`);
+      s.setScalar(
+        "bulk_recipients_json",
+        sql`(select
+        coalesce(json_array_agg(item.value order by item.index), json_build_array())
+        from json.array_each(bulk_recipients_json) item
+        where (item.value->>'recipientKey')::bigint - 1
+          not in (select id from bulk_invalid_recipients))`,
+      );
+      s.setScalar(
+        "bulk_request",
+        sql`bulk_request || json_build_object(
+        'recipients', bulk_recipients_json)`,
+      );
+      s.defScalar(
+        "bulk_validated_request_hash",
+        sql`bytes.to_hex(crypto.sha256(cast(bulk_request as string)))`,
+      );
+      s.modify(sql`update bulk_email_deliveries
+        set request_hash = bulk_validated_request_hash
+        where id = bulk_delivery_snapshot.id and status = 'submitting'
+          and submission_attempt_id = bulk_attempt_id
+          and request_hash = bulk_request_hash
+        returning id into bulk_frozen_owner_id`);
+      s.throwErrorIf(
+        sql`bulk_frozen_owner_id is null`,
+        sql.lit`Frozen bulk request changed during recipient validation`,
+      );
+      s.if(sql`bulk_delivery_snapshot.request_hash is not null`, (s) => {
+        this.logAttempt(
+          s,
+          "recipient_validation_refreeze",
+          sql`json_build_object(
+          'previous_request_hash', bulk_request_hash,
+          'validated_request_hash', bulk_validated_request_hash,
+          'excluded_count', (select count(*) from bulk_invalid_recipients)
+        )::string`,
+        );
+      });
+      s.setScalar("bulk_request_hash", sql`bulk_validated_request_hash`);
     });
   }
 
@@ -1809,7 +1914,7 @@ export class BulkEmailDeliveryBlock implements Block {
       'source_record_key', bulk_delivery_snapshot.source_record_key,
       'attempt_id', bulk_attempt_id,
       'attempt_count', bulk_delivery_snapshot.submission_attempt_count,
-      'request_hash', coalesce(bulk_delivery_snapshot.request_hash, bulk_request_hash),
+      'request_hash', coalesce(bulk_request_hash, bulk_delivery_snapshot.request_hash),
       'submission_key', 'bulk-email-delivery:' || bulk_delivery_snapshot.id::string,
       'elapsed_seconds', date.diff(second, bulk_attempt_started_at, now()),
       'detail', left(cast(${detail} as string), 6000)

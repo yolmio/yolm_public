@@ -9,23 +9,20 @@ tags:
 
 # Postmark Campaign Provider
 
-`PostmarkProvider` and `PostmarkIntegrationCard` are account-provider adapters
-that implement `EmailCampaignProvider` for system-owned campaign workflows.
-They are separate from platform-managed `BulkEmailDeliveryBlock`.
+`PostmarkProvider` and `PostmarkIntegrationCard` implement
+`EmailCampaignProvider` for system-owned campaign workflows, with individual
+sends plus the legacy bounce checks. See the
+[Gmail campaign provider](./gmail_campaign.md) for how this boundary relates to
+platform bulk delivery.
 
 ```typescript
 import type { EmailCampaignProvider } from "blocks/email_campaign_provider";
 import { PostmarkIntegrationCard, PostmarkProvider } from "blocks/postmark_campaign";
 
-const postmarkProvider = new PostmarkProvider();
-const providers: EmailCampaignProvider[] = [postmarkProvider];
-const providerIntegrationComponents = [
-  <PostmarkIntegrationCard provider={postmarkProvider} />,
-];
+const providers: EmailCampaignProvider[] = [new PostmarkProvider()];
+const providerIntegrationComponents = [<PostmarkIntegrationCard />];
 // Pass both constants to the system-owned campaign implementation.
 ```
 
 The system-owned campaign owns the account, campaign, recipient, and response
-tables. The provider implements individual sends plus the legacy bounce checks.
-New platform bulk sends do not configure Postmark accounts or webhooks in a
-system; the platform owns those concerns globally.
+tables.

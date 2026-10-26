@@ -104,6 +104,53 @@ export function registerLexicalRichTextFunctions(
   registrar: ScalarFunctionRegistrar,
 ) {
   registrar.scalarFunction({
+    name: "lexical_video_html",
+    parameters: [{ name: "node", type: "Json" }],
+    returnType: "String",
+    procedure: (s) => {
+      s.defScalar("raw_url", sql`coalesce(input.node->>'url', '')`);
+      s.if(
+        sql`not (
+        regex.is_match(raw_url, '^https://www[.]youtube[.]com/watch[?]v=[a-zA-Z0-9_-]{11}$')
+        or regex.is_match(raw_url, '^https://vimeo[.]com/[0-9]+(/[a-zA-Z0-9]+)?$')
+        or regex.is_match(raw_url, '(?i)^https://[^/@:?#]+(/[^?#]*)?[.](mp4|webm)([?][^#]*)?(#.*)?$')
+      )`,
+        (s) => s.return(sql.lit``),
+      );
+      s.defScalar("url", sql`string.html_escape(raw_url)`);
+      s.defScalar(
+        "width",
+        sql`least(652.8, greatest(80, coalesce(try_cast(input.node->>'width' as double), 652.8)))`,
+      );
+      s.defScalar(
+        "align",
+        sql`case when input.node->>'align' in ('left', 'center', 'right') then input.node->>'align' else 'left' end`,
+      );
+      s.defScalar(
+        "thumbnail",
+        sql`coalesce(input.node->'thumbnail'->>'src', '')`,
+      );
+      s.defScalar("image", sql.lit``);
+      s.if(
+        sql`regex.is_match(thumbnail, '^/api/files/versions/[0-9]+/content$')`,
+        (s) => {
+          s.setScalar(
+            "image",
+            sql`'<img alt="Video thumbnail" src="' || string.html_escape(thumbnail) || '" style="display:block;width:100%;height:auto;aspect-ratio:16/9;object-fit:cover" />'`,
+          );
+        },
+      );
+      s.return(
+        sql`'<figure class="lexical-image lexical-video" style="width:100%;margin:0 0 6pt;line-height:1.56;text-align:' || align || '">'
+        || '<a target="_blank" rel="noopener noreferrer" aria-label="Watch video" href="' || url || '" style="display:inline-block;position:relative;vertical-align:top;line-height:0;max-width:100%;width:' || cast(width as string) || 'px;aspect-ratio:16/9;background:#e8edf2">'
+        || image
+        || '<span aria-hidden="true" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:50.667px;max-width:60%;max-height:60%;border-radius:6.667px;background:#18212b;display:grid;place-items:center"><span style="width:20px;height:24px;max-width:60%;max-height:60%;background:white;clip-path:polygon(0 0,0 100%,100% 50%)"></span></span></a><br>'
+        || '<a target="_blank" rel="noopener noreferrer" href="' || url || '">Watch video: ' || url || '</a></figure>'`,
+      );
+    },
+  });
+
+  registrar.scalarFunction({
     name: "lexical_rich_text_to_html",
     description: "Convert Lexical rich text to HTML",
     parameters: [{ name: "rich_text", type: "Json" }],
@@ -285,7 +332,8 @@ export function registerLexicalRichTextFunctions(
 
   // Convert markdown to Lexical JSON format
   // Supports: # headings, **bold**, *italic*, hard line breaks, standalone
-  // images, and paragraphs separated by \n\n.
+  // images, flat bullet/numbered lists, block quotes, pipe tables, and
+  // paragraphs separated by \n\n.
   registrar.scalarFunction({
     name: "lexical_from_markdown",
     description: "Convert markdown text to Lexical JSON format",
@@ -369,6 +417,172 @@ export function registerLexicalRichTextFunctions(
                   'contentType', null
                 )
               )`,
+            );
+            s.continue();
+          },
+        );
+
+        // Lists, block quotes, and pipe tables occupy every line of a block.
+        s.defTable(
+          "block_lines",
+          sql`select value as line, ordinal
+            from string.split(trimmed, e'\n') order by ordinal`,
+        );
+        s.defScalar(
+          "list_type",
+          sql`case
+            when not exists (
+              select 1 from block_lines
+              where not regex.is_match(line, '^\\s*[-*+]\\s+')
+            ) then 'bullet'
+            when not exists (
+              select 1 from block_lines
+              where not regex.is_match(line, '^\\s*[0-9]+[.)]\\s+')
+            ) then 'number'
+          end`,
+        );
+        s.if(sql`list_type is not null`, (s) => {
+          s.setScalar(
+            "children_array",
+            sql`children_array || json_build_array(json_build_object(
+              'type', 'list',
+              'version', 1,
+              'listType', list_type,
+              'start', case when list_type = 'number' then coalesce(try_cast(
+                regex.capture(trimmed, '^\\s*([0-9]+)', 1) as int), 1) else 1 end,
+              'tag', case when list_type = 'number' then 'ol' else 'ul' end,
+              'direction', 'ltr',
+              'format', '',
+              'indent', 0,
+              'children', (
+                select json_array_agg(json_build_object(
+                  'type', 'listitem',
+                  'version', 1,
+                  'value', list_line.ordinal - (
+                    select min(ordinal) from block_lines
+                  ) + 1,
+                  'direction', 'ltr',
+                  'format', '',
+                  'indent', 0,
+                  'children', fn.lexical_parse_inline_markdown(
+                    'paragraph',
+                    null,
+                    regexp_replace(
+                      list_line.line,
+                      '^\\s*([-*+]|[0-9]+[.)])\\s+',
+                      ''
+                    )
+                  ) -> 0 -> 'children'
+                ) order by list_line.ordinal)
+                from block_lines list_line
+              )
+            ))`,
+          );
+          s.continue();
+        });
+        s.if(
+          sql`not exists (
+            select 1 from block_lines where not regex.is_match(line, '^\\s*>')
+          )`,
+          (s) => {
+            s.defScalar(
+              "quote_text",
+              sql`(
+                select string_agg(
+                  regexp_replace(line, '^\\s*>\\s?', ''), e'\n'
+                  order by ordinal
+                )
+                from block_lines
+              )`,
+            );
+            s.setScalar(
+              "children_array",
+              sql`children_array || json_build_array(json_build_object(
+                'type', 'quote',
+                'version', 1,
+                'direction', 'ltr',
+                'format', '',
+                'indent', 0,
+                'children', fn.lexical_parse_inline_markdown(
+                  'paragraph', null, quote_text
+                ) -> 0 -> 'children'
+              ))`,
+            );
+            s.continue();
+          },
+        );
+        s.defScalar(
+          "table_separator_ordinal",
+          sql`(
+            select ordinal from block_lines
+            order by ordinal limit 1 offset 1
+          )`,
+        );
+        s.if(
+          sql`table_separator_ordinal is not null
+            and not exists (
+              select 1 from block_lines where not regex.is_match(line, '^\\s*[|]')
+            )
+            and regex.is_match(
+              (select line from block_lines
+                where ordinal = table_separator_ordinal),
+              '^\\s*[|]?(\\s*:?-+:?\\s*[|])+\\s*(:?-+:?\\s*)?$'
+            )`,
+          (s) => {
+            s.defScalar("table_rows", sql`'[]'::json`);
+            s.forEachTable("block_lines", "table_line", (s) => {
+              s.continueIf(sql`table_line.ordinal = table_separator_ordinal`);
+              s.defScalar(
+                "table_cells",
+                sql`(
+                  select json_array_agg(json_build_object(
+                    'type', 'tablecell',
+                    'version', 1,
+                    'direction', 'ltr',
+                    'format', '',
+                    'indent', 0,
+                    'headerState', case
+                      when table_line.ordinal < table_separator_ordinal
+                        then 1 else 0 end,
+                    'colSpan', 1,
+                    'rowSpan', 1,
+                    'backgroundColor', null,
+                    'children', fn.lexical_parse_inline_markdown(
+                      'paragraph', null, trim(cell.value)
+                    )
+                  ) order by cell.ordinal)
+                  from string.split(
+                    regexp_replace(
+                      regexp_replace(trim(table_line.line), '^[|]', ''),
+                      '[|]$',
+                      ''
+                    ),
+                    '|'
+                  ) cell
+                )`,
+              );
+              s.setScalar(
+                "table_rows",
+                sql`table_rows || json_build_array(json_build_object(
+                  'type', 'tablerow',
+                  'version', 1,
+                  'direction', 'ltr',
+                  'format', '',
+                  'indent', 0,
+                  'children', coalesce(table_cells, '[]'::json)
+                ))`,
+              );
+            });
+            s.setScalar(
+              "children_array",
+              sql`children_array || json_build_array(json_build_object(
+                'type', 'table',
+                'version', 1,
+                'direction', 'ltr',
+                'format', '',
+                'indent', 0,
+                'children', table_rows
+              ))`,
             );
             s.continue();
           },
@@ -696,6 +910,9 @@ export function registerLexicalRichTextFunctions(
         );
       });
 
+      s.if(sql`node_type = 'video'`, (s) => {
+        s.return(sql`fn.lexical_video_html(input.node)`);
+      });
       s.if(sql`node_type = 'image'`, (s) => {
         s.defScalar(
           "raw_src",
@@ -759,13 +976,16 @@ export function registerLexicalRichTextFunctions(
 
       // Paragraph - children are inline nodes (text, link, etc.)
       s.if(sql`node_type = 'paragraph'`, (s) => {
+        // An empty paragraph keeps one line of height, as in the editor;
+        // otherwise blank lines typed beside a floated image collapse and
+        // the following text wraps next to it.
         s.defScalar(
           "children_html",
-          sql`fn.lexical_process_inline_nodes(
+          sql`coalesce(nullif(fn.lexical_process_inline_nodes(
             children_json,
             input.image_src_prefix,
             input.image_src_replacement
-          )`,
+          ), ''), '<br>')`,
         );
         s.if(sql`style_attr != ''`, (s) => {
           s.return(
@@ -1186,6 +1406,9 @@ export function registerLexicalRichTextFunctions(
         );
       });
 
+      s.if(sql`node_type = 'video'`, (s) => {
+        s.return(sql`fn.lexical_video_html(input.node)`);
+      });
       s.if(sql`node_type = 'image'`, (s) => {
         s.defScalar(
           "raw_src",
@@ -1495,6 +1718,11 @@ export function registerLexicalRichTextFunctions(
       s.defScalar("node_type", sql`input.node ->> 'type'`);
       s.defScalar("children", sql`input.node -> 'children'`);
 
+      s.if(sql`node_type = 'video'`, (s) => {
+        s.return(
+          sql`'[Watch video](' || coalesce(input.node->>'url', '') || ')'`,
+        );
+      });
       s.if(sql`node_type = 'image'`, (s: BasicStatements) => {
         s.defScalar(
           "image_alt",
@@ -1541,6 +1769,51 @@ export function registerLexicalRichTextFunctions(
 
       s.if(sql`node_type = 'list'`, (s: BasicStatements) => {
         s.return(sql`fn.lexical_list_to_markdown(input.node)`);
+      });
+
+      s.if(sql`node_type = 'table'`, (s: BasicStatements) => {
+        s.defScalar("table_md", sql.lit``);
+        s.defTable(
+          "md_table_rows",
+          sql`select value as node, index as idx from json.array_each(children)`,
+        );
+        s.forEachTable("md_table_rows", "tr", (s: BasicStatements) => {
+          s.defScalar("row_md", sql.lit`|`);
+          s.defScalar("row_cell_count", sql`0`);
+          s.defTable(
+            "md_table_cells",
+            sql`select value as node from json.array_each(tr.node -> 'children')`,
+          );
+          s.forEachTable("md_table_cells", "td", (s: BasicStatements) => {
+            s.defScalar(
+              "cell_md",
+              sql`coalesce((
+                select string_agg(
+                  fn.lexical_inlines_to_markdown(value -> 'children'), '<br>'
+                )
+                from json.array_each(td.node -> 'children')
+              ), '')`,
+            );
+            s.setScalar(
+              "row_md",
+              sql`row_md || ' ' || replace(replace(cell_md, e'\n', ' '),
+                '|', chr(92) || '|') || ' |'`,
+            );
+            s.setScalar("row_cell_count", sql`row_cell_count + 1`);
+          });
+          s.setScalar(
+            "table_md",
+            sql`case when table_md = '' then row_md
+              else table_md || e'\n' || row_md end`,
+          );
+          s.if(sql`tr.idx = 0`, (s: BasicStatements) => {
+            s.setScalar(
+              "table_md",
+              sql`table_md || e'\n|' || repeat(' --- |', row_cell_count)`,
+            );
+          });
+        });
+        s.return(sql`table_md`);
       });
 
       s.if(sql`node_type = 'code'`, (s: BasicStatements) => {
@@ -1953,6 +2226,9 @@ export function registerLexicalRichTextFunctions(
         sql`case when indent > 0 then 'margin-left: ' || (indent * 40) || 'px; ' else '' end`,
       );
 
+      s.if(sql`node_type = 'video'`, (s) => {
+        s.return(sql`fn.lexical_video_html(input.node)`);
+      });
       s.if(sql`node_type = 'image'`, (s) => {
         s.defScalar(
           "src",
@@ -2256,6 +2532,9 @@ export function registerLexicalRichTextFunctions(
         );
       });
 
+      s.if(sql`node_type = 'video'`, (s) => {
+        s.return(sql`fn.lexical_video_html(input.node)`);
+      });
       s.if(sql`node_type = 'image'`, (s) => {
         s.defScalar(
           "src",
@@ -2755,6 +3034,41 @@ export function registerLexicalRichTextFunctions(
         );
       });
 
+      s.return(sql`result`);
+    },
+  });
+}
+
+export function ensureLexicalStandardDocumentFunction(
+  registrar: ScalarFunctionRegistrar,
+) {
+  if (registrar.scalarFunctions?.["lexical_standard_document"]) return;
+  // Semantic document formatting: typography comes from the shared page styles,
+  // never from pasted inline CSS. Preserve text, emphasis, structure, and media.
+  registrar.scalarFunction({
+    name: "lexical_standard_document",
+    parameters: [{ name: "node", type: "Json" }],
+    returnType: "Json",
+    procedure: (s) => {
+      s.defScalar(
+        "result",
+        sql`input.node - 'style' - 'textStyle' - 'backgroundColor' - 'lineHeight'`,
+      );
+      s.if(sql`input.node->'root' is not null`, (s) => {
+        s.setScalar(
+          "result",
+          sql`result || json_build_object('root', fn.lexical_standard_document(input.node->'root'))`,
+        );
+      });
+      s.if(sql`input.node->'children' is not null`, (s) => {
+        s.setScalar(
+          "result",
+          sql`result || json_build_object('children', coalesce((
+          select json_array_agg(fn.lexical_standard_document(child.value) order by child.index)
+          from json.array_each(input.node->'children') child
+        ), '[]'::json))`,
+        );
+      });
       s.return(sql`result`);
     },
   });

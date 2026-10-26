@@ -11,17 +11,15 @@ tags:
 
 # Yolm Template Language (YTL)
 
-The Yolm Template Language is a powerful templating engine inspired by [Liquid](https://shopify.dev/docs/api/liquid), but with a key difference: all expressions and filters are standard SQL.
+YTL is a templating language modeled on
+[Liquid](https://shopify.dev/docs/api/liquid), except that every expression,
+condition, and loop source is standard SQL. Use it for emails, notifications,
+and other generated text; UIs are built with TSX, not YTL.
 
-YTL is primarily intended for creating dynamic content like emails and notifications. While you can use it for other templating needs, it is not the primary way to build UIs in Yolm (which uses TSX).
-
-## Overview
-
-YTL can be used for both HTML and non-HTML output. When rendering, you can specify if the output should be HTML escaped.
-
-You can also control database access via the `hasDbAccess` option on `renderTemplate`:
-- **With DB access** (`hasDbAccess: true`): The template can run any SQL query against the system database.
-- **Without DB access** (default): The template only has access to the tables, records, and scalars provided in its scope.
+Templates render with `s.renderTemplate` (see [below](#usage-in-code)).
+Output can be HTML-escaped (`htmlEscaped: true`) or plain. With
+`hasDbAccess: true` a template may query the system database; by default it
+can only see the tables, records, and scalars passed in its `scope`.
 
 ## Syntax
 
@@ -36,7 +34,8 @@ Expressions are wrapped in double curly braces and can be any valid SQL expressi
 ```
 
 ### Raw HTML
-If the `htmlEscaped` flag is set, you can use triple braces to output raw HTML without escaping.
+With `htmlEscaped` set, triple braces output a value without escaping. Use
+them only for trusted HTML, never for user-supplied text.
 
 ```handlebars
 {{{ user_provided_html }}}
@@ -57,9 +56,9 @@ Control statements use `{% %}` syntax for logic.
 Standard SQL conditions are used for branching.
 
 ```handlebars
-{% if user.is_admin %}
+{% if user_record.is_admin %}
   Admin content
-{% elsif user.role = 'editor' %}
+{% elsif user_record.role = 'editor' %}
   Editor content
 {% else %}
   Regular content
@@ -91,16 +90,14 @@ Previous line:
 {%- endif %}
 ```
 
-## Example Usage
-
-Here is a complete example of an email template using YTL:
+## Example
 
 ```html
-<h1>Welcome {{ user.name }}</h1>
+<h1>Welcome {{ user_record.name }}</h1>
 
-{% if (select count(*) from db.notifications where user_id = user.id and unread = true) > 0 %}
+{% if (select count(*) from db.notifications where user_id = user_record.id and unread = true) > 0 %}
   <div class="notifications">
-    {% for note in select * from db.notifications where user_id = user.id and unread = true %}
+    {% for note in select * from db.notifications where user_id = user_record.id and unread = true %}
       <div class="notification">
         {{ note.message }}
       </div>
@@ -108,15 +105,15 @@ Here is a complete example of an email template using YTL:
   </div>
 {% endif %}
 
-{# Display user-provided content with triple braces #}
+{# Trusted, pre-sanitized HTML #}
 <div class="content">
-  {{{ user.bio }}}
+  {{{ user_record.bio_html }}}
 </div>
 
 <h2>Team Members</h2>
 {% for member in select u.name, u.role, u.avatar_url
                  from db.users u
-                 where u.team_id = user.team_id
+                 where u.team_id = user_record.team_id
                  order by u.name %}
   <div class="member">
     <h3>{{ member.name }}</h3>
@@ -127,10 +124,12 @@ Here is a complete example of an email template using YTL:
 
 ## Usage in Code
 
-To render a template from a procedure, use the `renderTemplate` statement. Note that the `scope` maps template variable names to the names of scalars or fields already defined in your procedure's scope:
+`s.renderTemplate` renders a template in a procedure. `scope` maps each
+template variable name to the name of a scalar, record, or table already in
+the procedure's scope:
 
 ```typescript
-s.defScalar("first_name", sql`user.first_name`);
+s.defScalar("first_name", sql`user_record.first_name`);
 
 s.renderTemplate({
   template: sql`Hello {{name}}!`,
@@ -141,3 +140,7 @@ s.renderTemplate({
   defOutputScalar: "rendered_body"
 });
 ```
+
+Write the output to a new scalar with `defOutputScalar`, or to an existing one
+with `setOutputScalar` (`outputScalar` is deprecated). See
+`RenderTemplateOpts` in `std/statements`.

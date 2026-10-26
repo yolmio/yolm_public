@@ -35,7 +35,7 @@ interface CadFormatDefinition {
 const formatDefinitions: readonly CadFormatDefinition[] = [
   {
     format: "step",
-    recipeVersion: 2,
+    recipeVersion: 4,
     extensions: ["step", "stp"],
     contentTypes: ["application/step", "model/step"],
     viewer: [
@@ -70,7 +70,7 @@ const formatDefinitions: readonly CadFormatDefinition[] = [
   },
   {
     format: "dwg",
-    recipeVersion: 4,
+    recipeVersion: 5,
     extensions: ["dwg"],
     contentTypes: ["application/acad", "application/dwg", "image/vnd.dwg"],
     packageExtensions: [
@@ -119,7 +119,8 @@ const formatDefinitions: readonly CadFormatDefinition[] = [
   },
   {
     format: "dxf",
-    recipeVersion: 2,
+    // 3: scene carries YOLM_FAB bend/bevel data for shop callouts.
+    recipeVersion: 3,
     extensions: ["dxf"],
     contentTypes: ["application/dxf", "image/vnd.dxf"],
     viewer: [
@@ -132,7 +133,8 @@ const formatDefinitions: readonly CadFormatDefinition[] = [
   },
   {
     format: "dstv",
-    recipeVersion: 4,
+    // 5: scene carries the member header (mark, profile, length, end cuts).
+    recipeVersion: 5,
     extensions: ["nc1", "nc"],
     contentTypes: ["application/vnd.dstv", "text/vnd.dstv"],
     viewer: [

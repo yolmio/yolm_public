@@ -16,48 +16,20 @@ related:
 
 # Workforce Block
 
-`WorkforceBlock` is the "who" layer of a system: people, the organizations
-they belong to, their effective-dated **worker relationships** to an employer,
-and the effective-dated **assignments** (job profile, position, org unit,
-location) that describe the work they do. It is a normalized HRIS spine that
-person-aware blocks (training, scheduling) attach to without owning workforce
-tables themselves.
+`WorkforceBlock` is the "who" layer: people, employer organizations,
+effective-dated **worker relationships**, and effective-dated **assignments**
+(job profile, position, org unit, location). Transfers, re-hires, and
+promotions are ordinary inserts that close one interval and open another.
+It implements `WorkforceProvider`, so person-aware blocks such as
+`TrainingBlock` depend on current-fact accessors rather than its tables.
 
-Use it instead of a flat people table when transfers, re-hires, promotions, or
-contractor-to-employee conversions must be ordinary inserts that close one
-interval and open another while preserving history. It implements the
-`WorkforceProvider` contract, so consumers like `TrainingBlock` depend on
-stable current-fact accessors rather than on concrete tables.
-
-By default it does **not** own login state — that is `AuthBlock`'s job
-(`sys_users`, credentials, sessions). Workforce and Auth are bridged by the
-person↔`sys_users` link and the optional auth-role mappings. Systems can also
-opt into one-way login revocation with `disableLoginWhenAccessIneligible`;
-ineligible workforce facts then disable the linked login and revoke sessions,
-but restored eligibility never re-enables an administrator-disabled account.
-
-```ts
-import {
-  WorkforceAuthRoleRules,
-  WorkforceAuthRoleRulesPage,
-  WorkforceBlock,
-  WorkforcePeoplePage,
-  WorkforcePersonCreateAction,
-  WorkforcePersonDetailPage,
-  WorkforcePersonManagement,
-} from "blocks/workforce";
-import type {
-  WorkforceBlockOpts,
-  WorkforceProvider,
-} from "blocks/workforce";
-```
+Login state belongs to `AuthBlock`; the two are bridged by the
+person↔`sys_users` link and optional auth-role mappings.
 
 ## Minimal Setup
 
-Add `AuthBlock` **before** `WorkforceBlock` so the `sys_users` table exists when
-the people table is defined. With the default `sysUserLink: "person_field"`, the
-block throws a descriptive error during `initialize()` if `sys_users` is
-missing.
+Add `AuthBlock` **before** `WorkforceBlock`. With the default
+`sysUserLink: "person_field"`, `initialize()` throws if `sys_users` is missing.
 
 ```ts
 import { AuthBlock } from "blocks/auth";
@@ -70,451 +42,272 @@ export const workforce = new WorkforceBlock({});
 system.addBlock(workforce);
 ```
 
-That gives the canonical five tables: `workforce_people`,
-`workforce_organizations`, `workforce_worker_relationships`,
-`workforce_job_profiles`, and `workforce_assignments`, plus the four workforce
-enums. Org units, locations, positions, reporting, and auth-role mappings are
-opt-in (see [Configuration](#configuration)).
-
-A fuller real-world setup enabling optional facets and extra fields:
-
-```ts
-export const workforce = new WorkforceBlock({
-  sysUserLink: "sys_user_field",
-  enableOrgUnits: true,
-  enableLocations: true,
-  enableAuthRoleMappings: true,
-  definePeople: (table) => {
-    table.string("first_name", 100);
-    table.string("last_name", 100);
-  },
-  routes: {
-    peopleListPath: "/workforce/people",
-    personDetailPath: "/workforce/people/{record_id:id}",
-    authRoleRulesPath: "/workforce/role-rules",
-  },
-});
-system.addBlock(workforce);
-```
-
-`WorkforceBlock` implements `WorkforceProvider`, so pass the instance straight
-to consumers, e.g. `new TrainingBlock({ workforce, ... })`.
+Pass the instance straight to consumers, e.g.
+`new TrainingBlock({ workforce, ... })`. Org units, locations, positions,
+reporting, and auth-role mappings are opt-in.
 
 ## Configuration
 
-`new WorkforceBlock(opts?: WorkforceBlockOpts)` — all options are optional.
+`new WorkforceBlock(opts?: WorkforceBlockOpts)`; all options are optional. See
+`WorkforceBlockOpts` in `packages/blocks/workforce/index.tsx` for the full list,
+including table-name overrides (`peopleTable`, `assignmentsTable`, ...),
+`define*` hooks (`(table: TableBuilder) => void` for each table), enum value
+lists, and `routes` (`WorkforceRouteConfig`; defaults `/people`,
+`<peopleListPath>/{record_id:id}`, `/workforce/reference-data`,
+`/workforce/role-rules`).
 
-### Facet opt-ins
-
-| Option | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `enableOrgUnits` | `boolean` | `false` | Adds the recursive org-unit table and assignment/audience fk. |
-| `enableLocations` | `boolean` | `false` | Adds the locations table and assignment/audience fk. |
-| `enablePositions` | `boolean` | `false` | Adds the positions (concrete seats) table and assignment fk. |
-| `enableReporting` | `boolean` | `false` | Adds the effective-dated reporting-relationship table and a Reporting detail tab. |
-| `enableAuthRoleMappings` | `boolean` | `false` | Adds the auth-role mapping tables and the reconciliation reactor. |
-
-### Behavior flags
-
-| Option | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `enableRelationshipAndAssignmentCreation` | `boolean` | `false` | Shows the guided New relationship and New assignment actions on person detail tabs. |
-| `enableReferenceDataCreation` | `boolean` | `false` | Shows Add actions for organizations, job profiles, and enabled optional facets on the reference-data page. Edit remains available when false. |
-| `allowMultipleActiveRelationships` | `boolean` | `false` | When false, a filtered unique constraint blocks more than one open worker relationship per person. |
-| `allowMultipleActivePrimaryAssignments` | `boolean` | `false` | When false, a filtered unique constraint blocks more than one open primary assignment per relationship. |
-| `managementPermission` | `string` | — | Legacy management gate. When AuthBlock has `accessPolicy`, the shared delegated policy takes precedence. |
-| `assignableJobProfiles` | `string[]` | — | Optional allowlist of job profile codes for staff managers. Omitted allows ordinary profiles; `[]` allows none. Protected role/permission mappings always require sysadmin. |
-| `disableLoginWhenAccessIneligible` | `boolean` | `false` | Disables the linked `sys_users` row and revokes its sessions when the person lacks an active relationship and active primary assignment. This is one-way: restoring eligibility does not override an administrator's disabled-account decision. |
-
-### Active statuses
-
-`activePersonStatus`, `activeRelationshipStatus`, and `activeAssignmentStatus`
-default to `"active"`. Each must name a value in its corresponding status list;
-invalid configuration is rejected during generation. These keys determine access
-eligibility, current workforce facts, and defaults for new/imported records.
-List order does not determine which status is active.
-Do not reorder existing deployed enums to configure eligibility.
-
-### Identity link
-
-| Option | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `sysUserLink` | `"person_field" \| "sys_user_field"` | `"person_field"` | `person_field` stores `workforce_people.sys_user_id` (required, unique). `sys_user_field` stores `sys_users.workforce_person_id` instead — intended for systems that expose workforce people through AuthBlock `userTypes: ["workforce_people"]`. |
-
-### Enums
-
-Each accepts an array of `string` or `WorkforceEnumValue` (`{ name, displayName }`).
-String values get a display name with the first letter capitalized
-(e.g. `vendor_worker` → `Vendor_worker`).
-
-| Option | Type | Default values |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `workerTypes` | `Array<string \| WorkforceEnumValue>` | `employee, contractor, vendor_worker, temp, intern` |
-| `personStatuses` | `Array<string \| WorkforceEnumValue>` | `active, inactive` |
-| `relationshipStatuses` | `Array<string \| WorkforceEnumValue>` | `active, inactive, terminated, on_leave` |
-| `assignmentStatuses` | `Array<string \| WorkforceEnumValue>` | `active, ended, suspended` |
+| `enableOrgUnits`, `enablePositions`, `enableReporting`, `enableAuthRoleMappings` | `false` | Add the matching optional tables, foreign keys, provider accessors, and UI. |
+| `locations` | — | A `LocationsBlock` instance registered **before** workforce; adds location foreign keys. Workforce owns no location table. |
+| `singleOrganization` | — | Implicit employer name: no organizations table, organization foreign keys, setup UI, or seed step. See [One organization](#one-organization). |
+| `sysUserLink` | `"person_field"` | `person_field` stores `workforce_people.sys_user_id` (required, unique). `sys_user_field` stores `sys_users.workforce_person_id`, for systems exposing people through AuthBlock `userTypes: ["workforce_people"]`. |
+| `enableRelationshipAndAssignmentCreation` | `false` | Shows guided New relationship / Change assignment / End relationship actions on person detail. |
+| `enableReferenceDataCreation` | `false` | Shows Add actions on the reference-data page and Spark tools. Edit is always available. |
+| `allowMultipleActiveRelationships`, `allowMultipleActivePrimaryAssignments` | `false` | When false, filtered unique constraints allow one open relationship per person and one open primary assignment per relationship. |
+| `activePersonStatus`, `activeRelationshipStatus`, `activeAssignmentStatus` | `"active"` | Status that counts as active for eligibility, current facts, and new/imported defaults. Must name a configured status (checked at generation). List order is irrelevant; do not reorder deployed enums to change eligibility. |
+| `managementPermission` | — | Legacy management gate. AuthBlock `accessPolicy`, when configured, takes precedence. |
+| `assignableJobProfiles` | — | `(jobProfile: Sql) => Sql` predicate limiting profiles staff managers may assign. Only `true` allows. Prefer IDs or system-owned fields over editable names. Protected role/permission mappings always require sysadmin. |
+| `disableLoginWhenAccessIneligible` | `false` | Disables the linked `sys_users` row and revokes sessions when the person lacks an active relationship and active primary assignment. One-way: restored eligibility never re-enables the account. |
+| `validatePersonAssignments` | — | `(s, personId) => void` run inside shared employment/assignment form transactions; call a system-owned validation procedure for `defineAssignments` fields. Direct SQL imports must run equivalent validation. |
 
-Only `workerTypes` uses its first value as the column default. The three status
-columns use `activePersonStatus`, `activeRelationshipStatus`, and
-`activeAssignmentStatus`, respectively; each defaults to `"active"`.
+Enum options (`workerTypes`, `personStatuses`, `relationshipStatuses`,
+`assignmentStatuses`) accept `string` or `{ name, displayName }`; plain strings
+display with only the first letter capitalized (`vendor_worker` →
+`Vendor_worker`). Only `workerTypes` uses its first value as the column default.
 
-### Table name overrides
+Organizations, org units, positions, and job profiles have names but no
+built-in codes or type labels, and people have no creation timestamp. Add such
+fields through the matching `define*` hook when an integration needs them.
 
-Each defaults to the matching `workforce_*` name listed under
-[Tables Created](#tables-created): `peopleTable`, `organizationsTable`,
-`workerRelationshipsTable`, `jobProfilesTable`, `assignmentsTable`,
-`orgUnitsTable`, `locationsTable`, `positionsTable`,
-`reportingRelationshipsTable`, `authRoleMappingsTable`,
-`authRoleMappingRolesTable`, `authRoleMappingPermissionsTable`.
+### One organization
 
-With AuthBlock's [delegated access policy](auth.md#delegated-access-management),
-staff managers can edit relationships and assignments for other, unprotected
-accounts. The block checks the person attached to the actual edited record
-before and after changes, inside the transaction. It checks all assignments and
-potential profile mappings, including inactive and historical rules. An
-unapproved historical profile therefore requires sysadmin to change.
+`singleOrganization: "Acme"` is a code-defined constant; renaming it changes
+display only. People, relationships, locations, org units, positions, and
+access rules work without organization IDs. CSV employer/host values, if
+present, must match the name. `organizationsTable` is absent on the provider,
+organization ID accessors return SQL null, and `organizationDisplayName(id)`
+returns the constant (it looks up the record in multiple mode).
 
-Role and permission definitions, identity edits, imports, creation of people or
-logins, and reporting edits require the configured sysadmin permission. UI writes
-also verify the original authenticated session. Custom UI integrations should
-call `assertManagementSession` for these operations or
-`assertStaffPersonAccess` before and after delegated person-specific writes;
-these include both session and business-policy checks. The corresponding
-`assertManagementPermission` and `assertStaffPersonPermission` methods expose
-only business-policy checks for server procedures that authenticate separately.
+Switching an existing system to single mode is **CompatibleByOrphaning**, but
+the local CLI currently fails to reopen a database with the orphaned
+organization table (`column_id 2 out of range ... field_types_len=0`), and the
+transform fallback fails during snapshot creation. Existing-database rollout is
+blocked until a fix or migration passes restored-data checks. Never enable it
+on data that needs distinct employers or hosts. Moving to multiple
+organizations requires provisioning organizations and backfilling the new
+required foreign keys.
 
-### `define` hooks
+## Tables
 
-Each is `(table: TableBuilder) => void`, called inside the matching table so you
-can add fields/constraints: `definePeople`, `defineOrganizations`,
-`defineOrgUnits`, `defineLocations`, `defineWorkerRelationships`,
-`defineJobProfiles`, `definePositions`, `defineAssignments`,
-`defineReportingRelationships`, `defineAuthRoleMappings`,
-`defineAuthRoleMappingRoles`, `defineAuthRoleMappingPermissions`.
+People, worker relationships, job profiles, and assignments are always created.
+Column names are stable across table-name overrides.
 
-### Routes
-
-`routes?: WorkforceRouteConfig` configures default paths used by the page
-components:
-
-| Field | Type | Default |
+| Table (default name) | Created when | Purpose |
 | --- | --- | --- |
-| `peopleListPath` | `string` | `/people` |
-| `personDetailPath` | `string` | `<peopleListPath>/{record_id:id}` |
-| `referenceDataPath` | `string` | `/workforce/reference-data` |
-| `authRoleRulesPath` | `string` | `/workforce/role-rules` |
-| `peopleDatagridName` | `string` | (none) |
+| `workforce_people` | always | Identity and contact facts only. |
+| `workforce_organizations` | `singleOrganization` omitted | Employer and host organizations. |
+| `workforce_worker_relationships` | always | Effective-dated employment/contract relationship with worker type and status. |
+| `workforce_job_profiles` | always | Global job catalog. |
+| `workforce_assignments` | always | Effective-dated work under a relationship; `is_primary` marks the assignment used for current facts. |
+| `workforce_org_units` | `enableOrgUnits` | Recursive org-unit hierarchy within an organization. |
+| `workforce_positions` | `enablePositions` | Concrete seats. |
+| `workforce_reporting_relationships` | `enableReporting` | Effective-dated manager links between relationships. |
+| `workforce_auth_role_mappings` | `enableAuthRoleMappings` | Access rules matching workforce facts. |
+| `workforce_auth_role_mapping_roles`, `workforce_auth_role_mapping_permissions` | `enableAuthRoleMappings` | Roles and direct permissions granted by a rule. |
 
-## Tables Created
+The block registers four enums: `workforce_worker_type`,
+`workforce_person_status`, `workforce_relationship_status`, and
+`workforce_assignment_status`. The schema enforces end dates after start dates,
+assignments referencing a job profile or position, and no self-reporting.
+Intervals are half-open, so one can start on the other's end date. Location
+references use `onDelete("Restrict")`: deactivate a referenced location instead
+of deleting it.
 
-The first five tables are always created. The rest appear only when the matching
-`enable*` flag is set. Column names below are stable regardless of table-name
-overrides.
+Upgrading from a workforce-owned location table requires mapping existing
+location IDs to shared location IDs with a **Transform** before retargeting
+assignment, position, rule, and training-audience references; removing the old
+table alone only orphans data. Removing the legacy rule-level `auth_role_id`
+requires first copying it into `workforce_auth_role_mapping_roles` for rules
+with no child-role rows (including inactive and future rules), under the old
+schema; deploying the removal directly revokes legacy-only grants.
 
-| Table (default name) | Created when | Key columns |
-| --- | --- | --- |
-| `workforce_people` | always | `sys_user_id` (fk `sys_users`, notNull+unique, only in `person_field` mode), `display_name`, `preferred_name`, `email`, `phone`, `preferred_language` (default `en`), `status` (enum `workforce_person_status`), `created_at` |
-| `workforce_organizations` | always | `name` (notNull+unique), `code`, `organization_type`, `is_active` |
-| `workforce_worker_relationships` | always | `person_id`, `workforce_organization_id`, `worker_type` (enum), `status` (enum `workforce_relationship_status`), `effective_from`, `effective_to`, `external_worker_id` |
-| `workforce_job_profiles` | always | `name` (notNull+unique), `code` (notNull+unique), `is_active` |
-| `workforce_assignments` | always | `worker_relationship_id`, `host_workforce_organization_id`, `workforce_job_profile_id`, `is_primary`, `status` (enum `workforce_assignment_status`), `effective_from`, `effective_to`, plus `workforce_position_id` / `workforce_org_unit_id` / `workforce_location_id` when those facets are enabled |
-| `workforce_org_units` | `enableOrgUnits` | `workforce_organization_id`, `parent_org_unit_id` (self-recursive), `name`, `code`, `org_unit_type`, `is_active` |
-| `workforce_locations` | `enableLocations` | `name`, `code`, `workforce_organization_id`, `is_active`, unique(`workforce_organization_id`, `code`) |
-| `workforce_positions` | `enablePositions` | `name`, `code`, `workforce_organization_id`, `workforce_job_profile_id`, `is_active` (plus org-unit/location fks when enabled) |
-| `workforce_reporting_relationships` | `enableReporting` | `worker_relationship_id`, `manager_worker_relationship_id`, `relationship_type`, `effective_from`, `effective_to`, `is_active` |
-| `workforce_auth_role_mappings` | `enableAuthRoleMappings` | match cols `worker_type`, `employer_workforce_organization_id`, `host_workforce_organization_id`, `workforce_job_profile_id` (+ org-unit/location when enabled); legacy single `auth_role_id`; `effective_from`, `effective_to`, `is_active` |
-| `workforce_auth_role_mapping_roles` | `enableAuthRoleMappings` | `workforce_auth_role_mapping_id`, `auth_role_id`, unique pair |
-| `workforce_auth_role_mapping_permissions` | `enableAuthRoleMappings` | `workforce_auth_role_mapping_id`, `permission` (enum `auth_permission`), unique pair |
+## Validation, Access, and Imports
 
-Integrity is enforced in-schema: end dates must be after start dates,
-assignments must reference a job profile or position, and reporting
-relationships cannot point to themselves.
+- Shared creation, edit, and import paths validate overlapping active
+  relationships and primary assignments, respecting the `allowMultiple*`
+  options. Custom SQL writers must call `validatePersonIntervals(s, personId)`
+  in their transaction; direct org-unit writers must call the
+  `workforce_validate_org_units` procedure (parents must not form cycles and
+  must belong to the same organization). Access synchronization does not
+  validate history, so bad history never blocks suspending a person or
+  revoking access.
+- With AuthBlock's [delegated access policy](auth.md#delegated-access-management),
+  staff managers can edit relationships and assignments of other, unprotected
+  accounts. The person on the edited record is checked before and after the
+  change, against all assignments and potential profile mappings (including
+  inactive and historical rules), so an unapproved historical profile requires
+  sysadmin. Identity edits, imports, person/login creation, reporting edits,
+  and role/permission definitions require sysadmin.
+- Custom UI writes should call `assertManagementSession(s)` or, before and after
+  delegated person writes, `assertStaffPersonAccess(s, personId)`; both check
+  the original session and business policy. Server procedures that authenticate
+  separately use `assertManagementPermission` / `assertStaffPersonPermission`
+  (policy only).
+- Route `wrapper`s only decide rendering. Administrative consumers must also
+  configure `managementPermission` (or AuthBlock's access policy) so mutations
+  enforce the same boundary on the server.
+- CSV imports (`WorkforcePeopleImportAction`) require an explicit portal-access
+  choice in the preview, applied to every newly created login identity. No
+  invitation emails are sent; existing login choices are kept unless
+  eligibility requires disabling access. Organizations, job profiles, org
+  units, and positions match by name, ignoring case and surrounding whitespace;
+  locations match an unambiguous name or full path (including configured
+  codes). Ambiguous matches and legacy `Job code` / org-unit or position code
+  headers are rejected. Imports without job values use a default job profile
+  selected in the dialog (by ID; there is no name-based option).
+- Runtime workflows should use organization and job-profile IDs, never
+  hardcoded display names. Assignments, rules, and audiences keep IDs through
+  renames.
 
-## Enums Created
+## Auth-Role Reconciliation
 
-`initialize()` registers four enums from the configured values:
-`workforce_worker_type`, `workforce_person_status`,
-`workforce_relationship_status`, `workforce_assignment_status`.
+With `enableAuthRoleMappings`, the `workforce_auth_rule_reconciliation` reactor
+keeps AuthBlock's `auth_user_role_sources` / `auth_user_permission_sources`
+(source `workforce_auth_role_mapping`) in sync: it adds grants when a person
+starts matching an active rule and removes only its own grants when the person
+stops matching or the rule changes, deactivates, expires, or is deleted. Manual
+grants and overlapping rules are independent.
 
-## Reactor
-
-When `enableAuthRoleMappings` is set, the block registers the
-`workforce_auth_rule_reconciliation` reactor. It keeps source-tracked grants in
-AuthBlock's `auth_user_role_sources` / `auth_user_permission_sources`
-(source `workforce_auth_role_mapping`) reconciled with the current matching
-state: it adds grants when a person starts matching an active rule and removes
-only its own grants when the person stops matching or the rule changes,
-deactivates, expires, or is deleted. Manual AuthBlock grants are untouched.
-
-The rule editor calls `workforce_save_auth_rule` with typed matching criteria
-and tables of selected roles and permissions. It saves the rule and its grants,
-then calls the existing `workforce_reconcile_auth_rules` procedure in the same
-transaction. The caller retains management-session authorization and UI state.
-These server bodies are registered once per system, so mounting workforce in
-multiple apps does not expand the save and reconciliation logic in every app.
+A rule may grant roles, direct permissions, or both, but not neither.
+Permissions already supplied by the rule's roles (including inherited roles)
+are shown read-only and cannot be added as extra grants; removing an extra
+permission never removes a role grant. The rule
+editor calls `workforce_save_auth_rule`; reference-data forms call
+`workforce_reconcile_auth_rules` in the caller's transaction. These procedures
+are registered once per system. With lazy compilation, the first save may wait
+for background compilation. `reconcileWorkforceAuthRules` remains an inline
+helper for custom providers. Location criteria match exact IDs; a parent
+location does not include descendants.
 
 ## Components and Pages
 
-All page components below are **self-routing** (they wrap themselves in
-`DatagridPage` / `RecordWithTabsAndDetailPage` / `Route`). Do **not** wrap them
-in `<Route>`. They resolve the `WorkforceBlock` via `system.block(WorkforceBlock)`,
-so the block must be registered.
+Import from `blocks/workforce`. Self-routing pages resolve the block through
+`system.block(WorkforceBlock)`; do not wrap them in `<Route>`. Props types are
+exported as `<Component>Props`.
 
-### `WorkforceBlock.StandardRoutes`
-
-Renders the people list, person detail, and auth-role rules pages in one place.
-Pass `referenceDataPath` to also mount reference-data management; it is omitted
-by default so an existing `StandardRoutes` consumer does not gain a new
-editable route. This is the usual way to mount the block's admin UI. Static
-getter for the component; props are `WorkforceStandardRoutesProps`.
+| Export | Self-routing | Purpose |
+| --- | --- | --- |
+| `WorkforceBlock.StandardRoutes` | yes | People list, person detail, and role-rules pages. Reference data mounts only when `referenceDataPath` (or `overrides.referenceData`) is passed. `overrides.*` replaces a route with a `Node` or omits it with `false`. |
+| `WorkforcePeoplePage` / `.PeoplePage` | yes | People datagrid with Add person and import actions. |
+| `WorkforcePersonDetailPage` / `.PersonDetailPage` | yes | Person record with one Workforce tab: an access status with its three checks, current employment and assignment cards, reporting lines, and a collapsible history timeline. The header links to AuthBlock's Login & Access page unless `rightSideHeader` is passed. |
+| `WorkforcePersonManagement` / `.PersonManagement` | no | The standard Workforce tab for custom person pages; expects `record_id` of a workforce person in scope. |
+| `WorkforceReferenceDataPage` / `.ReferenceDataPage` | yes | Organizations, job profiles, and enabled facets; org units and locations are searchable trees. |
+| `WorkforceAuthRoleRulesPage` / `.AuthRoleRulesPage` | yes | Page wrapping `WorkforceAuthRoleRules`; warns if mappings are disabled. |
+| `WorkforceAuthRoleRules` | no | Role-rules card (`{ workforce }`), with a match preview and review confirmation. |
+| `WorkforcePersonCreateAction` | no | Add person modal. |
+| `WorkforcePeopleImportAction` / `.PeopleImportAction` | no | CSV import dialog. |
+| `WorkforceBlock.DetailField` | no | Inline-editable person field row (`{ field, icon?, label? }`) for a custom `details` panel. |
 
 ```tsx
 <WorkforceBlock.StandardRoutes
   peopleListPath="/workforce/people"
   personDetailPath="/workforce/people/{record_id:id}"
   referenceDataPath="/workforce/setup"
-  authRoleRulesPath="/workforce/role-rules"
-  peopleCreateActionProps={{
-    allowPortalLogin: true,
-    defaultCreateLogin: true,
-    defaultWorkerType: "contractor",
-    languageOptions: [
-      { code: "en", name: "English" },
-      { code: "es", name: "Spanish" },
-    ],
-  }}
+  peopleCreateActionProps={{ allowPortalLogin: true }}
 />
 ```
 
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `peopleListPath` | `string` | no | Overrides `routes.peopleListPath`. |
-| `personDetailPath` | `string` | no | Overrides `routes.personDetailPath`. |
-| `referenceDataPath` | `string` | no | Overrides `routes.referenceDataPath`. |
-| `authRoleRulesPath` | `string` | no | Overrides `routes.authRoleRulesPath`. |
-| `peopleDatagridName` | `string` | no | Datagrid name for the people list. |
-| `peopleCreateActionProps` | `Omit<WorkforcePersonCreateActionProps, "workforce">` | no | Props forwarded to the people list's create action. |
-| `personDetail` | `Omit<WorkforcePersonDetailPageProps, "path">` | no | Props forwarded to the detail page. |
-| `overrides` | `{ peopleList?; personDetail?; referenceData?; authRoleRules? }` | no | Each is a `Node` to replace the default route, or `false` to omit it. |
+`WorkforcePersonCreateAction` creates the `sys_users` identity, person, one
+active relationship, and primary assignment in one transaction, then applies
+matching auth-role mappings. Values for required `define*` fields without
+defaults must be supplied through `extraPersonValues`,
+`extraWorkerRelationshipValues`, or `extraAssignmentValues`
+(`Record<string, Sql>`); otherwise the record cannot be created. With
+`allowPortalLogin`, an opted-in person can use email password setup where
+`allowSelfSetup` is enabled; no email is sent. An optional temporary password
+forces a change at first login. Without a login, the linked identity (including
+password setup) is disabled. `compact` is a deprecated no-op.
 
-Route wrappers make only a rendering decision. Administrative consumers must
-pass `wrapper` (for example, an `AuthBlock.PermissionCheck` requiring
-`can_manage_users`) and configure `managementPermission` so mutations enforce
-the same boundary on the server.
+With `enableRelationshipAndAssignmentCreation`, **New relationship** inserts a
+relationship and its initial primary assignment; for an open-ended one it ends
+the person's relationships covering the new start date and their assignments,
+including periods with scheduled end dates.
+**Change assignment** defaults to a primary assignment and must fit inside its
+relationship. It ends the previous primary period at the new start, including
+when that period already had an end date. Active scheduled conflicts must
+be reviewed first; inactive dated assignments are preserved. Only one primary
+assignment may be open-ended when that constraint is configured. With the matching `allowMultiple*` option, the operator may
+leave prior records open.
 
-### `WorkforcePeoplePage` (also `WorkforceBlock.PeoplePage`)
+**End relationship** is an action on each unended relationship card. It takes an inclusive last working day and closes the
+relationship, its assignments, and connected reporting periods together. It
+preserves recorded statuses and rejects scheduled children beyond that day.
+Person status is unchanged; login and auth grants are reconciled using the
+remaining eligible work. Ending today takes effect tomorrow; ending yesterday
+takes effect immediately.
 
-Datagrid of people with quick search and an "Add person" toolbar action.
+Period labels are derived from dates and status. Cards show current and
+scheduled periods; every relationship, assignment, and reporting period also
+appears in the History timeline, newest first. **Correct history**, in each
+timeline entry's menu, edits that record in place and keeps
+parent links read-only; use it for corrections, not routine lifecycle changes.
+Auth grants are reconciled in the same transaction.
 
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `path` | `string` | no | Route path; defaults to `routes.peopleListPath`. |
-| `datagridName` | `string` | no | Defaults to `routes.peopleDatagridName`. |
-| `detailPath` | `string` | no | View-button target; defaults to `routes.personDetailPath`. |
-| `createAction` | `Node` | no | Replaces the default `WorkforcePersonCreateAction` in the toolbar. |
-| `createActionProps` | `Omit<WorkforcePersonCreateActionProps, "workforce">` | no | Props for the default create action. |
-
-### `WorkforcePersonDetailPage` (also `WorkforceBlock.PersonDetailPage`)
-
-Record page for one person with editable header/details and one cohesive
-Workforce tab. The tab contains Relationships, Assignments, and (when reporting
-is enabled) Reporting sections. Each section lists the person's effective-dated
-records and provides an Edit action. The default header links the person's
-login to AuthBlock's dedicated Login & Access page; pass `rightSideHeader` to
-replace that action.
-When `enableRelationshipAndAssignmentCreation` is `true`, the Relationships
-and Assignments tabs also provide guided creation actions:
-
-- **New relationship** inserts a relationship and its initial primary
-  assignment atomically. For a new open-ended relationship, the flow ends the
-  person's currently open relationships and their open assignments at the new
-  start date. When the block allows multiple active relationships, the
-  operator can leave them open instead.
-- **New assignment** selects one of the person's relationships and validates
-  that the assignment interval fits inside it. For a new open-ended primary
-  assignment, the flow ends the relationship's currently open primary
-  assignment at the new start date. When the block allows multiple active
-  primary assignments, the operator can leave it open instead.
-
-The generated dialogs include custom fields and only the optional facets
-enabled on the block. Parent linkage fields remain protected on Edit so an
-existing record cannot be reassigned to a different person or relationship.
-Editing corrects a record in place; the creation actions preserve history by
-closing superseded intervals and inserting replacement records in one
-transaction. Workforce-derived auth roles and permissions are reconciled in
-that transaction.
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `path` | `string` | no | Route path; defaults to `routes.personDetailPath`. |
-| `prependTabs` | `WorkforceDetailTabConfig[]` | no | Tabs inserted before the built-in tabs. |
-| `appendTabs` | `WorkforceDetailTabConfig[]` | no | Tabs appended after the built-in tabs. |
-| `leftSideHeader` | `Node` | no | Replaces the default editable name header. |
-| `rightSideHeader` | `Node` | no | Header actions area content. |
-| `details` | `Node` | no | Replaces the default details panel. |
-| `excludeFields` | `string[]` | no | Person fields to hide from the default details panel. |
-
-`WorkforceDetailTabConfig` is `{ value?: string; header: { icon?: IconName; label: Node }; content: Node }`.
-
-### `WorkforcePersonManagement` (also `WorkforceBlock.PersonManagement`)
-
-Embeddable version of the standard Workforce tab for systems that own a custom
-person detail page. It keeps relationship, assignment, and reporting editing on
-the block's validated forms instead of requiring system-specific CRUD. It is
-not self-routing and expects the surrounding record page to expose
-`record_id` for a workforce person. When reference-data creation is enabled,
-the header also links to the configured Workforce setup route through a
-`Configure workforce` action.
-
-### `WorkforceReferenceDataPage` (also `WorkforceBlock.ReferenceDataPage`)
-
-Self-routing workforce setup page with tabs for Organizations and Job profiles,
-plus Org units, Locations, and Positions only when those facets are enabled on
-the block. Each tab supports Edit. Set `enableReferenceDataCreation: true` to
-also show its schema-generated Add action. Props are `path?: string` (defaults
-to `routes.referenceDataPath`) and `wrapper?: (children: Node) => Node`. The
-page wrapper does not enforce mutations; configure `managementPermission` and
-also mount it behind the same workforce-management permission for clear UI.
-
-When `enableAuthRoleMappings` is enabled, the built-in reference-data Add and
-Edit forms synchronously call the block-owned
-`workforce_reconcile_auth_rules` procedure in the caller's transaction before
-commit. The forms retain their management-permission checks and transaction
-boundaries; the procedure executes the same reconciliation SQL and does not
-cache results.
-
-With lazy compilation, the page can become available while the runtime
-prewarms the shared procedure in the background. An immediate first save may
-wait for that compilation; later calls reuse the compiled code but still
-execute the reconciliation SQL in the caller's transaction. This deliberately
-favors earlier page availability over guaranteeing that the first save has no
-compilation wait.
-
-`reconcileWorkforceAuthRules` remains inline for generic or custom-provider
-callers.
-
-### `WorkforceAuthRoleRulesPage` (also `WorkforceBlock.AuthRoleRulesPage`)
-
-Self-routing page wrapping `WorkforceAuthRoleRules`. Prop: `path?: string`
-(defaults to `routes.authRoleRulesPath`). Requires `enableAuthRoleMappings`;
-otherwise the inner component renders a warning alert.
-
-### `WorkforceAuthRoleRules`
-
-The role-rules management card (add/edit rules that grant auth roles and extra
-permissions from workforce facts). **Not** self-routing — place it inside your
-own page/route. Prop: `{ workforce: WorkforceBlock }`.
-
-Role selection uses `AuthBlock.RoleSelector`, shared with login editing; selected
-roles are excluded until removed from the draft.
-
-Additional permissions use AuthBlock's searchable permission picker. Permissions
-supplied by selected roles, including inherited roles, appear as read-only
-grants with their source role names. The list counts include inherited grants;
-permissions already supplied by roles are unavailable in the extra-grant picker.
-Removing an extra permission does not remove a role grant.
-
-### `WorkforcePersonCreateAction`
-
-An "Add person" button + modal that, in one transaction, creates the `sys_users`
-identity, the person, one active worker relationship, and the primary
-assignment, then applies any matching auth-role mappings. **Not** self-routing.
+## Spark and MCP
 
 ```tsx
-<WorkforcePersonCreateAction workforce={workforce} allowPortalLogin />
+import { workforceSparkCapability } from "blocks/workforce/spark";
+
+// Pass to new SparkBlock({ workspace, capabilities }) after registering
+// WorkforceBlock and AuthBlock.
+const capabilities = [workforceSparkCapability(workforce)];
 ```
 
-| Prop | Type | Required | Default | Meaning |
-| --- | --- | --- | --- | --- |
-| `workforce` | `WorkforceBlock` | yes | — | The block instance. |
-| `defaultLanguage` | `Sql \| string` | no | `en` | Initial preferred language. |
-| `languageOptions` | `Array<{ code: string; name: string }>` | no | `[{ code: "en", name: "English" }]` | Language dropdown options. |
-| `allowPortalLogin` | `boolean` | no | `false` | Allows creating AuthBlock password credentials for the person. |
-| `defaultCreateLogin` | `boolean` | no | `true` | Initial state of the "create portal login" checkbox (when `allowPortalLogin`). |
-| `defaultWorkerType` | `string` | no | `workerTypes[0]` | Pre-selected worker type. |
-| `extraPersonColumns` / `extraPersonValues` | `Sql` | no | — | Extra insert columns/values for `definePeople` fields (supply both). |
-| `extraWorkerRelationshipColumns` / `extraWorkerRelationshipValues` | `Sql` | no | — | Extra insert fragments for `defineWorkerRelationships` fields. |
-| `extraAssignmentColumns` / `extraAssignmentValues` | `Sql` | no | — | Extra insert fragments for `defineAssignments` fields. |
+The capability uses AuthBlock's access-policy administrator permission or
+`managementPermission`; otherwise pass `{ permission: "..." }`. Every call
+rechecks the user, permission, and workforce policy on the server.
 
-When `allowPortalLogin` is enabled and the operator opts in, credentials are
-created through AuthBlock's `insertUserWithPassword`; roles/permissions still
-come from matching workforce rules, not a role picker in the form. The modal
-renders only the fields for enabled facets.
+| Tool | Behavior |
+| --- | --- |
+| `list_configuration` | Pages through enabled reference data, location paths, roles, permissions, and access rules, including inactive records (limit 1-100, default 50). |
+| `save_job_profile`, `save_organization`, `save_org_unit`, `save_position` | Create (if `enableReferenceDataCreation`), rename, re-parent, or deactivate. Only for enabled facets; omitted fields are preserved. |
+| `get_access_rule` | Returns a rule in the save tool's shape. |
+| `preview_access_rule` | Validates and counts eligible matches, returning up to ten names. |
+| `save_access_rule` | Creates or replaces a rule and reconciles grants in the same transaction. |
 
-### `WorkforceBlock.DetailField`
+Access-rule tools exist only with auth-role mappings. `role_ids` and
+`permissions` must both be arrays, not both empty. Omitted criteria mean Any,
+omitted dates mean unbounded, omitted `is_active` means true. Malformed IDs,
+unknown fields, and invalid permissions or dates are rejected. Deletion and
+login provisioning are not exposed.
 
-Static getter for an inline-editable person field row. Props:
-`{ field: string; icon?: IconName; label?: Node }`. Use inside a person record
-context (e.g. a custom `details` panel).
+## Provider Contract
 
-## Helpers and the Provider Contract
+`WorkforceProvider` (in `packages/blocks/workforce/index.tsx`) advertises table
+names and current-fact accessors derived from the active relationship and
+active primary assignment as of `current_date()`. Always present on
+`WorkforceBlock`: `personTable`, `workerRelationshipsTable`,
+`jobProfilesTable`, `assignmentsTable`, `currentPersonId()`,
+`personSysUserId`, `personSysUserJoin`, `personDisplayName`,
+`personAccessEligible`, `audienceMatchSql`, and the contact, status, worker
+type, organization, and primary job-profile accessors.
 
-`WorkforceBlock` exposes instance helpers and the full `WorkforceProvider`:
+Optional table names and `personPrimary{OrgUnit,Location,Position}Id` /
+`personPrimary{OrgUnit,Location}Display` exist only when the matching facet is
+enabled; consumers must gate foreign keys and UI on their presence. `Id`
+accessors return stable IDs for audience matching; `Display` accessors return
+labels only. `locationOptions({ includeInactive? })` returns `id` and a
+hierarchy label as `name`, omitting inactive locations by default.
 
-- `personHref(id)` — `Sql` href to a person's detail page (`personDetailPath`).
-- `recordHref(path, id)` — `Sql` href for `path`, substituting the
-  `{record_id:id}` placeholder with `id` (or appending `id` when the placeholder
-  is absent).
-- `routes` — the resolved route config (`peopleListPath`, `personDetailPath`,
-  `authRoleRulesPath`, `peopleDatagridName`).
+Block helpers: `personHref(id)`, `recordHref(path, id)` (substitutes
+`{record_id:id}` or appends the ID), and `routes`.
 
-`WorkforceProvider` is what person-aware blocks depend on. It advertises table
-names and current-fact accessors derived from the active worker relationship and
-active primary assignment (as of `current_date()`). Facets that are always
-present on a `WorkforceBlock` instance: `personTable`, `organizationsTable`,
-`workerRelationshipsTable`, `jobProfilesTable`, `assignmentsTable`, plus
-accessors `currentPersonId()`, `personSysUserId`, `personDisplayName`,
-`personSysUserJoin`,
-`personEmail`, `personPhone`, `personLanguage`, `personStatus`,
-`personCurrentWorkerRelationshipId`, `personWorkerType`,
-`personRelationshipStatus`, `personEmployerOrganizationId`,
-`personHostOrganizationId`, `personPrimaryJobProfileId`,
-`personPrimaryAssignmentStatus`, `personPrimaryJobProfileDisplay`,
-`personAccessEligible`, and `audienceMatchSql`. Optional facets —
-`orgUnitsTable`, `locationsTable`,
-`positionsTable`, `reportingRelationshipsTable`, `authRoleMappingsTable`,
-`authRoleMappingRolesTable`, `authRoleMappingPermissionsTable`, and the
-`personPrimary{OrgUnit,Location,Position}Id` /
-`personPrimary{OrgUnit,Location}Display` accessors — exist only when the
-matching `enable*` flag is set; consumers must gate audience foreign keys and UI
-on their presence (position has an `Id` accessor but no `Display` accessor).
+## Gotchas
 
-`Id` accessors return stable record IDs for foreign-key audience matching;
-`Display` accessors return codes/names for labels only. In practice you
-configure `WorkforceBlock` rather than re-implementing `WorkforceProvider`.
-
-## Relationships to Other Blocks
-
-- **AuthBlock (required):** provides `sys_users`, `auth_roles`,
-  `auth_permission`, and the source-grant tables. Add it before
-  `WorkforceBlock`. In `sysUserLink: "sys_user_field"` mode, expose people
-  through AuthBlock with `userTypes: ["workforce_people"]` so
-  `sys_users.workforce_person_id` is created. The `permission` column on
-  `workforce_auth_role_mapping_permissions` uses the `auth_permission` enum.
-- **TrainingBlock (consumer):** pass the workforce instance as the provider:
-  `new TrainingBlock({ workforce, ... })`. Training audiences match workforce
-  facts through `audienceMatchSql`; Training never queries workforce tables
-  directly.
-
-## Common Mistakes
-
-- Registering `WorkforceBlock` before `AuthBlock` — in the default
-  `person_field` mode this throws because `sys_users` is missing.
-- Wrapping `WorkforcePeoplePage`, `WorkforcePersonDetailPage`,
-  `WorkforceAuthRoleRulesPage`, or `WorkforceBlock.StandardRoutes` in a
-  `<Route>` — they are self-routing.
-- Using `WorkforceAuthRoleRules` (no `Page`) as a route — it is a plain card;
-  use `WorkforceAuthRoleRulesPage` for routing, or place the card inside your
-  own route.
-- Putting worker type, organization, job, status, or location columns on
-  `workforce_people` — those belong on worker relationships and assignments so
-  transfers and history work; people carry only identity/contact facts.
-- Expecting org-unit/location/position provider accessors, audience columns, or
-  the role-rules UI without enabling the matching `enable*` flag.
-- Supplying only one of an `extra*Columns` / `extra*Values` pair on
-  `WorkforcePersonCreateAction` — both fragments are required for the field to
-  be inserted; a required `define*` field with no default otherwise breaks the
-  canonical insert.
-- Treating auth roles as jobs/departments/crews — use job profiles, org units,
-  and locations for workforce structure and `workforce_auth_role_mappings` to
-  derive role grants from facts.
+- Worker type, organization, job, status, and location belong on relationships
+  and assignments, not `workforce_people`; otherwise transfers lose history.
+- Auth roles are not jobs, departments, or crews. Model structure with job
+  profiles, org units, and locations, and derive grants with auth-role mappings.
+- Deactivating a location removes it from `locationOptions()` but does not
+  change assignment history or revoke existing rule-derived grants.

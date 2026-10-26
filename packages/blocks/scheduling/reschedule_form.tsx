@@ -1,6 +1,6 @@
 import type { SchedulingBlock } from "blocks/scheduling";
 import { sql } from "../../std/sql_utils";
-import type { BooleanExpr, NumericExpr } from "../../std/sql_utils";
+import type { NumericExpr } from "../../std/sql_utils";
 import type { UiServerStatements } from "std/statements";
 import { system } from "std/system";
 import { Data } from "std/data";
@@ -10,7 +10,6 @@ import { LabelOnTopFormField } from "../../components/label_on_top_form_field";
 
 interface ScheduleInterfaceProps {
   appointmentId: NumericExpr;
-  assigningNewUser: BooleanExpr;
   afterTransactionCommit?: (s: UiServerStatements) => void;
   beforeTransactionCommit?: (s: UiServerStatements) => void;
   form: Node;
@@ -37,14 +36,6 @@ export function RescheduleForm(props: ScheduleInterfaceProps) {
       noRefetch
       pendingFallback={null}
       errorFallback={null}
-      procedure={(s) => {
-        s.defScalar(
-          "old_user_id",
-          sql`(select sys_user_id from ${
-            sql.ref(appointmentsTable)
-          } where id = ${props.appointmentId})`,
-        );
-      }}
     >
       <div
         sx={{
@@ -112,8 +103,6 @@ export function RescheduleForm(props: ScheduleInterfaceProps) {
               } where id = ${props.appointmentId}`,
               allowNoRead: true,
             });
-            //For dev defined event types we update the calendar and meeting integrations on the "afterTransactionCommit" property
-
             afterTransactionCommit?.(s);
           }}
         >

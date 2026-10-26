@@ -1,390 +1,231 @@
 ---
 title: Common Patterns
-description: Common solution patterns for Yolm systems, including schema, UI, procedure, and integration choices that agents should reuse.
+description: Compact Yolm patterns for status fields, child records and totals, change history, external IDs, inbound payloads, and alternate names without over-modeling.
 tags:
   - concepts
   - patterns
   - best-practices
-  - architecture
+  - schema
+related:
+  - domains/overview.md
+  - database/best_practices.md
+  - sql/transaction_queries.md
+  - concepts/pipelines.md
+  - api/external_interfaces.md
 ---
 
 # Common Patterns
 
-This document covers reusable solution patterns for Yolm systems.
+Reusable shapes that keep the durable model small. Every table, field, and
+enum value should have a concrete reader and writer; derive everything else.
+For whole-domain models, see [Domain Modeling Guides](../domains/overview.md).
 
-## Activity Logging Pattern
+## Status: Enum or Timestamp, Not Both
 
-Track entity lifecycle events with activity logs:
+Give each independent lifecycle one enum. Record a one-shot fact that has no
+lifecycle of its own as a nullable timestamp. Do not pair an enum with
+booleans that restate its values, or each boolean with a matching `_at`
+timestamp: these copies disagree as soon as one writer forgets one of them.
 
 ```typescript
-// Define activity types
 system.enum_({
-  name: "order_activity_type",
-  values: [
-    "received",
-    "dispatched",
-    "completed_indexing",
-    "auto_verified_no_errors_no_cases",
-    "manual_verification_work_needed",
-    "manual_verification_cleared",
-    "reported",
-    "reopen_to_indexing",
-    "hung_order_alert",
-  ],
+  name: "order_status",
+  values: ["draft", "submitted", "fulfilled", "cancelled"],
 });
 
-// Activity log table
-db.table("order_activity_logs", (table) => {
-  table.fk("order_id", "orders").notNull();
-  table.enum("order_activity_type", "order_activity_type").notNull();
-  table.timestampUtc("activity_date").notNull();
-  table.fk("user_id", "sys_users");  // Who triggered it (if applicable)
-  table.text("notes", 10_000);
-});
-
-// Log activity in procedures
-s.modify(sql`
-  INSERT INTO db.order_activity_logs (
-    order_id, order_activity_type, activity_date
-  ) VALUES (
-    order.id,
-    'dispatched'::enums.order_activity_type,
-    now()
-  )
-`);
-```
-
-### Benefits
-
-- Complete audit trail
-- Timeline view of entity lifecycle
-- Debug process issues
-- Analytics on process timing
-
-## Multi-Status Entity Pattern
-
-Entities often need separate status fields for different aspects:
-
-```typescript
-db.table("orders", (table) => {
-  table.enum("status", "order_status").notNull();  // Overall status
-  table.enum("billing_status", "billing_status").notNull();  // Billing lifecycle
-  table.enum("verification_status", "verification_status");  // Verification state
-
-  table.bool("fees_calculated").notNull().default(false);
-  table.bool("invoiced").notNull().default(false);
-  table.bool("reported").notNull().default(false);
+db.table("orders", (t) => {
+  t.fk("customer_id", "customers").notNull();
+  t.string("reference", 50).notNull().unique();
+  t.enum("status", "order_status").notNull().default(sql.lit`draft`);
+  t.timestampUtc("acknowledged_at"); // one-shot fact with no lifecycle of its own
 });
 ```
 
-This allows:
-- Independent workflows (billing, verification, reporting)
-- Precise reactor queries
-- Clear business logic separation
-
-## Mapping Tables for External Systems
-
-When integrating with external systems, use mapping tables:
-
-```typescript
-// Map external provider IDs to internal entities
-db.table("provider_clients", (table) => {
-  table.fk("clients").notNull();
-  table.enum("provider", "external_provider").notNull();
-  table.string("account", 100).notNull().description(
-    "External provider's ID for this client"
-  );
-  table.string("username", 100).notNull();
-  // Keep provider credentials in StaticSecretsBlock, not in this table.
-  table.string("url", 100).notNull();
-  table.bool("use_test_url").notNull();
-});
-
-// Map external search type codes to internal enums
-db.table("provider_search_type_mappings", (table) => {
-  table.fk("clients");  // Some mappings are client-specific
-  table.enum("provider", "external_provider").notNull();
-  table.string("provider_code", 50).notNull();
-  table.enum("our_search_type", "search_type").notNull();
-  table.tinyUint("search_years");
-});
-```
-
-## Flags vs Boolean Columns
-
-For tracking completion of multi-step processes, use boolean flags:
-
-```typescript
-db.table("orders", (table) => {
-  // These track independent completion states
-  table.bool("fees_calculated").notNull().default(false);
-  table.bool("invoiced").notNull().default(false);
-  table.bool("reported_to_client").notNull().default(false);
-  table.bool("researcher_paid").notNull().default(false);
-
-  // Timestamp when each occurred
-  table.timestampUtc("fees_calculated_at");
-  table.timestampUtc("invoiced_at");
-  table.timestampUtc("reported_at");
-});
-```
-
-### Reactor Queries
+When a step produces rows (an invoice, a shipment, fee lines), "done" is the
+existence of those rows, not a flag. A reactor keyed on the missing output is
+idempotent without extra state:
 
 ```typescript
 system.addReactor({
-  name: "calculate_order_fees",
+  name: "create_shipments",
   query: sql`
-    SELECT id FROM db.orders
-    WHERE status = 'completed'::enums.order_status
-      AND fees_calculated = false
+    select o.id
+    from db.orders o
+    where o.status = 'submitted'
+      and not exists (select 1 from db.shipments sh where sh.order_id = o.id)
   `,
-  recordName: "order",
-  procedure: (s) => {
-    // Calculate and insert fees
-    // ...
-
-    // Mark complete
-    s.modify(sql`
-      UPDATE db.orders
-      SET fees_calculated = true,
-          fees_calculated_at = now()
-      WHERE id = order.id
-    `);
-  },
-});
-```
-
-## Case/Detail Pattern
-
-When entities have variable-length child records:
-
-```typescript
-// Parent entity
-db.table("orders", (table) => {
-  table.fk("client_id", "clients").notNull();
-  table.string("reference", 100).notNull();
-  table.enum("search_type", "search_type").notNull();
-});
-
-// Child cases (0 to many per order)
-db.table("order_cases", (table) => {
-  table.fk("order_id", "orders").notNull();
-  table.string("case_number", 50).notNull();
-  table.string("court_name", 100);
-  table.date("filing_date");
-  table.enum("status", "case_status").notNull();
-});
-
-// Per-case fees (0 to many per case)
-db.table("order_case_fees", (table) => {
-  table.fk("order_case_id", "order_cases").notNull();
-  table.enum("fee_type", "order_case_fee_type").notNull();
-  table.money("amount");
-  table.string("description", 200);
-});
-```
-
-### Aggregating Child Data
-
-```sql
-select
-  o.id,
-  o.reference,
-  count(oc.id) as case_count,
-  coalesce(sum(ocf.amount), 0) as total_fees
-from db.orders o
-left join db.order_cases oc on o.id = oc.order_id
-left join db.order_case_fees ocf on oc.id = ocf.order_case_id
-group by o.id, o.reference
-```
-
-## Multi-Table Import Pattern
-
-When receiving data from external sources, use staging tables:
-
-```typescript
-// Staging table for incoming orders
-db.table("new_orders", (table) => {
-  table.uuid("internal_id").notNull();  // External reference
-  table.fk("client_id", "clients").notNull();
-  table.string("reference", 100);
-  table.string("first_name", 50);
-  table.string("last_name", 50);
-  table.enum("search_type", "search_type").notNull();
-  table.enum("status", "import_status").notNull();
-  table.timestampUtc("received_at").notNull();
-  table.text("raw_xml", 1_000_000);  // Original payload for debugging
-});
-
-// Reactor processes imports
-system.addReactor({
-  name: "import_orders",
-  query: sql`
-    SELECT * FROM db.new_orders
-    WHERE status = 'new'
-  `,
-  recordName: "new_order",
+  recordName: "pending_order",
   procedure: (s) => {
     s.startTransaction();
-
-    // Validate and transform
-    // Insert into main orders table
-    // Mark as imported
-    s.modify(sql`
-      UPDATE db.new_orders
-      SET status = 'imported'::enums.import_status
-      WHERE id = new_order.id
-    `);
-
+    s.modify(sql`insert into db.shipments (order_id) values (pending_order.id)`);
     s.commitTransaction();
   },
 });
 ```
 
-## Interface-Specific Code Mappings
+When and by whom a status changed comes from transaction history, so the
+lifecycle needs no `_at` or `_by` column per state.
 
-Different clients/interfaces use different codes. Map them:
+## Change History Without Log Tables
+
+Do not add activity-log, audit, or status-history tables to record who
+changed what and when. [Transaction queries](../sql/transaction_queries.md)
+(`db.enableTransactionQueries`, on by default) expose every write:
+
+```sql
+select tx_id, tx_timestamp, tx_creator, orders__status
+from db.orders__versions
+where record_id = p_order_id and orders__status__set
+order by tx_id
+```
+
+Keep a separate table only for events that are business data in their own
+right and are not row changes, such as notes people write or delivery receipts
+received from a partner.
+
+## Child Records and Derived Totals
+
+Model variable-length detail as a child table with a foreign key to its
+parent. Compute line amounts with a virtual field and totals with a query or
+view; never store a total on the parent.
 
 ```typescript
-db.table("interface_code_mappings", (table) => {
-  table.enum("interface", "interface_type").notNull();
-  table.fk("client_id", "clients");  // NULL = applies to all clients
-  table.enum("code_type", "code_type").notNull();  // disposition, charge_type, etc.
-  table.string("external_code", 50).notNull();  // What they send
-  table.string("internal_code", 50).notNull();  // What we use
-  table.string("description", 200);
+db.table("order_lines", (t) => {
+  t.fk("order_id", "orders").notNull();
+  t.string("description", 200).notNull();
+  t.decimal("quantity", { precision: 10, scale: 2 }).notNull();
+  t.money("unit_price").notNull();
+  t.virtual("amount", sql`quantity * unit_price`);
 });
 
-// Use in transformations
-s.defScalar(
-  "internal_disposition",
+db.view(
+  "order_totals",
   sql`
-    (SELECT internal_code
-     FROM db.interface_code_mappings
-     WHERE interface = 'external_provider'::enums.interface_type
-       AND code_type = 'disposition'::enums.code_type
-       AND external_code = new_order.disposition_code
-     LIMIT 1)
-  `
+    select o.id as order_id, count(l.id) as line_count,
+      coalesce(sum(l.amount), 0) as total
+    from db.orders o
+    left join db.order_lines l on l.order_id = o.id
+    group by o.id
+  `,
 );
 ```
 
-## Effective Dating for Rates
+Do not copy parent foreign keys (such as `customer_id`) onto children; join
+through the parent.
 
-Support historical accuracy and future changes:
+## External IDs
 
-```typescript
-db.table("client_rates", (table) => {
-  table.fk("client_id", "clients");
-  table.enum("rate_type", "rate_type").notNull();
-  table.money("amount");
-  table.date("effective_from").notNull();
-  table.date("effective_to");  // NULL = no end date
-});
-
-// Query for current rate
-sql`
-  SELECT amount
-  FROM db.client_rates
-  WHERE client_id = target_client_id
-    AND rate_type = 'search_fee'
-    AND current_date BETWEEN effective_from AND COALESCE(effective_to, '2099-12-31'::date)
-  ORDER BY effective_from DESC
-  LIMIT 1
-`
-
-// Query for historical rate (as of specific date)
-sql`
-  SELECT amount
-  FROM db.client_rates
-  WHERE client_id = target_client_id
-    AND rate_type = 'search_fee'
-    AND order_date BETWEEN effective_from AND COALESCE(effective_to, '2099-12-31'::date)
-  ORDER BY effective_from DESC
-  LIMIT 1
-`
-```
-
-## External ID Pattern (Many-to-One External Mapping)
-
-Some external systems have multiple IDs for one internal entity:
+Map partner identifiers to internal records with one table keyed by
+integration. A unique constraint on the external key makes inbound lookups
+unambiguous and lets one internal record carry several external IDs:
 
 ```typescript
-db.table("external_client_ids", (table) => {
-  table.fk("clients").notNull();
-  table.string("external_customer_id", 8).notNull();
+system.enum_({ name: "integration", values: ["storefront", "erp"] });
 
-  // One client can have multiple external customer IDs
-  // because the provider has multiple sub-clients per company
-});
-
-// Look up client from external ID
-sql`
-  SELECT client_id
-  FROM db.external_client_ids
-  WHERE external_customer_id = external_id
-`
-```
-
-## AKA (Also Known As) Pattern
-
-For entities with alternate names:
-
-```typescript
-// Main entity with primary name
-db.table("people", (table) => {
-  table.string("first_name", 50).notNull();
-  table.string("middle_name", 50);
-  table.string("last_name", 50).notNull();
-});
-
-// Alternate names
-db.table("person_akas", (table) => {
-  table.fk("person_id", "people").notNull();
-  table.string("first_name", 50).notNull();
-  table.string("middle_name", 50);
-  table.string("last_name", 50);
-  table.bool("first_name_only").notNull().description(
-    "True if only first name differs (e.g., 'Bob' for 'Robert')"
-  );
-});
-
-// Search including AKAs
-sql`
-  SELECT DISTINCT p.*
-  FROM db.people p
-  LEFT JOIN db.person_akas aka ON p.id = aka.person_id
-  WHERE p.last_name = search_last_name
-    AND (
-      p.first_name = search_first_name
-      OR aka.first_name = search_first_name
-    )
-`
-```
-
-## Automation Instance Tracking
-
-Track which automated processes handled which records:
-
-```typescript
-db.table("automation_instances", (table) => {
-  table.string("machine", 50).notNull();
-  table.string("app", 50).notNull();
-  table.timestampUtc("started_at").notNull();
-});
-
-db.table("automation_searches", (table) => {
-  table.fk("order_id", "orders").notNull();
-  table.fk("automation_instance_id", "automation_instances");
-  table.timestampUtc("assigned_at");
-  table.enum("status", "automation_search_status").notNull();
-  table.fk("processed_by", "sys_users");
+db.table("external_ids", (t) => {
+  t.fk("customer_id", "customers").notNull();
+  t.enum("integration").notNull();
+  t.string("external_id", 100).notNull();
+  t.unique(["integration", "external_id"]);
 });
 ```
 
-This enables:
-- Debugging which automation run processed what
-- Load balancing across instances
-- Tracking automation performance
-- Recovering from automation failures
+Keep credentials in encrypted server-side static secrets, not in mapping rows.
+Translate a fixed
+set of partner codes with an enum and a
+[rules function](decision_tables.md); use a mapping table only when users
+maintain the codes at runtime.
+
+## Inbound Payloads
+
+Write inbound data straight into the target tables. Parse a request inside
+its procedure, holding intermediate rows in procedure tables (`s.defTable`),
+then insert in one transaction:
+
+```sql
+select
+  cast(l.value->>'description' as string) as description,
+  cast(l.value->>'quantity' as decimal(10, 2)) as quantity,
+  cast(l.value->>'unitPrice' as decimal(13, 2)) as unit_price
+from json.array_each(p_body->'lines') l
+```
+
+For bulk files, import into a source database and load with a
+[pipeline](pipelines.md) rather than a persistent staging table that mirrors
+the target.
+
+When processing must be asynchronous or replayable (see
+[External Interfaces](../api/external_interfaces.md#audit-and-replay)), keep
+one inbox row per request: the raw payload, the partner request ID for
+idempotency, and a status. Do not copy the target table's columns into it.
+Delete processed rows on a schedule; a table TTL would also expire `received`
+and `failed` rows whose payloads are still needed for replay:
+
+```typescript
+system.enum_({ name: "inbox_status", values: ["received", "processed", "failed"] });
+
+db.table("partner_inbox", (t) => {
+  t.enum("integration").notNull();
+  t.string("request_id", 100).notNull();
+  t.json("payload").notNull();
+  t.enum("status", "inbox_status").notNull().default(sql.lit`received`);
+  t.timestampUtc("received_at").notNull().default(sql`now()`);
+  t.unique(["integration", "request_id"]);
+});
+
+system.scheduledProc({
+  name: "purge_processed_partner_inbox",
+  schedule: "0 0 3 * * *",
+  procedure: (s) => {
+    s.startTransaction();
+    s.modify(sql`
+      delete from db.partner_inbox
+      where status = 'processed'
+        and received_at < date.add(day, -90, now())
+    `);
+    s.commitTransaction();
+  },
+});
+```
+
+## Effective-Dated Values
+
+Prices and rates that change over time are rows with `effective_from` and
+`effective_to`, looked up by date. See
+[Effective-Dated Rates](../database/money_and_accounting.md#effective-dated-rates).
+
+## Alternate Names
+
+Store alternate names for a person or organization in a child table and
+search both:
+
+```typescript
+db.table("person_aliases", (t) => {
+  t.fk("person_id", "people").notNull();
+  t.string("first_name", 50).notNull();
+  t.string("last_name", 50).notNull();
+});
+```
+
+```sql
+select p.id, p.first_name, p.last_name
+from db.people p
+where (p.last_name = p_last and p.first_name = p_first)
+  or exists (
+    select 1 from db.person_aliases a
+    where a.person_id = p.id
+      and a.last_name = p_last and a.first_name = p_first
+  )
+```
+
+## Anti-Patterns
+
+- Booleans or `_at` timestamps that restate an enum's values.
+- Activity, audit, or "which job processed this" tracking tables; use
+  transaction history, reactor queries keyed on missing output, and runtime
+  logs.
+- Persistent staging tables that duplicate a target table, or raw payloads
+  kept indefinitely "for debugging".
+- Stored totals, counts, or balances on a parent row.
+- Foreign keys copied onto rows that can reach the same record through a
+  join.

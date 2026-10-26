@@ -10,40 +10,32 @@ tags:
 
 # DB Management Page
 
-`pages/db_management` exports `DbManagementPage` — an admin-style page for
-running ad-hoc SQL against the system's live database. It exposes:
-
-- A query editor with tabbed tools for explain, metrics, and history.
-- A schema / table browser.
-- A scrollable, virtualized result viewer.
-
-## When to use
-
-Mount this page in an admin app so operators can run queries without leaving
-the UI. Gate access with the `allow` prop (below) or in the surrounding app,
-route, or navigation before rendering the page.
-
-## Setup
+`DbManagementPage` (`pages/db_management`) is a routed admin page for running
+ad-hoc SQL against the system's live database. It has a query editor with
+explain, metrics, and history tools, a schema and table browser, and a
+virtualized result viewer.
 
 ```tsx
 import { DbManagementPage } from "pages/db_management";
 
-<DbManagementPage path="/admin/db" />
+<DbManagementPage path="/admin/db" allow={sql`is_admin`} />
 ```
 
-## Props
+Props (`DbManagementPageProps`):
 
-- `path` — route path (defaults to `/db-management`).
-- `allow` — optional `BooleanExpr`; the page is only mounted when it is true.
-- `queryColumnCount` — number of columns rendered in the query result table.
+- `path`: the route path. Defaults to `/db-management`; the page title is
+  "Database Management".
+- `allow`: an optional `BooleanExpr`. The page content mounts only when it is
+  true. Otherwise gate access in the surrounding app, route, or navigation.
+- `wrapper`: `(children) => Node`. It wraps the content inside the page's
+  `<Route>`, so you can add authorization or a layout while the page stays
+  self-routing.
+- `queryColumnCount` is declared but currently unused.
 
-## Inner component
-
-Use `DbManagement` (the inner component, without the `<Route>`) when embedding
-the management UI inside an existing route shell. Most callers should use the
-routed `DbManagementPage`.
+`DbManagement` is the same UI without the `<Route>`, for embedding in an
+existing route shell.
 
 ## Related
 
-- [Query authoring](../sql/query_planning.md) — write focused SQL queries
-- [Datagrid](./datagrid.md) — for user-facing tables
+- [Query authoring](../sql/query_planning.md): writing focused SQL queries.
+- [Datagrid](./datagrid.md): user-facing tables.

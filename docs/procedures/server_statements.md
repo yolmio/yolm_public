@@ -7,11 +7,42 @@ tags:
   - transactions
   - http
   - files
+related:
+  - sql/ai_decisions.md
 ---
 
 # Server Statements
 
 These are available in all server-side statement types (GeneralServerStatements, UiServerStatements, StateStatements, EndpointStatements).
+
+## Expected Validation Errors
+
+Use `validationError`, `validationErrorIf`, or `validationErrorUnless` for
+expected invalid input or business-rule rejection:
+
+```typescript
+s.validationErrorIf(sql`case_status is null`, sql.lit`Select a case status.`);
+```
+
+These statements use the ordinary exception and transaction handling. An
+uncaught validation error does not commit an open transaction; it cannot undo
+work already committed. Server catch blocks receive `validation_error`; UI
+clients receive the existing `thrown_error` response so ActionButton and Form
+can present the message with their existing handlers.
+
+An execution ending only in validation is omitted from both live and persisted
+execution history, including slow, sampled, and requested captures. Aggregate
+counts and timings remain. An explicit `logError` or another reportable error
+keeps the execution visible. Use ordinary `throwError` for unexpected program
+or operational failures; its logging behavior is unchanged.
+
+An uncaught API validation returns HTTP 400 and the message unless a response
+status was explicitly selected. A server-error status remains reportable. UI
+callers should handle expected validation; an unhandled browser exception is
+still reported as a missing-handler problem.
+
+Deploy runtime support before publishing models using these helpers. Restore
+compatible application models before rolling back to an older runtime.
 
 ## Database Operations
 
@@ -44,23 +75,32 @@ null. Treat a null scalar as "committed with no changes", not as a failure.
 ### Restore Deleted Records
 
 ```typescript
-s.restore('users', sql`SELECT id FROM deleted_user_ids`);
+s.restore('users', sql`select id from deleted_user_ids`);
 ```
 
 ### Dynamic SQL
 
 ```typescript
-s.dynamicModify(sql`'INSERT INTO ' || table_name || ' (name) VALUES (''John'')'`);
+s.dynamicModify(sql`'insert into ' || table_name || ' (name) values (''John'')'`);
 
 s.dynamicQuery({
-  query: sql`'SELECT * FROM ' || table_name`,
+  query: sql`'select * from ' || table_name`,
   defResultTable: 'query_results',
   columnCount: 5,
   defColumnMetaTable: 'column_metadata'
 });
 
-s.dynamicQueryToCsv(sql`'SELECT * FROM ' || table_name`, { defScalar: 'results' });
+s.dynamicQueryToCsv(sql`'select * from ' || table_name`, { defScalar: 'results' });
 ```
+
+## AI Decisions in Server Procedures
+
+Use ordinary `s.defScalar`, `s.defRecord`, procedure tables, or `s.if` conditions
+with `ai_probability`, `ai_choice`, `ai_score`, or `ai_decide`. Bind a result once
+before reading several fields; repeating the expression can repeat the paid
+call. Make the decision outside a write transaction and revalidate before
+applying it. See [AI Decisions](../sql/ai_decisions.md) for a complete procedure
+example, result paths, profiles, NULL behavior, and failure handling.
 
 ## HTTP Operations
 
@@ -82,7 +122,7 @@ s.request({
   uri: sql.lit`https://api.example.com/users`,
   method: 'POST',
   headers: [{ name: sql.lit`Content-Type`, value: sql.lit`application/json` }],
-  json: { name: sql`user.name`, email: sql`user.email` },
+  json: { name: sql`user_record.name`, email: sql`user_record.email` },
   defReceiveJson: 'response_data',
   defResponseRecord: 'response_info',
   defResponseHeadersTable: 'response_headers'
@@ -92,13 +132,15 @@ s.request({
 ### OAuth Support
 
 ```typescript
+import { getStaticSecret } from "std/services";
+
 s.request({
   uri: sql.lit`https://api.example.com/secure`,
   oauth: {
     type: "ServiceAccount",
-    privateKey: sql`credentials.private_key`,
-    tokenUri: sql`credentials.token_uri`,
-    clientEmail: sql`credentials.client_email`,
+    privateKey: getStaticSecret(sql.lit`GOOGLE_SERVICE_ACCOUNT_KEY`),
+    tokenUri: sql.lit`https://oauth2.googleapis.com/token`,
+    clientEmail: sql.lit`service-account@example.com`,
     scope: sql.lit`https://www.googleapis.com/auth/spreadsheets`
   }
 });
@@ -138,7 +180,7 @@ s.readBlob(sql`file_uuid`, { defContentScalar: 'content_scalar' });
 s.removeBlob(sql`file_uuid`);
 
 // Remove multiple files
-s.removeFiles(sql`SELECT id FROM files_to_delete`);
+s.removeFiles(sql`select id from files_to_delete`);
 ```
 
 ## Image Operations
@@ -158,7 +200,7 @@ s.resizeImage({
 
 ```typescript
 // Render template
-s.defScalar("user_name", sql`user.name`);
+s.defScalar("user_name", sql`user_record.name`);
 s.renderTemplate({
   template: sql`Hello {{name}}`,
   scope: { name: "user_name" },

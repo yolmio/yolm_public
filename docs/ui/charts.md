@@ -10,6 +10,7 @@ related:
   - ui/reporting.md
   - ui/dashboards.md
   - ui/data.md
+  - sql/date_functions.md
 ---
 
 # Charts
@@ -22,8 +23,8 @@ import { LineChart } from "vis/line_charts";
 import { PieChart } from "vis/pie_chart";
 ```
 
-Use the exported TypeScript props for exact signatures. This page focuses on
-query shape and common composition.
+Charts are composed from sub-components (grid, axes, labels, series, tooltip)
+inside the chart root; the exported TypeScript props are the exact contracts.
 
 ## Choose A Chart
 
@@ -32,8 +33,8 @@ query shape and common composition.
 | Compare categories | `BarChart` | label column + one or more numeric columns |
 | Trend over time | `LineChart` | ordered label/date column + one or more numeric columns |
 | Show proportions | `PieChart` | `name` column + numeric `value` column |
-| KPI line panel with light/dark theme | `WiseChart` | `label` column + `value` column |
-| WISE-style stat panel with optional second series | `WiseStatLineChart` | `label`/time column + numeric value columns |
+| KPI line panel | `WiseChart` | `label` + numeric `value` |
+| WISE-style stat panel, optional second series | `WiseStatLineChart` | `period_start_date` (date) + numeric `value` |
 
 ## Bar Chart
 
@@ -100,14 +101,14 @@ Use multiple `LineChart.Line` children when comparing numeric series.
 </PieChart>
 ```
 
-Keep pie charts to a small number of segments. Use `limit` or group small
-categories into "Other" in SQL.
+Group small categories into "Other" in SQL to keep segments few.
 
-## Wise Chart
+## WiseChart
 
-`WiseChart` is a pre-themed wrapper around `LineChart` for KPI panels.
-It expects two-column rows (`label`, `value`), highlights downward
-segments in red, and works in both light and dark themes.
+`WiseChart` (`vis/wise_chart`) is a pre-themed `LineChart` for KPI panels: it
+reads `label` and `value` (other columns are ignored), clamps the y-axis to
+`low`/`high`, highlights downward segments in red, and supports light and dark
+themes.
 
 ```tsx
 import { WiseChart } from "vis/wise_chart";
@@ -123,15 +124,12 @@ import { WiseChart } from "vis/wise_chart";
 />
 ```
 
-Reach for `WiseChart` when you want a labelled KPI line without
-re-styling `LineChart` from scratch; reach for `LineChart` directly
-when you need full control of axes, lines, and tooltips.
+## WiseStatLineChart
 
-## Wise Stat Line Chart
-
-`WiseStatLineChart` from `components/wise_stat_line_chart` renders a titled
-stat panel with axis divisions, optional owner header/label content, and an
-optional dashed second series.
+`WiseStatLineChart` (`components/wise_stat_line_chart`) renders a titled stat
+panel. `query` must select `period_start_date` and `value`; the y-axis has 10
+divisions from the data low (or `graphLow`), and a too-small `graphDivision`
+grows by 1-2-5 multiples of itself until the data fits.
 
 ```tsx
 import { WiseStatLineChart } from "components/wise_stat_line_chart";
@@ -149,44 +147,26 @@ import { WiseStatLineChart } from "components/wise_stat_line_chart";
 />
 ```
 
-`valueFormat` is `WiseStatValueFormat`: `"number"`, `"number_thousands"`,
-`"currency"`, `"percentage"`, or `"duration"`. Pass `series2` with its own
-`query`, `label`, and optional axis settings for dual-series charts.
+Build period queries with
+[`time_bucket_gapfill`](../sql/date_functions.md#per-period-series).
 
-For dashboards that also expose a focused graph route, pass `viewHref` to add
-a compact View action above the panel. Render the focused route with
-`displaySize="page"`; the chart stays vector-based and expands to a larger
-screen and print size. The route remains responsible for light navigation and
-`@media print` page chrome; users can invoke the browser print dialog with
-Ctrl+P or Cmd+P.
+`valueFormat` is `"number"`, `"number_thousands"`, `"currency"`,
+`"percentage"`, or `"duration"` (minutes, shown as hours and minutes), or a
+runtime SQL expression. `reverseAxis` puts low values on top for
+lower-is-better stats. `series2` (`query`, `label`, optional axis settings,
+same value format) adds a dashed series on a right-hand axis.
+
+For a focused graph route, pass `viewHref` to add a compact View action, and
+render the route with `displaySize="page"` (vector output enlarged for screen
+and print). That route owns its navigation and `@media print` page chrome.
 
 ## Chart Data Rules
 
 - Aggregate in SQL before rendering.
 - Order time-series queries by the underlying date expression, not only the
   formatted label.
+- Use `time_bucket_gapfill` for one row per period, not a date-range join.
 - Use `format.date`, `format.currency`, or `format.decimal` for labels/tooltips.
-- Use parent `Data` when several charts share filters or date ranges.
-- Prefer [Reporting](./reporting.md) / `StatRow` for dashboards that combine
-  charts, KPIs, and tables.
 
-## Shared Filter Pattern
-
-```tsx
-<Data procedure={(s) => {
-  s.defScalar("date_from", sql`today() - interval '30 days'`);
-}}>
-  <BarChart query={sql`
-    select status::text as name, count(*) as count
-    from db.orders
-    where created_at >= date_from
-    group by status
-  `}>
-    <BarChart.XAxis />
-    <BarChart.YAxis />
-    <BarChart.XAxisLabels columnName="name" />
-    <BarChart.Bar columnName="count" fill="#3b82f6" />
-    <BarChart.Tooltip />
-  </BarChart>
-</Data>
-```
+- Chart queries can reference scalars from an enclosing `Data` (for example a
+  shared `date_from` filter).

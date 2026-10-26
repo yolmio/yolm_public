@@ -1,5 +1,4 @@
 import { Button } from "components/button";
-import { Card, CardContent, CardHeader } from "components/card";
 import { Chip } from "components/chip";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
@@ -12,11 +11,8 @@ import {
   personTable,
   trainingValidationLabels,
 } from "../helpers";
-import { EmptyState } from "../shared";
-import {
-  adminEmployeeCourseValidationHref,
-  TrainingAdminFrame,
-} from "./shared";
+import { EmptyState, PageShell } from "../shared";
+import { adminEmployeeCourseValidationHref } from "./shared";
 
 export function TrainingAdminCourseValidationsPage(
   props: { block: TrainingBlock },
@@ -82,88 +78,79 @@ export function TrainingAdminCourseValidationsPage(
         );
       }}
     >
-      <TrainingAdminFrame>
-        <Card variant="outlined">
-          <CardHeader>
-            <div className="flex items-center justify-between gap-3 w-full">
-              <Typography level="title-lg" startIcon="Rule">
-                Pending Course Validations
-              </Typography>
-              <Chip size="sm" variant="soft" color="warning">
-                {sql`(select count(*) from pending_course_validations)::string || ' pending'`}
-              </Chip>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <Show
-              when={sql`exists (select 1 from pending_course_validations)`}
-              fallback={
-                <EmptyState
-                  icon="TaskAlt"
-                  title="All clear"
-                  body="Completed courses awaiting manager validation will show up here."
-                />
-              }
-            >
-              <div className="flex flex-col gap-3">
-                <Each
-                  table="pending_course_validations"
-                  recordName="validation"
-                >
-                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 border border-divider rounded-md bg-white">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Typography level="title-md">
-                          {sql`validation.employee_name`}
-                        </Typography>
-                        <Chip size="sm" variant="soft" color="neutral">
-                          {sql`validation.task_count::string ||
+      <PageShell
+        title="Pending course validations"
+        subtitle="Completed courses waiting for a validator to confirm the work and sign off."
+      >
+        <div>
+          <Show
+            when={sql`exists (select 1 from pending_course_validations)`}
+            fallback={
+              <EmptyState
+                icon="TaskAlt"
+                title="All clear"
+                body="Completed courses awaiting manager validation will show up here."
+              />
+            }
+          >
+            <div className="flex flex-col bg-white border border-divider rounded-md overflow-hidden">
+              <Each
+                table="pending_course_validations"
+                recordName="validation"
+              >
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-4 border-b border-divider last:border-b-0">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Typography level="title-md">
+                        {sql`validation.employee_name`}
+                      </Typography>
+                      <Chip size="sm" variant="soft" color="neutral">
+                        {sql`validation.task_count::string ||
                             case when validation.task_count = 1
                               then ' task' else ' tasks' end`}
+                      </Chip>
+                      <Show when={sql`validation.needs_primary_validation`}>
+                        <Chip size="sm" variant="soft" color="warning">
+                          {validationLabels.primaryStageDisplayName}
                         </Chip>
-                        <Show when={sql`validation.needs_primary_validation`}>
-                          <Chip size="sm" variant="soft" color="warning">
-                            {validationLabels.primaryStageDisplayName}
-                          </Chip>
-                        </Show>
-                        <Show
-                          when={sql`validation.needs_secondary_validation`}
-                        >
-                          <Chip size="sm" variant="soft" color="warning">
-                            {validationLabels.secondaryStageDisplayName}
-                          </Chip>
-                        </Show>
-                      </div>
-                      <Typography
-                        level="body-sm"
-                        className="text-neutral-600 mt-1"
+                      </Show>
+                      <Show
+                        when={sql`validation.needs_secondary_validation`}
                       >
-                        {sql`validation.course_name || coalesce(' · Completed ' || ${
-                          formatDateSql(sql`validation.completed_at`)
-                        }, '')`}
-                      </Typography>
+                        <Chip size="sm" variant="soft" color="warning">
+                          {validationLabels.secondaryStageDisplayName}
+                        </Chip>
+                      </Show>
                     </div>
-                    <Button
-                      component="a"
-                      href={adminEmployeeCourseValidationHref(
-                        props.block,
-                        sql`validation.person_id`,
-                        sql`validation.id`,
-                      )}
-                      variant="outlined"
-                      color="neutral"
-                      size="sm"
-                      startIcon="OpenInNew"
+                    <Typography
+                      level="body-sm"
+                      className="text-neutral-600 mt-1"
                     >
-                      Open course
-                    </Button>
+                      {sql`validation.course_name || coalesce(' · Completed ' || ${
+                        formatDateSql(sql`validation.completed_at`)
+                      }, '')`}
+                    </Typography>
                   </div>
-                </Each>
-              </div>
-            </Show>
-          </CardContent>
-        </Card>
-      </TrainingAdminFrame>
+                  <Button
+                    component="a"
+                    href={adminEmployeeCourseValidationHref(
+                      props.block,
+                      sql`validation.person_id`,
+                      sql`validation.id`,
+                    )}
+                    variant="outlined"
+                    color="neutral"
+                    size="sm"
+                    endIcon="ChevronRight"
+                  >
+                    Review course
+                  </Button>
+                </div>
+              </Each>
+            </div>
+          </Show>
+        </div>
+      </PageShell>
     </Data>
   );
 }

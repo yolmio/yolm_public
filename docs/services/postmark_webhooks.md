@@ -21,10 +21,20 @@ and, optionally, to create local webhook tables for bounce/campaign reporting.
 
 ```ts
 import { postmarkWebhooks } from "services/postmark_webhooks";
+import { sql } from "std/sql_utils";
 
 postmarkWebhooks.addDbTables();
 postmarkWebhooks.bounceWebhook((s) => {
-  s.modify(sql`insert into db.email_event_log (payload) values (body)`);
+  // The helper already stores the raw payload; react to the event here
+  s.if(sql`event_type = 'Bounce'`, (s) => {
+    s.startTransaction();
+    s.modify(sql`
+      update db.contacts
+      set email_bounced = true
+      where email = body->>'Email'
+    `);
+    s.commitTransaction();
+  });
 });
 ```
 

@@ -1,4 +1,6 @@
 import { Button } from "components/button";
+import { ActionButton } from "std/action_button";
+import type { ActionButtonConfirm } from "std/action_button";
 import { Chip } from "components/chip";
 import { InlineRecordDisplay } from "components/inline_record_display";
 import {
@@ -34,7 +36,10 @@ import {
   commentHasContent,
   initializeCommentImages,
 } from "./images";
-import { CommentImageEditor } from "./image_editor";
+import {
+  CommentImageEditor,
+  registerCommentImageEditorProcedures,
+} from "./image_editor";
 import { useCommentLinkTarget } from "./link_target";
 export { CommentRecordRail } from "./record_rail";
 
@@ -276,6 +281,7 @@ export class CommentsBlock implements Block {
   }
 
   populate() {
+    registerCommentImageEditorProcedures();
     for (const isReply of [false, true]) {
       const name = isReply ? "comments_insert_reply" : "comments_insert_root";
       system.storedProcedure({
@@ -314,6 +320,91 @@ export class CommentsBlock implements Block {
           body: sql`p_body`,
         }),
     });
+    // Stored so the permission-checked bodies compile once, not in every route.
+    system.storedProcedure({
+      name: "comments_retract",
+      transaction: "caller",
+      inputScalars: [{ name: "p_comment_id", type: "BigInt" }],
+      procedure: (s) => this.defineRetract(s, sql`p_comment_id`),
+    });
+    system.storedProcedure({
+      name: "comments_close",
+      transaction: "caller",
+      inputScalars: [{ name: "p_thread_id", type: "BigInt" }],
+      procedure: (s) => this.defineClose(s, sql`p_thread_id`),
+    });
+    system.storedProcedure({
+      name: "comments_reopen",
+      transaction: "caller",
+      inputScalars: [{ name: "p_thread_id", type: "BigInt" }],
+      procedure: (s) => this.defineReopen(s, sql`p_thread_id`),
+    });
+    system.storedProcedure({
+      name: "comments_toggle_thread_follow",
+      transaction: "caller",
+      inputScalars: [
+        { name: "p_thread_id", type: "BigInt" },
+        { name: "p_following", type: "Bool" },
+      ],
+      procedure: (s) => {
+        s.throwErrorIf(
+          sql`not exists(select 1 from db.comment_threads permission_thread
+                    where permission_thread.id = p_thread_id and ${
+            this.canRead(sql`permission_thread`)
+          })`,
+          sql.lit`Discussion unavailable.`,
+        );
+        s.if(
+          sql`p_following`,
+          (s) =>
+            s.modify(sql`delete from db.comment_thread_subscriptions
+                    where comment_thread_id = p_thread_id and sys_user_id = current_user`),
+        ).else((s) =>
+          s.modify(
+            sql`insert into db.comment_thread_subscriptions (comment_thread_id, sys_user_id)
+                      values (p_thread_id, current_user) on conflict (comment_thread_id, sys_user_id) do nothing`,
+          )
+        );
+      },
+    });
+    // One per record foreign key so the follow toggle compiles once, not per route.
+    for (const field of this.contextualThreadFields()) {
+      system.storedProcedure({
+        name: `comments_toggle_record_follow_${field.name}`,
+        transaction: "caller",
+        inputScalars: [
+          { name: "p_record_id", type: "BigInt" },
+          { name: "p_following", type: "Bool" },
+        ],
+        procedure: (s) => {
+          s.if(sql`p_following`, (s) => {
+            s.modify(sql`
+                          delete from db.comment_thread_subscriptions
+                          where sys_user_id = current_user
+                            and comment_thread_id in (
+                              select followed_thread.id
+                              from db.comment_threads followed_thread
+                              where followed_thread.${sql.ref(field.name)}
+                                = p_record_id
+                            )
+                        `);
+          }, (s) => {
+            s.modify(sql`
+                          insert into db.comment_thread_subscriptions (
+                            comment_thread_id,
+                            sys_user_id
+                          )
+                          select followed_thread.id, current_user
+                          from db.comment_threads followed_thread
+                          where followed_thread.${sql.ref(field.name)}
+                            = p_record_id
+                          on conflict (comment_thread_id, sys_user_id)
+                            do nothing
+                        `);
+          });
+        },
+      });
+    }
   }
 
   validate() {
@@ -382,6 +473,28 @@ export class CommentsBlock implements Block {
       sql.lit`This discussion is closed or no longer exists.`,
     );
     this.insertComment(s, { ...opts, isReply: true });
+  }
+
+  /** Append to an existing record discussion, including an empty system-created thread. */
+  post<T extends IServerBaseStatements>(
+    s: T,
+    opts: { threadId: Sql; body: Sql; intoComment?: string },
+  ) {
+    if (opts.intoComment) s.defScalar(opts.intoComment, { type: "BigInt" });
+    s.defScalar(
+      "discussion_root",
+      sql`(select min(id) from db.comments
+      where comment_thread_id = ${opts.threadId} and reply_to_comment_id is null)`,
+    );
+    s.if(sql`discussion_root is null`, (s) => {
+      this.insertComment(s, {
+        ...opts,
+        replyToCommentId: sql`null`,
+        isReply: false,
+      });
+    }).else((s) => {
+      this.reply(s, { ...opts, replyToCommentId: sql`discussion_root` });
+    });
   }
 
   private insertComment<T extends IServerBaseStatements>(
@@ -576,6 +689,15 @@ export class CommentsBlock implements Block {
   }
 
   retract<T extends IServerBaseStatements>(s: T, commentId: Sql) {
+    s.callStoredProcedure("comments_retract", {
+      inputScalars: { p_comment_id: commentId },
+    });
+  }
+
+  private defineRetract<T extends IServerBaseStatements>(
+    s: T,
+    commentId: Sql,
+  ) {
     this.assertThreadWrite(
       s,
       sql`(select comment_thread_id from db.comments where id = ${commentId})`,
@@ -590,6 +712,12 @@ export class CommentsBlock implements Block {
   }
 
   close<T extends IServerBaseStatements>(s: T, threadId: Sql) {
+    s.callStoredProcedure("comments_close", {
+      inputScalars: { p_thread_id: threadId },
+    });
+  }
+
+  private defineClose<T extends IServerBaseStatements>(s: T, threadId: Sql) {
     this.assertThreadWrite(s, threadId);
     s.modify(sql`
       update db.comment_threads
@@ -606,6 +734,12 @@ export class CommentsBlock implements Block {
   }
 
   reopen<T extends IServerBaseStatements>(s: T, threadId: Sql) {
+    s.callStoredProcedure("comments_reopen", {
+      inputScalars: { p_thread_id: threadId },
+    });
+  }
+
+  private defineReopen<T extends IServerBaseStatements>(s: T, threadId: Sql) {
     this.assertThreadWrite(s, threadId);
     s.modify(sql`
       update db.comment_threads
@@ -635,6 +769,8 @@ export interface CommentsPanelProps {
   title?: string;
   emptyText?: string;
   compact?: boolean;
+  /** Whether the root author may close or reopen the discussion. */
+  allowThreadClosure?: boolean;
   block?: CommentsBlock;
   additionalCreateActions?: Array<{
     label: string;
@@ -740,31 +876,15 @@ export function CommentsPanel(props: CommentsPanelProps) {
                   onClick={(s) => {
                     s.server((s) => {
                       s.startTransaction();
-                      s.if(sql`ui.comments_is_following`, (s) => {
-                        s.modify(sql`
-                          delete from db.comment_thread_subscriptions
-                          where sys_user_id = current_user
-                            and comment_thread_id in (
-                              select followed_thread.id
-                              from db.comment_threads followed_thread
-                              where followed_thread.${sql.ref(props.foreignKey)}
-                                = ui.comments_record_id
-                            )
-                        `);
-                      }, (s) => {
-                        s.modify(sql`
-                          insert into db.comment_thread_subscriptions (
-                            comment_thread_id,
-                            sys_user_id
-                          )
-                          select followed_thread.id, current_user
-                          from db.comment_threads followed_thread
-                          where followed_thread.${sql.ref(props.foreignKey)}
-                            = ui.comments_record_id
-                          on conflict (comment_thread_id, sys_user_id)
-                            do nothing
-                        `);
-                      });
+                      s.callStoredProcedure(
+                        `comments_toggle_record_follow_${props.foreignKey}`,
+                        {
+                          inputScalars: {
+                            p_record_id: sql`ui.comments_record_id`,
+                            p_following: sql`ui.comments_is_following`,
+                          },
+                        },
+                      );
                       s.commitTransaction();
                     });
                     s.increment("comments_refresh_key");
@@ -962,6 +1082,7 @@ export function CommentsPanel(props: CommentsPanelProps) {
                         retractedAt={sql`comment_thread.root_retracted_at`}
                         closedAt={sql`comment_thread.closed_at`}
                         isAuthor={sql`comment_thread.root_is_author`}
+                        allowThreadClosure={props.allowThreadClosure}
                         threadRoot
                       />
                     </CommentTarget>
@@ -1228,7 +1349,12 @@ function CommentPage(props: { block: CommentsBlock }) {
         when={sql`linked_discussion.id is not null and linked_discussion.parent_href is not null`}
         fallback={
           <main className="mx-auto max-w-3xl space-y-5 p-4 sm:p-6">
-            <Button href="/notifications" variant="plain" startIcon="ArrowBack">
+            <Button
+              href="/notifications"
+              backLink
+              variant="plain"
+              startIcon="ArrowBack"
+            >
               Notifications
             </Button>
             <div role="status" className="rounded-md border border-divider p-6">
@@ -1312,6 +1438,7 @@ function CommentActions(props: {
   isAuthor: Sql;
   canWrite: Sql;
   threadRoot?: boolean;
+  allowThreadClosure?: boolean;
 }) {
   const appDomain = useApp().domain;
   return (
@@ -1392,7 +1519,7 @@ function CommentActions(props: {
           History
         </Button>
       </Show>
-      {props.threadRoot && (
+      {props.threadRoot && props.allowThreadClosure !== false && (
         <Show when={sql`${props.canWrite} and ${props.isAuthor}`}>
           <Button
             size="xs"
@@ -1423,5 +1550,298 @@ function CommentActions(props: {
         </Show>
       )}
     </div>
+  );
+}
+
+/** One chronological record discussion with interleaved domain activity. */
+export function CommentsTimeline(props: {
+  threadId: Sql;
+  /** Columns: id, created_at, timeline_order (0 before comments, 2 after). Row content is rendered by activityContent. */
+  activityQuery: Sql;
+  activityContent: (row: Sql) => Node;
+  attachments?: (commentId: Sql) => Node;
+  beforeTimeline?: Node;
+  composerActions?: Node;
+  actions?: Array<{
+    label: Node;
+    visible: Sql;
+    confirm?: ActionButtonConfirm;
+    action: (s: UiServerStatements) => void;
+    /** Show as the main action of the composer. */
+    primary?: boolean;
+  }>;
+}) {
+  const block = system.block(CommentsBlock);
+  block.registerImageApp();
+  const target = useCommentLinkTarget();
+  return (
+    <Data
+      local
+      noRefetch
+      procedure={(s) => {
+        s.defScalar("timeline_body", sql`lexical_simple_paragraph('')`);
+        s.defScalar("timeline_images_pending", false);
+        s.defScalar("timeline_editor_key", 0);
+        s.defScalar("timeline_edit_id", sql`cast(null as bigint)`);
+        s.defScalar("timeline_edit_body", sql`lexical_simple_paragraph('')`);
+        s.defScalar("timeline_edit_images_pending", false);
+      }}
+    >
+      <Data
+        procedure={(s) => {
+          s.defRecord(
+            "timeline_thread",
+            sql`select comment_thread.*,
+          ${block.canWrite(sql`comment_thread`)} as can_write
+          from db.comment_threads comment_thread
+          where comment_thread.id = ${props.threadId} and ${
+              block.canRead(sql`comment_thread`)
+            }`,
+          );
+          s.defTable(
+            "timeline_comments",
+            sql`select *, sys_user_id = current_user as is_author from db.comments
+          where comment_thread_id = timeline_thread.id`,
+          );
+          s.defTable(
+            "timeline_activity",
+            sql`select * from (${props.activityQuery}) activity
+          where timeline_thread.id is not null`,
+          );
+          s.defTable(
+            "timeline_entries",
+            sql`select id, created_at, 'comment' as kind, 1 as timeline_order from timeline_comments
+          union all select id, created_at, 'activity' as kind, timeline_order from timeline_activity
+          order by created_at, timeline_order, id`,
+          );
+          s.defScalar(
+            "timeline_following",
+            sql`exists(select 1 from db.comment_thread_subscriptions
+          where comment_thread_id = timeline_thread.id and sys_user_id = current_user)`,
+          );
+        }}
+      >
+        <Show when={sql`timeline_thread.id is not null`}>
+          {props.beforeTimeline}
+          <div className="space-y-3">
+            <Each table="timeline_entries" recordName="entry">
+              <Show when={sql`entry.kind = 'activity'`}>
+                <Data
+                  procedure={(s) =>
+                    s.defRecord(
+                      "timeline_event",
+                      sql`select * from timeline_activity where id = entry.id`,
+                    )}
+                >
+                  <div className="flex items-center gap-2 py-1 text-xs text-secondary">
+                    <MaterialIcon icon="History" className="shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      {props.activityContent(sql`timeline_event`)}
+                    </div>
+                    <time className="shrink-0">
+                      {sql`format.date(entry.created_at, '%b %-d · %-I:%M %p')`}
+                    </time>
+                  </div>
+                </Data>
+              </Show>
+              <Show when={sql`entry.kind = 'comment'`}>
+                <Data
+                  procedure={(s) =>
+                    s.defRecord(
+                      "timeline_comment",
+                      sql`select * from timeline_comments where id = entry.id`,
+                    )}
+                >
+                  <CommentTarget
+                    commentId={sql`timeline_comment.id`}
+                    targetCommentId={target}
+                  >
+                    <article className="overflow-hidden rounded-md border border-divider">
+                      <div className="flex items-center justify-between gap-2 border-b border-divider bg-neutral-50 px-3 py-2">
+                        <CommentHeader
+                          authorId={sql`timeline_comment.sys_user_id`}
+                          createdAt={sql`timeline_comment.created_at`}
+                          editedAt={sql`timeline_comment.last_edited_at`}
+                        />
+                        <Show
+                          when={sql`timeline_thread.can_write and timeline_comment.is_author and timeline_comment.retracted_at is null`}
+                        >
+                          <Button
+                            size="xs"
+                            variant="plain"
+                            color="neutral"
+                            onClick={(s) => {
+                              s.setScalar(
+                                "timeline_edit_id",
+                                sql`timeline_comment.id`,
+                              );
+                              s.setScalar(
+                                "timeline_edit_body",
+                                sql`timeline_comment.comments`,
+                              );
+                            }}
+                          >
+                            Edit
+                          </Button>
+                        </Show>
+                      </div>
+                      <div className="p-3">
+                        <Show
+                          when={sql`timeline_edit_id = timeline_comment.id`}
+                          fallback={
+                            <CommentBody
+                              body={sql`timeline_comment.comments`}
+                              retractedAt={sql`timeline_comment.retracted_at`}
+                            />
+                          }
+                        >
+                          <CommentEditor
+                            id={sql`'timeline-edit-' || timeline_comment.id`}
+                            scalar="timeline_edit_body"
+                          />
+                          <div className="mt-2 flex justify-end gap-2">
+                            <Button
+                              size="sm"
+                              variant="plain"
+                              onClick={(s) =>
+                                s.setScalar("timeline_edit_id", sql`null`)}
+                            >
+                              Cancel
+                            </Button>
+                            <ActionButton
+                              size="sm"
+                              disabled={sql`timeline_edit_images_pending or not ${
+                                commentHasContent(sql`timeline_edit_body`)
+                              }`}
+                              action={(s) => {
+                                s.startTransaction();
+                                block.edit(s, {
+                                  commentId: sql`timeline_comment.id`,
+                                  revisionNo: sql`timeline_comment.revision_no`,
+                                  body: sql`timeline_edit_body`,
+                                });
+                                s.commitTransaction();
+                              }}
+                              onSuccess={(s) =>
+                                s.setScalar("timeline_edit_id", sql`null`)}
+                            >
+                              Save
+                            </ActionButton>
+                          </div>
+                        </Show>
+                        {props.attachments?.(sql`timeline_comment.id`)}
+                      </div>
+                    </article>
+                  </CommentTarget>
+                </Data>
+              </Show>
+            </Each>
+          </div>
+          <Show
+            when={sql`timeline_thread.can_write and timeline_thread.closed_at is null`}
+          >
+            <div className="mt-4">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-medium">Add a comment</span>
+                <ActionButton
+                  size="xs"
+                  variant="plain"
+                  color="neutral"
+                  action={(s) => {
+                    s.startTransaction();
+                    s.callStoredProcedure("comments_toggle_thread_follow", {
+                      inputScalars: {
+                        p_thread_id: sql`timeline_thread.id`,
+                        p_following: sql`timeline_following`,
+                      },
+                    });
+                    s.commitTransaction();
+                  }}
+                >
+                  {sql`case when timeline_following then 'Unfollow' else 'Follow' end`}
+                </ActionButton>
+              </div>
+              <Show
+                when={sql`timeline_editor_key % 2 = 0`}
+                fallback={
+                  <CommentEditor
+                    id="timeline-editor-alt"
+                    scalar="timeline_body"
+                  />
+                }
+              >
+                <CommentEditor id="timeline-editor" scalar="timeline_body" />
+              </Show>
+              <div className="mt-2 flex flex-wrap justify-end gap-2">
+                <div className="mr-auto">{props.composerActions}</div>
+                {props.actions?.map((action) => (
+                  <Show when={action.visible}>
+                    <ActionButton
+                      size="sm"
+                      variant={action.primary ? "solid" : "outlined"}
+                      color={action.primary ? "primary" : "neutral"}
+                      disabled={sql`timeline_images_pending`}
+                      confirm={action.confirm}
+                      action={(s) => {
+                        s.startTransaction();
+                        s.if(
+                          commentHasContent(sql`timeline_body`),
+                          (s) =>
+                            block.post(s, {
+                              threadId: sql`timeline_thread.id`,
+                              body: sql`timeline_body`,
+                            }),
+                        );
+                        action.action(s);
+                        s.commitTransaction();
+                      }}
+                      onSuccess={(s) => {
+                        s.setScalar(
+                          "timeline_body",
+                          sql`lexical_simple_paragraph('')`,
+                        );
+                        s.increment("timeline_editor_key");
+                      }}
+                    >
+                      {action.label}
+                    </ActionButton>
+                  </Show>
+                ))}
+                <ActionButton
+                  size="sm"
+                  // A primary action (e.g. Close out) leads; Comment steps back.
+                  variant={props.actions?.some((action) => action.primary)
+                    ? "outlined"
+                    : "solid"}
+                  color={props.actions?.some((action) => action.primary)
+                    ? "neutral"
+                    : "primary"}
+                  disabled={sql`timeline_images_pending or not ${
+                    commentHasContent(sql`timeline_body`)
+                  }`}
+                  action={(s) => {
+                    s.startTransaction();
+                    block.post(s, {
+                      threadId: sql`timeline_thread.id`,
+                      body: sql`timeline_body`,
+                    });
+                    s.commitTransaction();
+                  }}
+                  onSuccess={(s) => {
+                    s.setScalar(
+                      "timeline_body",
+                      sql`lexical_simple_paragraph('')`,
+                    );
+                    s.increment("timeline_editor_key");
+                  }}
+                >
+                  Comment
+                </ActionButton>
+              </div>
+            </div>
+          </Show>
+        </Show>
+      </Data>
+    </Data>
   );
 }

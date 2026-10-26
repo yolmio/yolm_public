@@ -864,7 +864,11 @@ export function UsernamePasswordAuth(props: UsernamePasswordAuthProps) {
     addCtx(new Context(userFilter, cookieName, props.cookieExpiration));
     const wrappedChildren = props.idleTimeout
       ? (
-        <IdleTimeout config={props.idleTimeout} cookieName={cookieName}>
+        <IdleTimeout
+          config={props.idleTimeout}
+          cookieName={cookieName}
+          sessionless
+        >
           {props.children}
         </IdleTimeout>
       )

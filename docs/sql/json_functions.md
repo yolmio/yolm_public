@@ -21,27 +21,28 @@ Yolm SQL provides comprehensive JSON support compatible with much of PostgreSQL'
 | --- | --- | --- |
 | `json_build_object(key, value, ...)` | `json.build_object(...)` | `json` object |
 | `json_build_array(value, ...)` | `json.build_array(...)` | `json` array |
-| `json.get_field(json, key_or_index)` | `json_extract(json, key_or_index)` | `json` |
-| `json.get_field_as_text(json, key_or_index)` | | `string` |
-| `json.extract_path(json, path)` | `#>` operator | `json` |
-| `json.extract_path_text(json, path)` | `#>>` operator | `string` |
+| `json.get_field(json, key_or_index)` | `json_extract(json, key_or_index)`, `->` operator | `json` |
 | `json.path_query_array(json, path)` | `json_path_query_array(json, path)` | `json` array |
 | `json.path_query_first(json, path)` | `json_path_query_first(json, path)` | `json` |
 | `json.from_string(text)` | `json_parse(text)`, `text::json` | `json` |
 | `json_typeof(json)` | | `string` |
 | `json_array_length(json)` | | `int` |
 | `json_object_length(json)` | | `int` |
-| `json.contains(left, right)` | `@>` operator | `bool` |
-| `json.contained_by(left, right)` | `<@` operator | `bool` |
-| `json.exists(json, key)` | `?` operator | `bool` |
-| `json.exists_any(json, keys)` | `?\|` operator | `bool` |
-| `json.exists_all(json, keys)` | `?&` operator | `bool` |
-| `json.concat(left, right)` | `\|\|` operator | `json` |
-| `json.delete_key(json, key)` | `-` operator with text key | `json` |
-| `json.delete_index(json, index)` | `-` operator with integer index | `json` |
-| `json.delete_path(json, path)` | `#-` operator | `json` |
 | `xml.to_json(text)` | `xml_to_json(text)` | `json` |
 | `json.to_xml(json)` | `json_to_xml(json)` | `string` |
+
+These operations are available only as operators; there is no callable
+function name for them:
+
+| Operator | Result |
+| --- | --- |
+| `->>` (field or index as text) | `string` |
+| `#>` / `#>>` (path as JSON / text) | `json` / `string` |
+| `@>` / `<@` (contains / contained by) | `bool` |
+| `?` / `?\|` / `?&` (key exists / any / all) | `bool` |
+| `\|\|` (concatenate) | `json` |
+| `-` (delete key or array index) | `json` |
+| `#-` (delete path) | `json` |
 
 ## External JSON/XML Interfaces
 
@@ -342,7 +343,9 @@ generating XML responses or outbound payloads.
 
 ### json.array_each
 
-Expands a JSON array to rows.
+Expands a JSON array to rows. Returns `value json, index int`.
+
+Aliases: `json.array_elements`, `json_array_elements`
 
 ```sql
 select value, index
@@ -360,7 +363,9 @@ from json.array_each('[{"name": "Alice"}, {"name": "Bob"}]'::json);
 
 ### json.object_each
 
-Expands a JSON object to key-value rows.
+Expands a JSON object to key-value rows. Returns `key string, value json`.
+
+Aliases: `json.each`, `json_each`
 
 ```sql
 select key, value
@@ -434,11 +439,17 @@ where id = 1;
 
 ### Check if Key Exists
 
+Use the `?` operator to test for a top-level key:
+
 ```sql
 select *
 from events
-where data -> 'user_id' is not null;
+where data ? 'user_id';
 ```
+
+`data -> 'user_id' is not null` is also true when the key holds JSON `null`,
+because `->` returns the JSON value `null`, not SQL `null`. To require a key
+with a non-null value, use `data ->> 'user_id' is not null`.
 
 ### Safely Extract with Default
 

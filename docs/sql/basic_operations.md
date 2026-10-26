@@ -144,26 +144,29 @@ This pattern:
 
 #### Upsert with Derived Tables
 
-Use inline queries as the source:
+Use a derived table as the source. Here `record` is a procedure record
+holding one incoming row:
 
 ```sql
-merge into products
+merge into db.products
 using (
   select
     record.sku as sku,
     record.name as name,
     record.price::decimal(10,2) as price
 ) as src
-on products.sku = src.sku
+on db.products.sku = src.sku
 when matched then
   update set
     name = src.name,
-    price = src.price,
-    updated_at = current_timestamp
+    price = src.price
 when not matched then
-  insert (sku, name, price, created_at)
-  values (src.sku, src.name, src.price, current_timestamp)
+  insert (sku, name, price)
+  values (src.sku, src.name, src.price)
 ```
+
+Do not add `created_at` / `updated_at` fields just to track changes; read
+change times from [transaction queries](./transaction_queries.md) instead.
 
 #### Conditional MERGE
 
@@ -253,19 +256,81 @@ union
 
 ## RETURNING INTO
 
-Mutation statements can return expressions into procedure scalars using
-`returning ... into ...`.
+`insert`, `update`, `delete`, `merge`, and `insert ... on conflict` can write
+one output row for every directly affected row into a procedure destination:
 
 ```sql
-insert into book (title, author)
-values ('New Book', 3)
-returning id into new_book_id;
-
-update book
-set price = price * 1.1
-where id = target_book_id
-returning price into updated_price;
+returning expression [as output_name] [, ...]
+into procedure_target [(target_field [, ...])]
 ```
+
+Use a procedure table when a statement can affect multiple rows. Table output
+appends to rows already in the destination. A scalar accepts one expression
+and a record accepts one row; execution raises a cardinality error if an
+unproven statement produces a second row. If no rows are affected, a scalar or
+record remains absent.
+
+```typescript
+s.defTable("created_books", {
+  fields: [
+    { name: "book_id", type: "BigInt" },
+    { name: "title", type: "String" },
+  ],
+});
+
+s.modify(sql`
+  insert into db.book (title, author)
+  select title, author_id from new_books
+  returning id as book_id, title into created_books
+`);
+```
+
+Without an explicit target-field list, output names must match destination
+fields. Direct fields keep their names; other expressions require `as`. An
+explicit field list assigns expressions positionally:
+
+```sql
+update db.book
+set price = price * 1.1
+where author = target_author
+returning id, old.price, new.price
+into changed_books (book_id, previous_price, current_price);
+```
+
+The unqualified target-table field is the new value for `insert` and `update`,
+the old value for `delete`, and the action-appropriate value for `merge`.
+Explicit `old.field` and `new.field` references are also available; a missing
+row image is null. `*`, `old.*`, and `new.*` omit hidden fields. Aggregates,
+window expressions, mutations, and self-referential subqueries are not allowed
+in the output list.
+
+For `merge`, output expressions may also reference source fields.
+`merge_action()` returns `INSERT`, `UPDATE`, or `DELETE` for each affected row:
+
+```sql
+merge into db.book
+using imported_books source on db.book.external_id = source.external_id
+when matched then update set title = source.title
+when not matched then
+  insert (external_id, title) values (source.external_id, source.title)
+returning merge_action() as action, id, source.external_id
+into imported_results;
+```
+
+`on conflict do nothing` emits no row for a skipped candidate. A row changed by
+`on conflict do update` exposes both its old and new target images.
+
+Returned values include defaults and generated fields and observe the direct
+mutation before AFTER triggers or reactors run. Output order is unspecified;
+return a correlation key instead of relying on row position. Generated IDs
+returned from a multirow insert can feed later set-based child inserts in the
+same transaction when their lineage remains direct and type-safe.
+
+A transaction rollback or optimistic-concurrency retry discards the attempt's
+output. A caught `insert` error restores that statement's destination output.
+Caught `update` and `delete` errors preserve output from earlier successful
+rows, while the failing row emits nothing. Errors from streaming `merge`
+execution currently escape a procedure `try` block.
 
 ## Mutation Limitations
 

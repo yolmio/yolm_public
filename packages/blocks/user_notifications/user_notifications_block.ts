@@ -1,3 +1,9 @@
+import type {
+  UserNotificationOpenPage,
+  UserNotificationSettingsPage,
+  UserNotificationsPage,
+  UserNotificationsPushProvider,
+} from "./pages";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
 import { storedScheduledProc } from "std/scheduled_utils";
@@ -118,10 +124,10 @@ export class UserNotificationsBlock implements Block {
   Routes = () => NotificationRoutes({ block: this });
   SidebarItem = (props: { label?: Node } = {}) =>
     NotificationSidebarItem({ ...props, block: this });
-  static NotificationsPage: any;
-  static NotificationSettingsPage: any;
-  static NotificationOpenPage: any;
-  static PushProvider: any;
+  static NotificationsPage: typeof UserNotificationsPage;
+  static NotificationSettingsPage: typeof UserNotificationSettingsPage;
+  static NotificationOpenPage: typeof UserNotificationOpenPage;
+  static PushProvider: typeof UserNotificationsPushProvider;
 
   blockName = "UserNotificationsBlock";
   blockDisplayName = "User Notifications";
@@ -223,6 +229,15 @@ export class UserNotificationsBlock implements Block {
       this.registerEmailPreparation();
       this.registerEmailReactor();
     }
+
+    // Keeps the notification-open SQL out of every UI route that opens one.
+    system.storedProcedure({
+      name: "user_notifications_open",
+      transaction: "caller",
+      inputScalars: [{ name: "p_notification_id", type: "BigInt" }],
+      outputScalars: [{ name: "p_href", type: "String" }],
+      procedure: (s) => this.open(s, sql`p_notification_id`, "p_href"),
+    });
   }
 
   source(key: string) {

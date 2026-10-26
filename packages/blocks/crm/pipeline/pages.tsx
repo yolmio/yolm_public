@@ -133,6 +133,7 @@ export function PipelinePages(props: PipelinePagesProps) {
                   color="neutral"
                   size="sm"
                   href={`${basePath}/${pipeline.name}`}
+                  backLink
                   startIcon="ArrowBack"
                 >
                   Back to Board

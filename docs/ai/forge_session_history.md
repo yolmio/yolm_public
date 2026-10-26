@@ -7,7 +7,7 @@ tags: [ai, forge, sessions]
 # Session history and review links
 
 Use `execRead` for reads and `exec` for publishing. Select the existing session in
-the enclosing MCP call; version IDs are global IDs, not the session's v1/v2 label.
+the enclosing MCP call; version 1025 is named `v1025` everywhere.
 Read this guide with `readFile({path:"docs/ai/forge_session_history.md"})`.
 
 ```js
@@ -27,10 +27,11 @@ check `messageTruncated`. Read older pages only when needed to understand the wo
 
 `getLinks` returns `sessionUrl`, and applicable `versionUrl`, `artifactUrl`,
 `previewUrl`. Artifact IDs are public string IDs returned by artifact tools.
-Versions/artifacts must belong to the selected session. Preview `domain` is the
+Artifacts must belong to the selected session. Preview `domain` is the
 canonical app domain from the selected version. Its preview must already have
 resolved domains; `getLinks` does not start it. `path` must begin with a single `/`.
-The resulting preview URL opens the actual app/page; version URLs open Forge review.
+The resulting preview URL opens the actual app/page; version URLs open the
+version's Forge page, `/versions/{versionId}`.
 
 To publish a durable, useful outcome in the session timeline:
 

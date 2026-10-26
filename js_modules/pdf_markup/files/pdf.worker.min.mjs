@@ -1,1 +1,1 @@
-../node_modules/pdfjs-dist/build/pdf.worker.min.mjs
+../node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs

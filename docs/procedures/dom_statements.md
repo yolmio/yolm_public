@@ -20,30 +20,43 @@ s.navigate(sql.lit`/dashboard`);
 s.navigate(sql.lit`/dashboard`, sql`true`); // With replace option
 
 // URL parameters
-s.setQueryParam('page', sql`2`);
-s.setQueryParam('filter', sql`'active'`, sql`true`); // With replace
+s.setQueryParam('page', sql`2`); // Uses the param's declared history
+s.setQueryParam('filter', sql`'active'`, sql`true`); // Force replace
 ```
 
+`setQueryParam` writes the param and updates the URL, like `setScalar` on a
+query param. Without the third argument it follows the `history` declared on
+the `Data` `queryParams` entry (default `"replace"`); the argument overrides
+that for one write.
+
 ## Server Interaction
+
+For ordinary mutations prefer `Form` or `ActionButton`, which own loading,
+errors, and refetch; see
+[mutation loading and error states](./patterns.md#mutation-loading-and-error-states).
+Use these statements directly only when no such primitive fits.
 
 ```typescript
 // Simple server call
 s.server((s) => {
-  s.modify(sql`INSERT INTO todos (name) VALUES ('Buy milk')`);
+  s.startTransaction();
+  s.modify(sql`insert into db.todos (title) values ('Buy milk')`);
+  s.commitTransaction();
+  s.refetch();
 });
 
-// With file upload
-s.serverWithFiles(
-  sql`SELECT id, content FROM files WHERE uploading = true`,
-  (s) => {
-    s.modify(sql`UPDATE files SET uploading = false`);
-  }
-);
+// With file upload: in onFileChange, `file` lists the selected files
+s.defRecord("dom_file", sql`select * from file limit 1`);
+s.serverWithFiles(sql`select uuid from file`, (s) => {
+  s.readDomFile(sql`dom_file.uuid`, "content");
+  s.createBlob(sql`content`, { defHashScalar: "blob_hash" });
+  // ...then insert a row referencing blob_hash in a transaction
+});
 
 // With error handling
 s.tryServer({
   body: (s) => { /* UiServerStatements */ },
-  transferFiles: sql`SELECT id, content FROM files WHERE uploading = true`,
+  transferFiles: sql`select uuid from file`,
   errorName: "server_error",
   catch: (s) => s.debugExpr(sql`server_error.message`)
 });
@@ -76,6 +89,8 @@ s.navigate(sql.concat(sql.lit`/items/`, sql`created_id`));
 Use `ui.*` writes for UI state that should be reflected in the rendered tree.
 Use proc-local result scalars/tables for values the client-side continuation
 needs to branch on, navigate with, or pass to later client statements.
+For multirow output, row images, and `MERGE` behavior, see
+[RETURNING INTO](../sql/basic_operations.md#returning-into).
 
 ## Element Manipulation
 
@@ -110,6 +125,10 @@ s.history.forward();
 s.history.go(sql`-2`);
 ```
 
+`history.back()` is not a reliable way to return to a list: the previous entry
+may be a different page. Use a `backLink` on the link or button instead; see
+[Routing](../ui/routing.md#returning-to-a-list).
+
 ## Event Handling
 
 ```typescript
@@ -134,7 +153,7 @@ s.switchKeyboardEvent({
 
 ```typescript
 s.clipboard.readText('clipboard_content');
-s.clipboard.writeText(sql`text to copy`);
+s.clipboard.writeText(sql.lit`text to copy`);
 ```
 
 ## Cookie Management
@@ -152,7 +171,7 @@ s.removeCookie(sql.lit`temp_data`);
 
 ```typescript
 s.download(sql.lit`file.txt`, sql`content`, sql.lit`text/plain`);
-s.readDomFile(sql`file_input.files[0]`, 'file_contents');
+s.readDomFile(sql`dom_file.uuid`, 'file_contents');
 ```
 
 ## Tasks

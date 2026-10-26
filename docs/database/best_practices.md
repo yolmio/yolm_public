@@ -16,6 +16,20 @@ reader, and writer. Prefer block-provided schema before adding custom tables,
 and derive inexpensive values with queries or virtual fields instead of storing
 duplicates.
 
+- Removing a deployed field or table does not reclaim it: the slot and its
+  existing data stay as an orphan until a transform. Add a table or field only when a
+  concrete writer and reader exist for it.
+- Derive, don't store: booleans that follow from a `*_at` timestamp or status
+  (`is_paid` from `paid_at`), fields copied from a parent record, one column
+  per channel or variant, and stored totals or counts belong in queries,
+  [virtual fields](virtual_fields.md), or views.
+- Do not add audit, log, or history tables to track changes. Use transaction
+  queries instead (`db.enableTransactionQueries`, on by default); see
+  [Transaction Queries](../sql/transaction_queries.md). History is limited by
+  each table's retention (`autoCompact` folds old update payloads away), and
+  reading it scans the retained log, so add a provenance field such as
+  `created_at` when the UI or logic reads it.
+
 Yolm is a columnar HTAP engine with fast scans. It does not expose user-defined
 secondary indexes, physical partition keys, clustering keys, or sort keys. Do
 not add denormalized, cache, or summary tables as speculative row-store

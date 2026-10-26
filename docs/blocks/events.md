@@ -14,9 +14,9 @@ related:
 
 # Events Block
 
-`EventsBlock` provides typed append-only events, generic record bindings, and a
-`physical_trace` read model. It is useful when workflows need durable history,
-correlation, idempotency, corrections, or a common physical movement trace.
+`EventsBlock` provides typed append-only events with correlation,
+idempotency, and corrections, generic record bindings, and a `physical_trace`
+read model.
 
 Initialize `AuthBlock` first because event actors reference `sys_users`. Register
 at least one aggregate type and one event type:
@@ -38,9 +38,10 @@ system.addBlock(events);
 
 Call `events.emit(s, options)` from a server procedure. It writes `db.events`,
 automatically binds the aggregate in `db.event_bindings`, and can add more
-bindings. Supply the event's `summary`, `aggregateId`, `aggregateType`,
-`eventType`, and output scalar name; use `idempotencyKey`, `causationEventId`,
-or `correctionOfEventId` when the workflow needs those relationships.
+bindings. Required options are `summary`, `aggregateId`, `aggregateType`,
+`eventType`, and `intoEventId` (output scalar name); see `EmitEventOptions` in
+`packages/blocks/events/index.ts` for `idempotencyKey`, `causationEventId`,
+`correctionOfEventId`, and the rest.
 
 Use `events.appendPhysicalTrace(s, options)` only for normalized physical
 movement records. The domain event remains the source of truth.

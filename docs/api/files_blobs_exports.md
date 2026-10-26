@@ -1,6 +1,6 @@
 ---
 title: Files, Blobs, And Exports
-description: How to store uploaded bytes, serve blobs, render Typst templates, create PDFs and ZIPs, and build print/export queues in Yolm.
+description: How to store uploaded bytes, serve blobs, render Typst templates, create PDFs and ZIPs, export tables, and queue print jobs in Yolm.
 tags:
   - api
   - files
@@ -12,6 +12,7 @@ related:
   - procedures/server_statements.md
   - ui/mobile_capture_scanning.md
   - concepts/operational_systems.md
+  - blocks/printers.md
 ---
 
 # Files, Blobs, And Exports
@@ -163,15 +164,12 @@ ordering so repeated exports are predictable.
 
 ## Print Queues
 
-For printer or label workflows, model printing as a queue:
-
-- `print_queue` rows hold template name, label data JSON, copies, status,
-  claimed machine, timestamps, and error text.
-- external print agents poll an API, claim pending rows, print, then mark rows
-  completed or failed.
-- UI actions insert queue rows inside the same transaction that changes sticker
-  or document state.
-- reprint flows should record old/new versions and invalidate stale codes.
+Use [PrintersBlock](../blocks/printers.md) for printer and label workflows
+instead of a custom queue table. Render the document or label, store it with
+`s.createBlob(...)`, then call `enqueueDocument` or `enqueueRaw` inside the
+same transaction that changes the related record. The block owns the
+`print_jobs` table, edge delivery, attempt tracking, explicit retry, and a jobs
+page for operators.
 
 Treat printers as external workers. Do not block user-facing UI while waiting
 for a physical printer to complete.

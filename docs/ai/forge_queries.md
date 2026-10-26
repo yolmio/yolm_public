@@ -1,14 +1,21 @@
 ---
 title: Forge query skill
-description: Authoring, explaining, measuring, and testing SQL for Yolm's HTAP vectorized columnar query engine.
-tags: [ai, forge, sql, performance, htap]
+description: Use before writing nontrivial queries or reports, or diagnosing query performance on Yolm's HTAP columnar engine.
+tags: [ai, forge, skill, sql, performance]
 related:
   - sql/query_planning.md
+  - sql/date_functions.md
   - sql/sql_tagged_templates.md
   - testing/overview.md
+  - sql/ai_decisions.md
 ---
 
 # Forge query skill
+
+For model-based classification, probability predicates, or rubric scoring, read
+[AI Decisions](../sql/ai_decisions.md). These SQL expressions make external
+calls: bound eligible rows and reuse a computed result rather than repeating
+inference in projections and filters. Use deterministic SQL for known rules.
 
 Yolm uses a vectorized columnar HTAP engine with fixed physical storage and
 fast scans. Evaluate both execution tier and pruning.
@@ -19,16 +26,18 @@ filtered or joined large-table columns direct so zone maps, bloom filters, and
 runtime pruning can use them; normalize the scalar or small side when semantics
 allow. Consolidate repeated probes into one query or shared materialization.
 
-Changes to joins, `OR` eligibility predicates, per-row reads, or workflow checks
-require performance validation, even when the task is a feature or correctness
-fix. Follow the bounded-work rules in `docs/sql/query_planning.md`.
+Build per-period series (weekly charts) with `time_bucket_gapfill`, not a
+date-range join to a period list: see `docs/sql/date_functions.md#per-period-series`.
+
+The performance bar, when a query change needs a plan and timing, and how to
+measure are in [Performance](review.md#performance). Follow the bounded-work
+rules in `docs/sql/query_planning.md`.
 
 Capture plans and metrics before and after with the same data, statistics, and
 binary. For production interactions, use real route/UI state and parameters on
-a disposable full-backup clone; demo data and literal-ID queries are diagnostic
-only. Measure the whole action, including repeated calls: CPU separately from
-wall time/waits, query setup, scratch memory, hash-build rows, and blocks/reads.
-Check the requested budget and retain a regression gate for the hot interaction.
+a production snapshot; demo data and literal-ID queries are diagnostic only.
+Measure the whole action, including repeated calls: CPU separately from wall
+time/waits, query setup, scratch memory, hash-build rows, and blocks/reads.
 Load `docs/ai/forge_preview.md` for `queryDatabase` diagnostics.
 
 Assert unchanged results and effects: NULLs, duplicates, ordering, eligibility,

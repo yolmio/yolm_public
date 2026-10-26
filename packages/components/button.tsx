@@ -13,8 +13,8 @@ import { CircularProgress } from "./circular_progress";
 import { MaterialIcon } from "./material_icon";
 import type { IconName } from "./material_icon_names";
 import type { Color, ComponentOpts, Size } from "./types";
-import { createGatherSafeSlot } from "./utils";
-import type { SlottedComponentBaseProps } from "./utils";
+import { backLinkAttrs, createGatherSafeSlot } from "./utils";
+import type { BackLinkOpts, SlottedComponentBaseProps } from "./utils";
 import type { OverridableComponent } from "./utils";
 
 /**
@@ -33,7 +33,8 @@ export interface ButtonProps extends
     }>,
     "color"
   >,
-  ComponentOpts<Size> {
+  ComponentOpts<Size>,
+  BackLinkOpts {
   fullWidth?: boolean;
   loadingPosition?: "start" | "center" | "end";
 
@@ -212,6 +213,7 @@ const LoadingIndicatorCenter = createGatherSafeSlot(
 @param props.loadingPosition - Position of the loading indicator when the button is in a loading state.
 @param props.disabled - Expression to determine if the button is disabled.
 @param props.href - If provided, renders the button as an anchor tag with this URL.
+@param props.backLink - With `href`, returns to the most recent earlier history entry for that path, restoring its filters and scroll.
 @param props.children - The main content of the button.
 
 @returns The rendered Button component.
@@ -237,8 +239,10 @@ export const Button: OverridableComponent<{
     endIcon,
     // deno-lint-ignore no-unused-vars
     loadingPosition,
+    backLink,
     ...other
   } = props;
+  Object.assign(other, backLinkAttrs(props.href, backLink));
   const buttonGroupContext = useOptionalICtx(DefaultButtonVariantICtxKey);
   if (buttonGroupContext) {
     variant = props.variant ?? buttonGroupContext.defaultVariant ?? "solid";

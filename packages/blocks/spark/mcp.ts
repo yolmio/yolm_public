@@ -14,15 +14,9 @@ import {
 import { MCP_TOOL_SCHEMAS } from "blocks/mcp/tool_schemas";
 import { type Sql, sql } from "std/sql_utils";
 import { system } from "std/system";
-import {
-  buildCapabilityCatalogEntry,
-  buildNativeSystemPrompt,
-  type RegisterReactorsOpts,
-  sparkDocumentIndexForUser,
-  sparkRootInstructionsExpr,
-  sparkSkillIndexExpr,
-} from "./agent";
+import type { RegisterReactorsOpts } from "./agent";
 import { effectiveCapabilitiesJsonExpr } from "./query_policy";
+import { sparkMcpInstructions } from "./mcp_reference";
 
 export function sparkMcpOptions(
   opts: RegisterReactorsOpts,
@@ -48,33 +42,17 @@ export function sparkMcpCapabilities(
     user,
   );
 }
-function instructions(opts: RegisterReactorsOpts, readOnly = false): Sql {
-  let catalog: Sql = sql`''`;
-  for (const cap of opts.capabilities) {
-    catalog =
-      sql`${catalog} || case when spark_js_conv_capabilities @> json_build_array(${
-        sql.lit(cap.name)
-      }) then chr(10) || ${
-        sql.lit(buildCapabilityCatalogEntry(cap))
-      } else '' end`;
-  }
-  const core = buildNativeSystemPrompt(opts, true, readOnly);
-  return sql`${
-    sql.lit(core)
-  } || chr(10) || 'Available capabilities:' || ${catalog} || chr(10) || ${
-    sparkRootInstructionsExpr(opts.workspace)
-  } || ${sparkSkillIndexExpr(opts.workspace)} || ${
-    opts.knowledge
-      ? sparkDocumentIndexForUser(opts.knowledge, sql`spark_js_owner_id`)
-      : sql`''`
-  } || chr(10) || 'Today: ' || current_date::string || chr(10) || 'This initialization is a snapshot. Read AGENTS.md and Skills/ files again when instructions change. This connection covers one system. Conversation stays in your client; actions retain Yolm receipts.'`;
-}
 const catalog = [
   {
     name: "list_sessions",
+    title: "List Spark runtime sessions",
     description:
       "List your external Spark work sessions, optionally filtering by name.",
-    annotations: { readOnlyHint: true, openWorldHint: false },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       ...MCP_TOOL_SCHEMAS.spark.list_sessions,
@@ -83,9 +61,14 @@ const catalog = [
   },
   {
     name: "create_session",
+    title: "Create a Spark runtime session",
     description:
       "Create a named Spark work session for actions, approvals and saved results. Returns a session link. Each call creates a session; inspect before retrying a lost response.",
-    annotations: { readOnlyHint: false },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: "object",
       ...MCP_TOOL_SCHEMAS.spark.create_session,
@@ -94,12 +77,17 @@ const catalog = [
   },
   ...["execRead", "exec"].map((name) => ({
     name,
+    title: name === "execRead"
+      ? "Execute read-only Spark code"
+      : "Execute Spark code",
     description: name === "execRead"
-      ? "Read-only Spark JavaScript: tools.query, tools.readFile, tools.readCapability, permitted files, skills, read-only capability functions and tools.actionReceipt. No actions or saved artifacts. Emit text(value) or image(bytes). Optional sessionId loads that session's task context."
-      : "Run Spark JavaScript with tools.*. Use relevant Skills/*/SKILL.md and capability docs first. Reuse one sessionId for the whole job across subagents. tools.saveArtifact({name,mimeType,bytes|text}) saves results to the session; tools.listArtifacts() and tools.readArtifact({id}) retrieve them. Reversible actions execute immediately; approval actions return proposals reviewed in the Spark session. Each action call creates a new receipt; inspect session activity before retrying a lost response. tools.actionReceipt and tools.undoReceipt use exact receipt IDs. For atomic bulk undo, use tools.previewUndo({receiptIds:[...]}); inspect the analysis, then tools.undoReceipts({preview}) with that exact preview. Scripts are not atomic. tools.createMessage({message}) optionally publishes an outcome after the work; actions and files are visible automatically. text(value) and image(bytes) return MCP content. Executions are recorded as external runs; no native inference is started.",
+      ? "Read-only JavaScript against the Yolm Spark API (https://yolm.ai/mcp): tools.query, tools.readFile, tools.readCapability, permitted files, read-only capability functions and tools.actionReceipt. Capability functions may read external services. No actions or artifact writes. Emit text(value) or image(bytes). Optional sessionId loads that session's task context."
+      : "Run JavaScript against the Yolm Spark API (https://yolm.ai/mcp) with tools.* and a required sessionId. May change business records and interact with external services. tools.saveArtifact({name,mimeType,bytes|text}) saves results to the session; tools.listArtifacts() and tools.readArtifact({id}) retrieve them. Reversible actions execute immediately; approval actions return proposals reviewed in the Spark session. Each action call creates a new receipt; inspect session activity before retrying a lost response. tools.actionReceipt and tools.undoReceipt use exact receipt IDs. For atomic bulk undo, use tools.previewUndo({receiptIds:[...]}); inspect the analysis, then tools.undoReceipts({preview}) with that exact preview. Scripts are not atomic. tools.createMessage({message}) optionally publishes a work note; actions and files are visible automatically. text(value) and image(bytes) return MCP content. Executions are recorded as external runs; no native inference is started.",
     annotations: {
       readOnlyHint: name === "execRead",
-      openWorldHint: name !== "execRead",
+      destructiveHint: name !== "execRead",
+      // Granted capability functions may query external services as well as Yolm.
+      openWorldHint: true,
     },
     inputSchema: {
       type: "object",
@@ -151,8 +139,10 @@ export function registerSparkMcp(
       mcpMetadata(s, {
         name: "Yolm Spark",
         instructions: sql`case when mcp_grant.access = 'write' then ${
-          instructions(opts)
-        } else ${instructions(sparkMcpOptions(original, true), true)} end`,
+          sparkMcpInstructions(opts)
+        } else ${
+          sparkMcpInstructions(sparkMcpOptions(original, true), true)
+        } end`,
         tools: sql`case when mcp_grant.access = 'write' then ${
           sql.lit(JSON.stringify(catalog))
         } else ${
@@ -252,7 +242,7 @@ export function registerSparkMcp(
               s.if(sql`spark_mcp_event_id is not null`, (s) => {
                 s.startTransaction();
                 s.modify(
-                  sql`update db.spark_agent_events set payload = json_build_object('source','mcp','state','completed') where id = spark_mcp_event_id`,
+                  sql`update db.spark_agent_events set payload = coalesce(payload, '{}'::json) || json_build_object('source','mcp','state','completed') where id = spark_mcp_event_id`,
                 );
                 s.modify(
                   sql`update db.spark_agents set status = 'completed', completed_at = now() where id = spark_mcp_agent_id`,
@@ -274,7 +264,7 @@ export function registerSparkMcp(
               s.if(sql`spark_mcp_event_id is not null`, (s) => {
                 s.startTransaction();
                 s.modify(
-                  sql`update db.spark_agent_events set type = 'execute_script_error', error_message = spark_exec_error.message, payload = json_build_object('source','mcp','state','failed') where id = spark_mcp_event_id`,
+                  sql`update db.spark_agent_events set type = 'execute_script_error', error_message = spark_exec_error.message, payload = coalesce(payload, '{}'::json) || json_build_object('source','mcp','state','failed') where id = spark_mcp_event_id`,
                 );
                 s.modify(
                   sql`update db.spark_agents set status = 'failed', completed_at = now() where id = spark_mcp_agent_id`,

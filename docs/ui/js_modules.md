@@ -25,11 +25,12 @@ function RichTextField() {
 }
 ```
 
-- Idempotent: safe to call from every dependent component.
-- Must be called during app rendering (i.e. while `system.renderingApp`
-  is set). Calling outside throws.
-- Pass `{ assetUrl }` when the module is hosted from a non-default
-  URL (e.g. a CDN, or a per-tenant override).
+- It is idempotent, so every dependent component can call it. The first
+  registration of an `id` wins, including its `assetUrl`.
+- It must run during app rendering (while `system.renderingApp` is set);
+  otherwise it throws.
+- `{ assetUrl }` loads the module from a non-default URL, such as a CDN or a
+  per-tenant override.
 
 ## App-Level Modules
 
@@ -40,6 +41,7 @@ For globally needed modules, or custom components that do not call
 import { getAssetUrl } from "std/yolm_gen_api";
 
 system.app({
+  domain: "app.example.com",
   jsModules: [
     { id: "http_file_upload", assetUrl: getAssetUrl("http_file_upload.js") },
     { id: "qr_scanner", assetUrl: getAssetUrl("qr_scanner.js") },
@@ -56,8 +58,7 @@ bundle from; omit it to use the framework default for built-in modules.
 
 `JsModuleId` is the shipped-module union. Available modules include:
 
-- `lexical_editor` — Lexical rich-text editor (used by
-  `LexicalJsonFieldFormControl`).
+- `lexical_editor` — Lexical rich-text editor.
 - `listbox_nav` — keyboard navigation for `Menu`, `Select`, `Tabs`.
 - `monaco_editor` — Monaco code editor.
 - `csv_upload` / `parquet_upload` / `database_upload` /
@@ -66,18 +67,18 @@ bundle from; omit it to use the framework default for built-in modules.
 - `pdf_markup` — PDF markup and annotation UI.
 - `file_reader` / `file_system` — DOM-side file IO.
 - `qr_scanner` / `hardware_scanner` — barcode/peripheral support.
+- `signature_pad`, `web_push`, and file viewers such as `docx_viewer`,
+  `spreadsheet_viewer`, `tiff_viewer`, and `image_viewer`.
+- `video_player` — Video.js playback for
+  [`VideoPlayer`](./video_player.md).
 
 Use `JsModuleId`/autocomplete for the exact current list.
 
-## When this matters
-
-You rarely call `useJsModule` directly; components usually declare their own
-dependency. The hook matters because:
-
-- It's why some components only "come alive" after a brief delay
-  (the module is being fetched).
-- Custom components that wrap a third-party browser library should
-  call it so users of the wrapper don't have to.
+Components usually declare their own modules, so you rarely call
+`useJsModule` directly. Call it from a custom component that wraps a
+browser library, so the component's users don't have to. A component that
+uses a module may become interactive only after a short delay while the
+module loads.
 
 ## See also
 

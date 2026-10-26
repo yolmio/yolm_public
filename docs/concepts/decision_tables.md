@@ -6,9 +6,15 @@ tags:
   - decision-tables
   - rules
   - functions
+related:
+  - sql/ai_decisions.md
 ---
 
 # Decision tables
+
+These are deterministic rules, not AI model judgments. Use them when the
+business rule is known; use [AI Decisions](../sql/ai_decisions.md) for
+probabilistic classification or scoring of text/images against a rubric.
 
 Yolm supports two related primitives for expressing rule-driven logic
 declaratively:
@@ -31,12 +37,13 @@ system.rulesFunction({
     { name: "weight_kg", type: "Real" },
     { name: "region", type: { type: "Enum", enum: "shipping_region" } },
   ],
-  returnType: "Double",
+  // Fixed-point decimal for money; never use floating point for currency
+  returnType: { type: "Decimal", precision: 13, scale: 2, signed: true },
   rules: [
     [sql`input.weight_kg`, sql`input.region`, sql`output`],
-    [sql`weight_kg <= 1`, sql`'us'`, sql.lit(4.99)],
-    [sql`weight_kg <= 5`, sql`'us'`, sql.lit(9.99)],
-    [sql.anyColumnValue, sql.anyColumnValue, sql.lit(19.99)],
+    [sql`weight_kg <= 1`, sql`'us'`, sql`4.99`],
+    [sql`weight_kg <= 5`, sql`'us'`, sql`9.99`],
+    [sql.anyColumnValue, sql.anyColumnValue, sql`19.99`],
   ],
 });
 ```

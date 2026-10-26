@@ -2,7 +2,11 @@ import { CurrentRefetchICtxKey } from "std/ictx";
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
 import { Data } from "std/data";
-import type { DomStatements, UiServerStatements } from "std/statements";
+import type {
+  DomStatements,
+  StateStatementsOrFn,
+  UiServerStatements,
+} from "std/statements";
 import { Show, useOptionalICtx, useState, wrapCurrentComponent } from "std/ui";
 import type { Node } from "std/ui";
 import { Alert } from "components/alert";
@@ -24,6 +28,11 @@ import { getUniqueUiId } from "components/utils";
 export interface ActionButtonConfirm {
   description?: Node;
   confirmText?: Node;
+  /** Load the facts being confirmed. Description and action share this scope.
+   * Confirmation stays disabled until loading succeeds, including after errors.
+   */
+  prepare?: StateStatementsOrFn;
+  disabled?: Sql;
 }
 
 export interface ActionButtonProps
@@ -112,6 +121,52 @@ function confirmModalNode(opts: {
     s.setScalar(openScalar, false);
     afterCloseClient?.(s);
   };
+  const controls = (ready: boolean) => (
+    <div sx={{ display: "flex", gap: 2 }}>
+      <div sx={flexGrowStyles} />
+      <Button variant="plain" color="neutral" onClick={close}>Cancel</Button>
+      <Button
+        variant="solid"
+        color="danger"
+        disabled={ready ? confirm.disabled : true}
+        loading={sql.ref(waitingScalar)}
+        onClick={ready
+          ? {
+            detachedFromNode: true,
+            procedure: (s: DomStatements) => {
+              if (confirm.disabled) s.returnIf(confirm.disabled);
+              s.statements(runWithTryServer({
+                action,
+                beforeActionClient,
+                onSuccess,
+                afterSuccessClient,
+                onError: (s) => {
+                  onError?.(s);
+                  if (confirm.prepare) s.increment("confirmation_refresh");
+                },
+                refetch,
+                waitingScalar,
+                errorScalar,
+                successScalar,
+              }));
+              s.if(sql.isNull(sql.ref(errorScalar)), close);
+            },
+          }
+          : undefined}
+      >
+        {ready ? confirm.confirmText ?? sql.lit`Confirm` : sql.lit`Confirm`}
+      </Button>
+    </div>
+  );
+  const body = (
+    <>
+      <Typography component="div">
+        {confirm.description ?? sql.lit`Are you sure you about that?`}
+      </Typography>
+      <Divider sx={{ my: 4 }} />
+      {controls(true)}
+    </>
+  );
   return (
     <ModalDialog
       open={sql.ref(openScalar)}
@@ -123,54 +178,63 @@ function confirmModalNode(opts: {
       <Typography component="h2" level="inherit" startIcon="WarningRounded">
         Confirmation
       </Typography>
-      <Typography component="div">
-        {confirm.description ?? sql.lit`Are you sure you about that?`}
-      </Typography>
-      <Divider sx={{ my: 4 }} />
       <Show when={sql.isNotNull(sql.ref(errorScalar))}>
         <Alert color="danger" startIcon="ErrorRounded">
           {sql.ref(errorScalar)}
         </Alert>
       </Show>
-      <div sx={{ display: "flex", gap: 2 }}>
-        <div sx={flexGrowStyles} />
-        <Button
-          variant="plain"
-          color="neutral"
-          onClick={close}
-        >
-          Cancel
-        </Button>
-        <Button
-          variant="solid"
-          color="danger"
-          loading={sql.ref(waitingScalar)}
-          onClick={{
-            detachedFromNode: true,
-            procedure: (s: DomStatements) => {
-              s.statements(
-                runWithTryServer({
-                  action,
-                  beforeActionClient,
-                  onSuccess,
-                  afterSuccessClient,
-                  onError,
-                  refetch,
-                  waitingScalar,
-                  errorScalar,
-                  successScalar,
-                }),
-              );
-              s.if(
-                sql.isNull(sql.ref(errorScalar)),
-                close,
-              );
-            },
-          }}
-        >
-          {confirm.confirmText ?? sql.lit`Confirm`}
-        </Button>
-      </div>
+      {confirm.prepare
+        ? (
+          <Show when={sql.ref(openScalar)}>
+            <Data
+              local
+              noRefetch
+              procedure={(s) => s.defScalar("confirmation_refresh", 0)}
+            >
+              <Data
+                noRefetch
+                autoWatch={false}
+                watch={[sql`confirmation_refresh`]}
+                procedure={confirm.prepare}
+                statusScalar="confirmation_load_status"
+                hasDataScalar="confirmation_has_data"
+                pendingFallback={null}
+                errorFallback={null}
+              >
+                <Show
+                  when={sql`confirmation_has_data and confirmation_load_status = 'received'`}
+                  fallback={
+                    <>
+                      <Show
+                        when={sql`confirmation_load_status = 'failed'`}
+                        fallback={
+                          <p className="my-4 flex items-center gap-2">
+                            <CircularProgress size="sm" />Loading confirmation…
+                          </p>
+                        }
+                      >
+                        <Alert color="danger">
+                          Unable to load confirmation details.
+                        </Alert>
+                        <Button
+                          variant="plain"
+                          onClick={(s) => s.increment("confirmation_refresh")}
+                        >
+                          Retry
+                        </Button>
+                      </Show>
+                      <Divider sx={{ my: 4 }} />
+                      {controls(false)}
+                    </>
+                  }
+                >
+                  {body}
+                </Show>
+              </Data>
+            </Data>
+          </Show>
+        )
+        : body}
     </ModalDialog>
   );
 }
@@ -219,9 +283,14 @@ function runWithTryServer(opts: {
         s.debugExpr(sql`error.type`);
         s.debugExpr(sql`error.message`);
         s.debugExpr(sql`error.description`);
+        // Errors a procedure throws on purpose are written for people.
         s.setScalar(
           opts.errorScalar,
-          sql.concat(sql`error.type`, ": ", sql`coalesce(error.message, '')`),
+          sql`case when error.type = 'thrown_error' and nullif(error.message, '') is not null
+            then error.message
+            else ${
+            sql.concat(sql`error.type`, ": ", sql`coalesce(error.message, '')`)
+          } end`,
         );
         opts.onError?.(s);
       },

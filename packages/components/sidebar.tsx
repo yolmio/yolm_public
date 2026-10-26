@@ -26,7 +26,6 @@ import type { ColorPaletteProp, Variant } from "std/theme";
 import {
   addCtx,
   createICtxKey,
-  Effect,
   EventHandlers,
   gatherChildrenContextInfo,
   Match,
@@ -229,6 +228,8 @@ export interface SidebarBrand {
   name: string;
   /** Compact mark for the rail, mobile header, and app-title headers. */
   logo?: string | Sql;
+  /** Width for a non-square compact mark. Height continues to follow the shell slot. */
+  markWidth?: number;
   /** Full logo for an expanded header without an app title. Keeps its aspect ratio. */
   wordmark?: string | Sql;
   /** Compact fallback when no mark is available; defaults to the name's initials. */
@@ -362,12 +363,6 @@ Sidebar.Provider = function SidebarProvider(props: SidebarProviderProps) {
         s.defScalar(SIDEBAR_READ_REFRESH_KEY, 0);
       }}
     >
-      {shell && (
-        <Effect
-          watch={sql`location.pathname`}
-          onChange={useSidebar().mobileDrawerClose}
-        />
-      )}
       {shellCtx && (
         <EventHandlers
           window={{
@@ -2087,7 +2082,7 @@ function SidebarBrandMark(props: { size: number; decorative?: boolean }) {
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        width: props.size,
+        width: brand.markWidth ?? props.size,
         height: props.size,
         flexShrink: 0,
       }}

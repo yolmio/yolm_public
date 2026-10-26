@@ -18,6 +18,18 @@
       "title": "Forge code skill"
     },
     {
+      "path": "docs/ai/forge_data.md",
+      "title": "Forge data skill"
+    },
+    {
+      "path": "docs/ai/forge_databases.md",
+      "title": "Forge development databases"
+    },
+    {
+      "path": "docs/ai/forge_deploy.md",
+      "title": "Forge deployment planning"
+    },
+    {
       "path": "docs/ai/forge_edge.md",
       "title": "Forge Edge commissioning"
     },
@@ -50,6 +62,10 @@
       "title": "Session history and review links"
     },
     {
+      "path": "docs/ai/forge_spark.md",
+      "title": "Forge Spark skill"
+    },
+    {
       "path": "docs/ai/forge_testing.md",
       "title": "Forge testing skill"
     },
@@ -76,6 +92,10 @@
     {
       "path": "docs/ai/review.md",
       "title": "AI Code Review"
+    },
+    {
+      "path": "docs/ai/studio_help_documents.md",
+      "title": "Studio help documents"
     },
     {
       "path": "docs/ai/system_review.md",
@@ -194,10 +214,6 @@
       "title": "Maintenance Block"
     },
     {
-      "path": "docs/blocks/manual_stats.md",
-      "title": "Manual Stats Block"
-    },
-    {
       "path": "docs/blocks/marketing_email_campaign.md",
       "title": "Marketing Email Campaign Block"
     },
@@ -232,6 +248,14 @@
     {
       "path": "docs/blocks/spark.md",
       "title": "SparkBlock"
+    },
+    {
+      "path": "docs/blocks/spark_management_tools.md",
+      "title": "Block Spark Management Tools"
+    },
+    {
+      "path": "docs/blocks/stickers.md",
+      "title": "Stickers Block"
     },
     {
       "path": "docs/blocks/table_blocks/address.md",
@@ -366,6 +390,10 @@
       "title": "Service Integrations"
     },
     {
+      "path": "docs/concepts/source_imports.md",
+      "title": "Source Imports"
+    },
+    {
       "path": "docs/concepts/static_webhooks.md",
       "title": "Static webhooks"
     },
@@ -415,7 +443,7 @@
     },
     {
       "path": "docs/database/money_and_accounting.md",
-      "title": "Money Types and Accounting Patterns"
+      "title": "Money and Decimal Types"
     },
     {
       "path": "docs/database/overview.md",
@@ -442,6 +470,18 @@
       "title": "Virtual fields, TTL, and ordering"
     },
     {
+      "path": "docs/domains/accounting.md",
+      "title": "Accounting Domain Model"
+    },
+    {
+      "path": "docs/domains/overview.md",
+      "title": "Domain Modeling Guides"
+    },
+    {
+      "path": "docs/guides/edge_printer_commissioning.md",
+      "title": "Edge printer commissioning"
+    },
+    {
       "path": "docs/procedures/base_statements.md",
       "title": "Base Statements"
     },
@@ -460,6 +500,10 @@
     {
       "path": "docs/procedures/lexical_scoping.md",
       "title": "Procedure Lexical Scoping"
+    },
+    {
+      "path": "docs/procedures/occ.md",
+      "title": "OCC and Transaction Patterns"
     },
     {
       "path": "docs/procedures/overview.md",
@@ -544,6 +588,10 @@
     {
       "path": "docs/sql/aggregate_functions.md",
       "title": "Aggregate Functions"
+    },
+    {
+      "path": "docs/sql/ai_decisions.md",
+      "title": "AI Decisions"
     },
     {
       "path": "docs/sql/basic_operations.md",
@@ -706,10 +754,6 @@
       "title": "Chip"
     },
     {
-      "path": "docs/ui/colors.md",
-      "title": "Color Palette"
-    },
-    {
       "path": "docs/ui/control_flow.md",
       "title": "Control Flow Components"
     },
@@ -754,16 +798,16 @@
       "title": "Divider"
     },
     {
+      "path": "docs/ui/document_editor_workspace.md",
+      "title": "Document Editor Workspace"
+    },
+    {
       "path": "docs/ui/drawer.md",
       "title": "Drawer"
     },
     {
       "path": "docs/ui/duration_input.md",
       "title": "Duration Inputs"
-    },
-    {
-      "path": "docs/ui/dynamic_styling.md",
-      "title": "Dynamic Styling"
     },
     {
       "path": "docs/ui/event_handlers.md",
@@ -942,16 +986,8 @@
       "title": "StaticTableCard"
     },
     {
-      "path": "docs/ui/style_utils.md",
-      "title": "Style Utilities"
-    },
-    {
       "path": "docs/ui/styling.md",
-      "title": "Styling and Themes"
-    },
-    {
-      "path": "docs/ui/styling_guide.md",
-      "title": "Styling & Layout"
+      "title": "Styling"
     },
     {
       "path": "docs/ui/table.md",
@@ -970,6 +1006,10 @@
       "title": "Textarea"
     },
     {
+      "path": "docs/ui/theming.md",
+      "title": "Theming Reference"
+    },
+    {
       "path": "docs/ui/timeline_pattern.md",
       "title": "Timeline"
     },
@@ -980,6 +1020,10 @@
     {
       "path": "docs/ui/typography.md",
       "title": "Typography"
+    },
+    {
+      "path": "docs/ui/video_player.md",
+      "title": "Video player"
     },
     {
       "path": "docs/ui/website_styling.md",

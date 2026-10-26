@@ -52,24 +52,26 @@ compiler infers from `expr`.
 ## Time-to-live (TTL)
 
 `TableBuilder.ttl(...)` configures **automatic row pruning** based on a
-timestamp column:
+`notNull` timestamp column. `expr` is a scalar cutoff, evaluated without
+reference to the row: a row expires once its `fieldName` value is earlier than
+the cutoff.
 
 ```typescript
 db.table("sessions", (t) => {
   t.uuid("token").notNull();
   t.timestampUtc("created_at").notNull().default(sql`now()`);
+  // Rows older than 24 hours expire.
   t.ttl({
     fieldName: "created_at",
-    expr: sql`created_at + interval '24 hours'`,
+    expr: sql`date.add(hour, -24, now())`,
   });
 });
 ```
 
-The shorthand `t.ttlFrom("created_at", sql`...`)` is equivalent.
-
-Rows are eligible for pruning when `expr` evaluates to a timestamp in
-the past. Pruning runs in the background; query semantics still treat
-the rows as present until they are removed.
+The shorthand `t.ttlFrom("created_at", sql`date.add(hour, -24, now())`)` is
+equivalent. Pruning runs in the background. A TTL applies to every row; to
+keep some rows (for example unprocessed ones), delete with a scheduled
+procedure instead.
 
 ## Ordering fields
 

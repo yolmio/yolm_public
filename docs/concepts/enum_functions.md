@@ -213,7 +213,7 @@ system.enum_({
 -- with the inverted relation
 select fn.invert_relation('parent'::enums.relation);  -- Returns 'child'
 
--- In a trigger or procedure
+-- In a procedure
 insert into db.contact_relations (from_id, to_id, relation)
 values
   (${fromId}, ${toId}, ${relation}),
@@ -272,7 +272,7 @@ order by fn.priority_score(priority) desc;
 
 -- Filtering by SLA
 select * from db.orders
-where created_at + interval '1 hour' * fn.priority_sla_hours(priority) < now();
+where received_at + interval '1 hour' * fn.priority_sla_hours(priority) < now();
 
 -- Getting metadata for UI
 select
@@ -397,7 +397,7 @@ order by daily.value;
 ## Unmapped Values and Defaults
 
 `withRulesFn` `fields` need not cover every enum value. For any value not
-listed, the function returns `NULL` unless you set `default`:
+listed, the function returns `null` unless you set `default`:
 
 ```typescript
 withRulesFn: [
@@ -412,9 +412,9 @@ withRulesFn: [
 
 Wrap a `0` default in a `sql` expression (as above) so it is truthy: a bare
 JavaScript `0` is falsy and is silently dropped, so the function falls back to
-`NULL`. `withBoolRulesFn` does not need a
-default — values outside `trues` default to `false` (and outside `falses` to
-`true`) automatically.
+`null`. `withBoolRulesFn` does not need a default: it takes either a `trues`
+list, where other values return `false`, or a `falses` list, where other
+values return `true`.
 
 ## Performance
 

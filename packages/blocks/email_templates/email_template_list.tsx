@@ -1,3 +1,4 @@
+import { assertEmailTemplateEditable } from "./editing";
 import { Chip } from "components/chip";
 import { DataTable } from "components/data_table";
 import { FormControl } from "components/form_control";
@@ -29,6 +30,7 @@ function EmailTemplateList() {
         s.defScalar("show_disabled", false);
         s.defScalar("did_disable", false);
         s.defScalar("did_enable", false);
+        s.defScalar("duplicated_template_id", { type: "BigInt" });
         s.defScalar("error_message", {
           type: "String",
         });
@@ -139,6 +141,19 @@ function EmailTemplateList() {
         }}
         actions={(b) => {
           b.delete();
+          b.action("Duplicate", {
+            icon: "ContentCopy",
+            refetch: false,
+            afterSuccessClient: (s) =>
+              s.navigate(sql`'/email-templates/' || duplicated_template_id`),
+          }, (s, recordId) => {
+            s.startTransaction();
+            s.callStoredProcedure("email_template_duplicate", {
+              inputScalars: { p_template_id: recordId },
+              outputScalars: { o_template_id: "ui.duplicated_template_id" },
+            });
+            s.commitTransaction();
+          });
           b.custom("Edit", { icon: "EditOutlined" }, (s) => {
             s.navigate(
               sql`'/email-templates/' || email_template.id`,
@@ -149,6 +164,7 @@ function EmailTemplateList() {
             s.tryServer({
               body: (s) => {
                 s.startTransaction();
+                assertEmailTemplateEditable(s, sql`email_template.id`);
                 s.modify(
                   sql`update email_templates set is_active = not is_active where id = email_template.id`,
                 );

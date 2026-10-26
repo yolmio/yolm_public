@@ -18,7 +18,7 @@ All SQL in Yolm must be written using tagged template literals. This ensures typ
 ```typescript
 // Simple expressions
 sql`price * 1.1`
-sql`user.name`
+sql`user_record.name`
 sql`count(*)`
 
 // Queries
@@ -81,20 +81,20 @@ sql.and(
   sql`role = 'admin'`,
   sql`created_at > ${startDate}`
 )
-// (status = 'active') AND (role = 'admin') AND (created_at > ...)
+// (status = 'active') and (role = 'admin') and (created_at > ...)
 
 sql.or(
   sql`type = 'standard'`,
   sql`type = 'premium'`
 )
-// (type = 'standard') OR (type = 'premium')
+// (type = 'standard') or (type = 'premium')
 ```
 
 ### sql.not()
 
 ```typescript
 sql.not(sql`is_deleted`)
-// NOT (is_deleted)
+// not (is_deleted)
 ```
 
 ### sql.isNull() / sql.isNotNull()
@@ -128,7 +128,7 @@ sql.insertValues(
   ["name", "email", "status"],
   [sql`input_name`, sql`input_email`, sql.lit`active`]
 )
-// INSERT INTO db.users (name, email, status) VALUES (input_name, input_email, 'active')
+// insert into db.users (name, email, status) values (input_name, input_email, 'active')
 ```
 
 ### sql.insertQuery()
@@ -148,7 +148,7 @@ sql.insertQuery(
 import { updateAssignment } from "std/sql_utils";
 
 sql`update db.users set ${updateAssignment(sql.ref("name"), sql`new_name`)}`
-// UPDATE db.users SET name = new_name
+// update db.users set name = new_name
 ```
 
 ## Select Helpers
@@ -190,7 +190,9 @@ interface PaginationOpts {
 
 When implementing a function that takes a `BooleanExpr` /
 `NumericExpr` and you need it as SQL, use `sql.normalizeExpr(...)` to
-coerce the literal form into a `Sql` value.
+coerce the literal form into a `Sql` value. It returns a `Sql` argument
+unchanged and converts a `boolean` or `number` to its SQL text; it does not
+rewrite or canonicalize SQL.
 
 ## Type Expressions
 
@@ -242,23 +244,23 @@ function getOrderBy(sortField: string, sortDir: "asc" | "desc") {
 
 ## Converting to String
 
-### sql.exprToString()
-
-Get the raw SQL string (useful for debugging):
-
-```typescript
-const expr = sql`user.name = ${sql.lit`John`}`;
-console.log(sql.exprToString(expr));
-// user.name = 'John'
-```
-
-### sql.normalizeExpr()
-
-Normalize an expression for comparison:
+Call `.toSQL()` on a `Sql` value to get the raw SQL string (useful for
+debugging). For a `BooleanExpr` / `NumericExpr`, normalize it first:
 
 ```typescript
-sql.normalizeExpr(sql`users.id`).toSQL()
+import { sql, type NumericExpr } from "std/sql_utils";
+
+const expr = sql`user_record.name = ${sql.lit`John`}`;
+console.log(expr.toSQL());
+// user_record.name = 'John'
+
+const limit: NumericExpr = 25;
+sql.normalizeExpr(limit).toSQL();
+// 25
 ```
+
+`sql.exprToString()` is a legacy backwards-compatibility alias for
+`sql.normalizeExpr(expr).toSQL()`. Do not use it in new code.
 
 ## Best Practices
 

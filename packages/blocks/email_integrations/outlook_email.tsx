@@ -480,22 +480,14 @@ export class OutlookEmailIntegration implements EmailIntegration {
       },
     });
 
-    system.addReactor({
-      name: "outlook_email_notification_inbox",
-      query: sql`
-        select notification.id
-        from db.outlook_email_notification_inbox notification
-        join db.user_outlook_emails_accounts account
-          on account.id = notification.user_outlook_emails_account_id
-        where notification.processed_at is null
-          and notification.attempt_count < 8
-          and notification.next_attempt_at <= now()
-          and account.status = 'active'
-          and account.credential_id is not null
-        order by notification.id
-      `,
-      recordName: "notification_job",
-      maxConcurrent: 1,
+    // The handler body compiles as a stored procedure, keeping the reactor small.
+    system.storedProcedure({
+      name: "outlook_email_notification_inbox_run",
+      transaction: "standalone",
+      inputRecords: [{
+        name: "notification_job",
+        fields: [{ name: "id", type: "Int", notNull: true }],
+      }],
       procedure: (s) => {
         s.defRecord(
           "queued_notification",
@@ -571,24 +563,37 @@ export class OutlookEmailIntegration implements EmailIntegration {
         });
       },
     });
-
     system.addReactor({
-      name: "outlook_email_hydration",
+      name: "outlook_email_notification_inbox",
       query: sql`
-        select email.id
-        from ${sql.ref(this.emailTable)} email
+        select notification.id
+        from db.outlook_email_notification_inbox notification
         join db.user_outlook_emails_accounts account
-          on account.id = email.user_outlook_emails_account_id
-        where email.hydrated_at is null
-          and email.provider_deleted_at is null
-          and email.hydrate_attempt_count < 5
-          and email.hydrate_after <= now()
+          on account.id = notification.user_outlook_emails_account_id
+        where notification.processed_at is null
+          and notification.attempt_count < 8
+          and notification.next_attempt_at <= now()
           and account.status = 'active'
           and account.credential_id is not null
-        order by email.date desc nulls last, email.id desc
+        order by notification.id
       `,
-      recordName: "email_to_hydrate",
+      recordName: "notification_job",
       maxConcurrent: 1,
+      procedure: (s) => {
+        s.callStoredProcedure("outlook_email_notification_inbox_run", {
+          inputRecords: { notification_job: "notification_job" },
+        });
+      },
+    });
+
+    // The handler body compiles as a stored procedure, keeping the reactor small.
+    system.storedProcedure({
+      name: "outlook_email_hydration_run",
+      transaction: "standalone",
+      inputRecords: [{
+        name: "email_to_hydrate",
+        fields: [{ name: "id", type: "Int", notNull: true }],
+      }],
       procedure: (s) => {
         s.defRecord(
           "hydration_email",
@@ -692,6 +697,29 @@ export class OutlookEmailIntegration implements EmailIntegration {
                 and status = 'active'`,
             });
           },
+        });
+      },
+    });
+    system.addReactor({
+      name: "outlook_email_hydration",
+      query: sql`
+        select email.id
+        from ${sql.ref(this.emailTable)} email
+        join db.user_outlook_emails_accounts account
+          on account.id = email.user_outlook_emails_account_id
+        where email.hydrated_at is null
+          and email.provider_deleted_at is null
+          and email.hydrate_attempt_count < 5
+          and email.hydrate_after <= now()
+          and account.status = 'active'
+          and account.credential_id is not null
+        order by email.date desc nulls last, email.id desc
+      `,
+      recordName: "email_to_hydrate",
+      maxConcurrent: 1,
+      procedure: (s) => {
+        s.callStoredProcedure("outlook_email_hydration_run", {
+          inputRecords: { email_to_hydrate: "email_to_hydrate" },
         });
       },
     });
@@ -900,6 +928,7 @@ export class OutlookEmailIntegration implements EmailIntegration {
           },
           errorName: "send_inner_err",
           catch: (s) => {
+            s.rollbackIfInTransaction();
             s.startTransaction();
             s.modify(
               sql`insert into user_outlook_email_integration_logs
@@ -1167,6 +1196,7 @@ export class OutlookEmailIntegration implements EmailIntegration {
       },
       errorName: "send_email_from_server_error",
       catch: (s) => {
+        s.rollbackIfInTransaction();
         opts.onEmailSendError?.(s, {
           provider: "outlook_email",
           accountId: opts.accountId,
@@ -1206,6 +1236,42 @@ export class OutlookEmailIntegration implements EmailIntegration {
     s: T,
     opts: { emailId: Sql },
   ): void {
+    this.#hydrateEmailNow(s, opts);
+  }
+
+  /** Runs hydrateEmailNow through one shared stored procedure. */
+  hydrateEmailNowWithProcedure<T extends IServerBaseStatements>(
+    s: T,
+    opts: { emailId: Sql },
+  ): void {
+    const name = "outlook_hydrate_email_now";
+    if (!system.storedProcedures.some((p) => p.name === name)) {
+      // Registered once so UI routes do not each inline the hydration flow.
+      system.storedProcedure({
+        name,
+        transaction: "standalone",
+        inputScalars: [{ name: "p_email_id", type: "BigInt" }],
+        outputScalars: [{ name: "p_already_hydrated", type: "Bool" }],
+        procedure: (s) => {
+          this.#hydrateEmailNow(s, {
+            emailId: sql`p_email_id`,
+            alreadyHydratedScalar: "p_already_hydrated",
+          });
+        },
+      });
+    }
+    s.defScalar("outlook_email_already_hydrated", { type: "Bool" });
+    s.callStoredProcedure(name, {
+      inputScalars: { p_email_id: opts.emailId },
+      outputScalars: { p_already_hydrated: "outlook_email_already_hydrated" },
+    });
+    s.if(sql`outlook_email_already_hydrated`, (s) => s.return());
+  }
+
+  #hydrateEmailNow<T extends IServerBaseStatements>(
+    s: T,
+    opts: { emailId: Sql; alreadyHydratedScalar?: string },
+  ): void {
     s.defRecord(
       "manual_hydration_email",
       sql`select
@@ -1224,7 +1290,12 @@ export class OutlookEmailIntegration implements EmailIntegration {
     s.if(
       sql`manual_hydration_email.body_text is not null
         or manual_hydration_email.body_blob is not null`,
-      (s) => s.return(),
+      (s) => {
+        if (opts.alreadyHydratedScalar) {
+          s.setScalar(opts.alreadyHydratedScalar, sql`true`);
+        }
+        s.return();
+      },
     );
     s.if(sql`manual_hydration_email.provider_deleted_at is not null`, (s) => {
       s.throwError(sql.lit`The message no longer exists in Outlook.`);
@@ -1404,6 +1475,32 @@ export class OutlookEmailIntegration implements EmailIntegration {
     this.#fetchAttachmentContent(s, {
       emailId: opts.emailId,
       maxBytes: OUTLOOK_INLINE_ATTACHMENT_MAX_BYTES,
+    });
+  }
+
+  /** Runs fetchNextInlineAttachmentContent through one shared stored procedure. */
+  fetchNextInlineAttachmentContentWithProcedure<
+    T extends IServerBaseStatements,
+  >(
+    s: T,
+    opts: { emailId: Sql },
+  ): void {
+    const name = "outlook_fetch_next_inline_attachment_content";
+    if (!system.storedProcedures.some((p) => p.name === name)) {
+      // Registered once so UI routes do not each inline the attachment fetch.
+      system.storedProcedure({
+        name,
+        transaction: "standalone",
+        inputScalars: [{ name: "p_email_id", type: "BigInt" }],
+        procedure: (s) => {
+          this.fetchNextInlineAttachmentContent(s, {
+            emailId: sql`p_email_id`,
+          });
+        },
+      });
+    }
+    s.callStoredProcedure(name, {
+      inputScalars: { p_email_id: opts.emailId },
     });
   }
 

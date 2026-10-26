@@ -242,6 +242,12 @@ interface AuthOpts {
   userTypes?: (string | UserTypeTable)[];
   disableDisabled?: boolean;
   secondFactor?: SecondFactorConfig;
+  /**
+   * Record user activity per session in `auth_session_activity`. Required by
+   * `idleTimeout`, so activity in any tab or app sharing a session keeps it
+   * alive.
+   */
+  sessionActivity?: boolean;
 }
 
 /**
@@ -871,6 +877,26 @@ export class AuthBlock implements Block {
       table.int("session_duration_seconds");
       table.enum("type", "session_token_type").notNull();
     });
+
+    if (this.opts.sessionActivity) {
+      db.table("auth_session_activity", (table) => {
+        table.description(
+          "Latest user input on a session from any tab or app, so idle timeouts expire only shared sessions that are idle everywhere.",
+        );
+        table.sampleData({
+          skipSampleData: true,
+        });
+        // Updated about once a minute per active tab; keep that churn out of
+        // the retained history.
+        table.autoCompact();
+        table.fk("auth_session_tokens").notNull().unique();
+        table.timestampUtc("last_activity_at").notNull();
+        // The longest recent gap between inputs, so a tab that slept through
+        // an idle deadline still expires the session after activity resumed.
+        table.timestampUtc("idle_gap_from");
+        table.timestampUtc("idle_gap_to");
+      });
+    }
 
     db.scalarFunction({
       name: "auth_resolve_session_user",

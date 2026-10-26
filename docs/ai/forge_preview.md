@@ -1,7 +1,7 @@
 ---
 title: Forge preview skill
-description: Preview selection, browser inspection, slow-request diagnosis, performance comparisons, and development database debugging.
-tags: [ai, forge, preview, debugging]
+description: Use to run a version on a development database, inspect it in a browser, diagnose slow requests, or record demos.
+tags: [ai, forge, skill, preview, debugging]
 ---
 
 # Forge preview skill
@@ -85,7 +85,7 @@ const result = await previewScript(
 text(result);
 ```
 
-Inspect `system.tsx` or `core.tsx`, then query the app tables that connect the
+Inspect `core.tsx`, then query the app tables that connect the
 selected account to roles, permissions, memberships, ownership, and scenario
 records. After navigation, assert a destination-specific control that the user
 is permitted to see. If the selector remains visible, return that as an
@@ -127,12 +127,12 @@ Each entry includes `executionId`, `type`, `path`, `success`, and `totalTimeMs`.
 Successful requests can still be slow; `previewScript` success does not enforce
 a latency budget.
 
-Treat 500 ms or more for an interactive request as an investigation trigger,
-not a platform timeout or an acceptable latency target. Also investigate
-repeatable regressions below 500 ms. For changes to queries or server-side
-work, compare the original and changed versions using the same database
-snapshot, user, route, filters, sort, and page size. Report when a comparable
-baseline is unavailable instead of claiming there is no regression.
+Treat a page or query over ~100 ms as an investigation trigger (see
+[Performance](review.md#performance)); most should be far under it. Also
+investigate repeatable regressions below that. For changes to queries or
+server-side work, compare the original and changed versions using the same
+database snapshot, user, route, filters, sort, and page size. Report when a
+comparable baseline is unavailable instead of claiming there is no regression.
 
 Repeat a slow navigation or action at least twice in the same resident preview
 to separate cold compilation/loading from recurring execution cost. Restore

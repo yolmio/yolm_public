@@ -1,6 +1,6 @@
 ---
 title: Reactors
-description: How to use Yolm reactors for background automation, PerRecord and Batch mode processing, maxConcurrent worker limits, idempotent queues, derived data, and notifications.
+description: How to use Yolm reactors for background automation, PerRecord and Batch mode processing, maxConcurrent worker limits, idempotent queues, notifications, and external sync.
 tags:
   - concepts
   - reactors
@@ -22,10 +22,14 @@ idempotent so retries or repeated scans do not duplicate side effects.
 Use reactors for:
 
 - Automated workflows triggered by data changes
-- Syncing data between tables
 - Sending notifications when conditions are met
-- Maintaining derived/computed data
+- Syncing records to external services
 - Background processing queues
+
+Do not use reactors to maintain derived data such as totals, counts, rollups,
+or copied fields. Compute those with queries,
+[virtual fields](../database/virtual_fields.md), or views so they are never
+stale.
 
 ## Basic Structure
 
@@ -86,28 +90,28 @@ system.addReactor({
   `,
   recordName: "reactor",
   procedure: (s) => {
-    // 'reactor' contains a single row
-    s.startTransaction();
-
-    // Send email
+    // 'reactor' contains a single row.
+    // Send outside the transaction; requests do not belong inside one.
     s.sendEmail({
       to: sql`reactor.email`,
       subject: sql.lit`Welcome!`,
       htmlBody: sql`'<p>Welcome, ' || reactor.name || '!</p>'`,
     });
 
-    // Mark as sent
+    s.startTransaction();
     s.modify(sql`
       update db.users
       set welcome_sent = true
       where id = reactor.id
     `);
-
     s.commitTransaction();
   },
   maxConcurrent: 10,  // Process up to 10 emails concurrently
 });
 ```
+
+For delivery with retries and enqueueing in the same transaction as the
+business write, use the [outbox](outbox.md) instead.
 
 ### Batch Mode
 
@@ -116,29 +120,25 @@ available in the `reactor` table:
 
 ```typescript
 system.addReactor({
-  name: "update_statistics",
+  name: "notify_shipped_orders",
   query: sql`
-    select category_id, count(*) as product_count, avg(price) as avg_price
-    from db.products
-    where updated_at > (select last_run from db.stat_runs order by last_run desc limit 1)
-    group by category_id
+    select o.id, c.email
+    from db.orders o
+    join db.customers c on c.id = o.customer_id
+    where o.status = 'shipped' and o.shipped_notified = false
   `,
   procedure: (s) => {
     // 'reactor' is a table with all matching rows
     s.startTransaction();
-
     s.modify(sql`
-      merge into db.category_stats
-      using reactor on db.category_stats.category_id = reactor.category_id
-      when matched then
-        update set product_count = reactor.product_count, avg_price = reactor.avg_price
-      when not matched then
-        insert (category_id, product_count, avg_price)
-        values (reactor.category_id, reactor.product_count, reactor.avg_price)
+      insert into db.order_email_outbox (recipient_email, order_id)
+      select email, id from reactor
     `);
-
-    s.modify(sql`insert into db.stat_runs (last_run) values (current_timestamp)`);
-
+    s.modify(sql`
+      update db.orders
+      set shipped_notified = true
+      where id in (select id from reactor)
+    `);
     s.commitTransaction();
   },
 });
@@ -156,8 +156,7 @@ procedure: (s) => {
   s.defScalar("user_email", sql`reactor.email`);
 
   s.modify(sql`
-    insert into db.audit_log (user_id, action)
-    values (reactor.id, 'processed')
+    update db.users set welcome_sent = true where id = reactor.id
   `);
 }
 ```
@@ -169,8 +168,8 @@ Query the `reactor` table:
 ```typescript
 procedure: (s) => {
   s.modify(sql`
-    insert into db.processed_items (item_id, processed_at)
-    select id, current_timestamp from reactor
+    update db.orders set shipped_notified = true
+    where id in (select id from reactor)
   `);
 
   s.defScalar("count", sql`select count(*) from reactor`);
@@ -179,34 +178,47 @@ procedure: (s) => {
 
 ## Common Patterns
 
-### Data Synchronization
+### External Synchronization
 
-Keep tables in sync automatically:
+Push changed records to an external service:
 
 ```typescript
 system.addReactor({
-  name: "sync_user_profiles",
+  name: "sync_customers_to_crm",
   query: sql`
-    select u.id, u.name, u.email
-    from db.users u
-    left join db.user_profiles p on u.id = p.user_id
-    where p.user_id is null or u.updated_at > p.synced_at
+    select id, name, email
+    from db.customers
+    where crm_synced = false
   `,
+  recordName: "reactor",
   procedure: (s) => {
+    s.request({
+      uri: sql.lit`https://crm.example.com/api/contacts`,
+      method: "POST",
+      headers: [
+        { name: sql.lit`Content-Type`, value: sql.lit`application/json` },
+      ],
+      json: {
+        external_id: sql`reactor.id`,
+        name: sql`reactor.name`,
+        email: sql`reactor.email`,
+      },
+      defResponseRecord: "response",
+    });
     s.startTransaction();
     s.modify(sql`
-      merge into db.user_profiles
-      using reactor on db.user_profiles.user_id = reactor.id
-      when matched then
-        update set name = reactor.name, email = reactor.email, synced_at = current_timestamp
-      when not matched then
-        insert (user_id, name, email, synced_at)
-        values (reactor.id, reactor.name, reactor.email, current_timestamp)
+      update db.customers
+      set crm_synced = true
+      where id = reactor.id
     `);
     s.commitTransaction();
   },
+  maxConcurrent: 5,
 });
 ```
+
+Whatever path changes a customer's synced fields also sets `crm_synced` back
+to `false`.
 
 ### Queue Processing
 
@@ -286,97 +298,43 @@ system.addReactor({
   `,
   recordName: "reactor",
   procedure: (s) => {
+    // Record the open alert so the product stops matching
     s.startTransaction();
-
-    // Create alert record
     s.modify(sql`
-      insert into db.stock_alerts (product_id, quantity, threshold, created_at)
-      values (reactor.id, reactor.stock_quantity, reactor.reorder_threshold, current_timestamp)
+      insert into db.stock_alerts (product_id, resolved)
+      values (reactor.id, false)
     `);
+    s.commitTransaction();
 
-    // Send notification email
+    // Send after commit, outside the transaction
     s.sendEmail({
       to: sql.lit`inventory@example.com`,
       subject: sql`'Low stock alert: ' || reactor.name`,
       htmlBody: sql`'<p>Product ' || reactor.name || ' has ' || reactor.stock_quantity || ' units remaining.</p>'`,
     });
-
-    s.commitTransaction();
   },
   maxConcurrent: 10,
 });
 ```
 
-### Computed Fields
-
-Maintain computed/derived data:
-
-```typescript
-system.addReactor({
-  name: "update_order_totals",
-  query: sql`
-    select
-      o.id,
-      sum(oi.quantity * oi.unit_price) as computed_total
-    from db.orders o
-    join db.order_items oi on o.id = oi.order_id
-    where o.total != sum(oi.quantity * oi.unit_price)
-    group by o.id
-  `,
-  recordName: "reactor",
-  procedure: (s) => {
-    s.startTransaction();
-    s.modify(sql`
-      update db.orders
-      set total = reactor.computed_total
-      where id = reactor.id
-    `);
-    s.commitTransaction();
-  },
-});
-```
-
-## Runtime Control
-
-### Disabling Reactors
-
-Temporarily stop a reactor from processing:
-
-```typescript
-// In a procedure
-s.disableReactor("process_new_orders");
-```
-
-### Enabling Reactors
-
-Re-enable a disabled reactor:
-
-```typescript
-s.enableReactor("process_new_orders");
-```
-
-### Flushing Reactors
-
-Force all pending reactor work to execute immediately:
-
-```typescript
-s.flushReactors();
-```
-
 ## Testing Reactors
 
-In tests, use `flushReactors` to ensure reactors have processed:
+Reactors can only be flushed, disabled, or enabled from test bodies; these are
+test statements (`s.flushReactors`, `s.disableReactor`, `s.enableReactor`), not
+procedure statements. In a test, commit the triggering data and flush:
 
 ```typescript
-// Insert data that triggers the reactor
+s.startTransaction();
 s.modify(sql`insert into db.orders (customer_id, status) values (1, 'pending')`);
+s.commitTransaction();
 
-// Force reactors to run
 s.flushReactors();
 
-// Verify reactor processed the data
 s.assert(sql`exists (select 1 from db.orders where status = 'processing')`);
 ```
+
+See [Test Statements](../testing/test_statements.md) for `disableReactor` and
+`enableReactor`.
 
 ## Best Practices
 
@@ -385,7 +343,7 @@ s.assert(sql`exists (select 1 from db.orders where status = 'processing')`);
 3. **Concurrency limits**: Set appropriate `maxConcurrent` for resource-intensive operations
 4. **Error handling**: Use try/catch to handle failures gracefully
 5. **State tracking**: Include processed/synced timestamps to avoid reprocessing
-6. **Transactions**: Wrap database modifications in transactions
+6. **Transactions**: Wrap database modifications in transactions; send emails and requests outside them
 7. **Avoid infinite loops**: Ensure reactor operations don't trigger the same reactor again
 
 ## Preventing Infinite Loops

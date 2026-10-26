@@ -16,10 +16,9 @@ related:
 # Equipment Block
 
 `EquipmentBlock` models durable equipment independently from its current
-location. It owns equipment definitions, serialized equipment, identifiers,
-components, restrictions, and related status data. It provides
-`EquipmentListPage`, `EquipmentDetailPage`, `EquipmentStatusChip`, and
-`equipmentStatusLabel`.
+location: definitions, serialized units, identifiers, components,
+restrictions, and status. It exports `EquipmentListPage`,
+`EquipmentDetailPage`, `EquipmentStatusChip`, and `equipmentStatusLabel`.
 
 It requires the same `EventsBlock` and `LocationsBlock` instances used by the
 system:
@@ -36,6 +35,12 @@ Route the list and detail pages explicitly. `EquipmentDetailPage` reads the
 location, custody, restrictions, and activity; use its event helpers and
 procedures to preserve that history instead of writing status fields in
 parallel application tables.
+
+A unit's manufacturer serial is `equipment.serial_number`. It is unique within
+the unit's equipment definition, so two models may share a serial but two units
+of one model may not. `equipment_identifiers` holds the other identifiers: tags,
+QR values, customer and external references. With `shopFloor: true`, neither
+exists.
 
 The block's `EquipmentStatusChip` accepts SQL expressions for `operability`,
 `lifecycle`, and optional `hasRestriction`, so it can render a row or detail

@@ -1,6 +1,6 @@
 ---
 title: External Interfaces
-description: Patterns for Yolm APIs that exchange JSON, XML, text payloads, outbound HTTP requests, queue tables, retries, and audit logs.
+description: Patterns for Yolm APIs that exchange JSON, XML, and text payloads, make outbound HTTP requests, retry through outboxes, and audit via transaction history.
 tags:
   - api
   - integrations
@@ -13,6 +13,8 @@ related:
   - api/authentication.md
   - sql/json_functions.md
   - concepts/reactors.md
+  - concepts/outbox.md
+  - sql/transaction_queries.md
   - concepts/operational_systems.md
 ---
 
@@ -20,8 +22,8 @@ related:
 
 Use this guide for endpoints and reactors that integrate with outside systems:
 JSON APIs, XML APIs, webhooks, batch pushes, retry queues, and response logs.
-Design external interfaces for idempotency because partners, webhooks, and
-network clients often retry the same request.
+When partners, webhooks, or network clients can redeliver the same request,
+make the interface idempotent; a natural business key often suffices.
 
 ## Inbound Endpoint Shape
 
@@ -41,8 +43,9 @@ api.post("/orders", {
     s.defScalar("external_id", sql`body->>'externalId'`);
     s.startTransaction();
     s.modify(sql`
-      insert into db.inbound_orders (external_id, raw_payload, status)
-      values (external_id, body, 'received')
+      insert into db.orders (external_id, customer_name)
+      values (external_id, body->>'customerName')
+      on conflict (external_id) do nothing
     `);
     s.commitTransaction();
     s.return(sql`json_build_object('ok', true)`);
@@ -59,8 +62,59 @@ Use exactly one of `jsonBodyScalar`, `textBodyScalar`, `bytesBodyScalar`, or
 the platform should store before the procedure runs; the procedure receives a
 blob hash rather than the raw bytes. Return JSON, text, bytes, or blobs
 explicitly with endpoint helpers.
-Use partner-provided ids or generated request ids for idempotency whenever an
-external caller may retry the same operation.
+Use partner-provided ids or generated request ids for idempotency only when an
+external caller may redeliver the same operation; a unique business key such as
+the partner's order id usually serves.
+
+## Transaction Cleanup In Error Handlers
+
+A caught error does **not** roll back an active transaction. If the protected
+body starts a transaction, or calls work within one, its catch handler can run
+before the commit. Starting another transaction to log the error then raises
+`TransactionAlreadyStarted`, masking the original failure and losing the error
+record.
+
+At an endpoint-owned transaction boundary, call `s.rollbackIfInTransaction()`
+first in the catch handler, before invoking a logging helper or starting its
+transaction:
+
+```ts
+s.try({
+  body: (s) => {
+    s.startTransaction();
+    // Validate and write the business changes, including stored-procedure calls.
+    s.modify(sql`insert into db.orders (external_id, customer_name)
+      values (external_id, body->>'customerName')`);
+    s.commitTransaction();
+  },
+  errorName: "inbound_error",
+  catch: (s) => {
+    s.rollbackIfInTransaction();
+    s.startTransaction();
+    // Use the integration's existing failure-recording table/helper.
+    s.modify(sql`insert into db.interface_errors (message)
+      values (inbound_error.message)`);
+    s.commitTransaction();
+    s.setHttpStatus(sql`500`);
+    s.return(sql`json_build_object('error', 'Request failed')`);
+  },
+});
+```
+
+Adapt table names and response shape to the integration contract; do not expose
+internal error details to untrusted clients. Conditional rollback also handles
+failures before a transaction starts. Never commit partial business changes just
+to make error logging work. A `transaction: "caller"` stored procedure must not
+take over transaction cleanup: propagate its error to the owning caller.
+
+Review shared catch/logging helpers as well as the endpoint body. Verify a
+failure **after a business write but before commit**: the expected response,
+no partial business effects, and exactly one durable error record preserving
+the original failure. This record is legitimate rather than a duplicate log:
+rolled-back requests never reach transaction history. Commit a test for this
+only when fixing a real bug or covering behavior nothing else covers (see
+[Tests](../ai/review.md#tests)).
+See [API Testing](../testing/api_testing.md).
 
 ## XML Payloads
 
@@ -87,25 +141,27 @@ XML so escaping is handled by SQL instead of string concatenation.
 XML conversion maps attributes to keys prefixed with `@` and text content to
 `#text`. Repeated elements become JSON arrays.
 
-## Queue And Retry Tables
+## Outbox Delivery And Retries
 
-For outbound pushes or long-running inbound processing, write durable queue
-rows first and let reactors process them:
+For outbound pushes, insert a row into an outbox table in the same transaction
+as the business write, and let the outbox reactor deliver it. The outbox adds
+status, idempotency key, retry count, retry backoff, and last error columns;
+declare only the fields the delivery needs:
 
 ```ts
-db.table("interface_push_queue", (table) => {
-  table.enum("status", "queue_status").notNull().default(sql.lit`pending`);
-  table.string("interface_type", 50).notNull();
-  table.json("payload").notNull();
-  table.int("attempt_count").notNull().default(0);
-  table.timestampUtc("next_attempt_at");
-  table.text("last_error");
+system.outboxTable({
+  name: "interface_push",
+  fields: (table) => {
+    table.string("interface_type", 50).notNull();
+    table.json("payload").notNull();
+  },
 });
 ```
 
-The reactor query should select only ready rows, update attempt state, and make
-success or permanent failure visible in tables the UI can inspect.
-Use unique external ids or queue keys to make processing idempotent.
+Deliver rows with `system.outboxReactor(...)`. See
+[Outbox tables & reactors](../concepts/outbox.md) for enqueuing, the reactor
+callbacks, and retry options. Send the outbox `idempotency_key` or a unique
+external id to the partner so retried deliveries are safe.
 
 ## Outbound Requests
 
@@ -174,14 +230,18 @@ s.request({
 
 ## Audit And Replay
 
-When an interface affects workflow state, store enough data to debug and replay:
+Write inbound data straight into the target tables; transaction history shows
+what each request changed. Keep raw inbound payloads only when the contract
+requires asynchronous processing or replay, using the
+[inbox pattern](../concepts/common_patterns.md#inbound-payloads). Outbox rows
+for deferred outbound work already record attempts, timestamps, and the last
+error.
 
-- raw inbound payload and parsed identifiers,
-- generated outbound payload,
-- response body and status,
-- linked internal record ids,
-- attempt count, timestamps, and last error,
-- activity log entries for user-visible lifecycle changes.
+Do not add bespoke audit or history tables for who changed what and when.
+Query transaction history instead (`db.enableTransactionQueries`, on by
+default); see
+[Transaction Queries](../sql/transaction_queries.md).
 
 Do not let endpoint parsing, workflow transition, and outbound push logic become
-one large procedure if they can be separated by durable staging or queue tables.
+one large procedure: split stages into stored procedures, and separate them with
+inbox or outbox rows only when the contract requires asynchronous work or replay.

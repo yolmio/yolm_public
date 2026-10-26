@@ -16,22 +16,18 @@ related:
 # Connected Account Email Delivery Block
 
 `ConnectedAccountEmailDeliveryBlock` is a bounded mail-merge outbox for
-user-owned Gmail or Outlook accounts. Provider integrations retain ownership
-of OAuth, account selection, and provider calls; this block owns the queued
-delivery snapshot, recipient variables, rate limiting, retries, and result
-state. Its selected-rows dialog owns sender and template selection, validation,
-enqueueing, success feedback, and limit messaging. Use it for small CRM sends
-from a connected mailbox, not for platform-managed marketing campaigns.
+user-owned Gmail or Outlook accounts. Provider integrations keep OAuth, account
+selection, and provider calls; this block owns the queued delivery snapshot,
+recipient variables, rate limiting, retries, result state, and the
+selected-rows send dialog. Platform-managed marketing campaigns use
+[`MarketingEmailCampaignBlock`](./marketing_email_campaign.md) instead.
 
 ## Configure integrations and sources
 
-Each integration implements the narrow `ConnectedAccountEmailIntegration`
-interface from `blocks/email_integrations`: it supplies an `integrationKey`,
-display name, rolling-minute and rolling-24-hour limits,
-`availableSendersQuery(userId)`, and `sendEmailFromServer(...)`.
-The sender query returns `account_id`, `from_address`, and an opaque
-`mailbox_identity`. That stable identity must be shared by every connection or
-alias that consumes the same provider mailbox quota.
+Each integration implements `ConnectedAccountEmailIntegration` from
+`blocks/email_integrations`. Its sender query returns `account_id`,
+`from_address`, and an opaque `mailbox_identity`; that identity must be shared
+by every connection or alias that consumes the same provider mailbox quota.
 
 ```tsx
 import {
@@ -79,16 +75,16 @@ const crmMail = delivery.registerSource({
 system.addBlock(delivery);
 ```
 
-The example shows the adapter shape; use the actual constructor options of the
-provider integration in the system. Register every source before
-initialization; only the delivery block is added here.
-The block rejects duplicate source keys and requires at least one integration.
+Register every source before the block is added. Duplicate source or
+integration keys are rejected, at least one integration is required, and
+`maxRecipientsPerDelivery` must be between 1 and 10,000. The worker still sends
+one recipient per provider request and applies the configured mailbox quotas.
 
 ## Selected-row workflow
 
-When a source supplies `selectedRows`, place the block-owned dialog directly in
-a datagrid action. The system does not implement sender/template controls or
-repeat the enqueue procedure:
+When a source supplies `selectedRows`, place the block-owned dialog in a
+datagrid action; it owns sender/template selection, validation, enqueueing, and
+limit messaging for every configured integration:
 
 ```tsx
 import {
@@ -103,22 +99,62 @@ dialog: ({ openScalar }) => (
 )
 ```
 
-`templatesQuery` is the system adapter and must return `id`, `name`,
-`subject_template`, and `html_template`. `recipientsQuery(selectedIds)` is the
-domain adapter and must return `source_recipient_key`, `email`, and `variables`.
-The optional `authorize` hook enforces system-specific access. The block owns
-the rest of the end-user workflow and supports every configured integration.
-Set `manualContent` to expose manual subject and rich-text composition in
-addition to saved templates; omit it for a template-only workflow.
+`templatesQuery` must return `id`, `name`, `subject_template`, and
+`html_template`; `recipientsQuery(selectedIds)` must return
+`source_recipient_key`, `email`, and `variables`. `authorize` enforces
+system-specific access. Set `manualContent` to also allow a manual subject and
+rich-text body; omit it for a template-only workflow.
+
+Sources can define `isRecipientEligible(recipient)` to recheck the original
+contact and its parent/client consent. The argument is an outbox row with
+`source_recipient_key`, `recipient_email`, and `delivery_id`. Return false for a
+missing or ineligible source record. This check runs when queued, when claiming
+work after rate limiting, and at the provider request boundary; it supplements
+shared unsubscribe suppression rather than relying on enqueue-time selection.
+
+For advanced templates, `selectedRows.renderTemplateBody(s, {templateId,
+htmlScalar})` can call `generateAdvancedTemplateBody` and assign the rendered
+HTML to `htmlScalar`. The template query should include advanced templates and
+return null HTML for those rows. Call `queueSelectedRows` outside a transaction,
+as the block's selected-row dialog does. Its standalone procedure prepares and
+renders the content, then authorizes again and enqueues the snapshot inside a
+write transaction. Custom callers can use `prepareSelectedRows` followed by
+authorization and `enqueue` with the same ordering. The `enqueueSelectedRows`
+convenience method is for workflows
+whose preparation has no external rendering step. The saved snapshot receives
+the same recipient personalization and unsubscribe footer as basic templates.
 
 ## Enqueue a delivery
 
-Call `crmMail.enqueue(s, options)` inside the source record's transaction.
-`recipientsQuery` must return `source_recipient_key`, `email`, and an object
-`variables` column. The block adds the recipient's `email` as a reserved
-template variable, rejects duplicate keys or addresses, and creates one
-immutable delivery per `(source, source_record_key)`. Re-enqueuing that source
-record returns the existing delivery ID.
+### Send a test first
+
+The selected-row dialog includes **Send test**, comma-separated test addresses (up to 10), and a sample
+contact picker. Tests use the selected connected mailbox and the same basic,
+advanced, or manual content and personalization as the full send. Only the
+test addresses receive the message; the subject starts with `[TEST]`, unsubscribe
+links are inactive, and no delivery, recipient outbox, or suppression rows are
+created. The dialog and audience selection remain available afterward.
+
+Use plain email addresses without display names, comments, or quotation marks.
+Addresses are trimmed and deduplicated without regard to case. Invalid or empty
+entries reject the whole list before dispatch. All test destinations share the
+same personalized message and are visible in its To field.
+
+Custom callers can use `source.sendTest(s, { senderKey, templateId, selectedIds,
+to, sampleRecipientKey, contentSource?, manualSubject?, manualBody? })` outside
+a transaction. It revalidates source authorization, the selected sample, and
+access to the sending mailbox. Provider errors are surfaced; an uncertain send
+asks the user to check Sent Items before trying again. No automatic retry occurs.
+
+Platform campaigns have their own test action using the platform sender;
+connected tests always use the selected integration's normal sending adapter.
+
+### Queue the audience
+
+Call `crmMail.enqueue(s, options)` inside the source record's transaction. The
+block adds `email` as a reserved template variable, rejects duplicate keys or
+addresses, and creates one immutable delivery per `(source,
+source_record_key)`; re-enqueuing returns the existing delivery ID.
 
 ```tsx
 crmMail.enqueue(s, {
@@ -139,31 +175,71 @@ crmMail.enqueue(s, {
 });
 ```
 
-The configured `maxRecipientsPerDelivery` must be between 1 and 500. Each
-recipient's variables object is limited to 10,000 bytes and may not contain
-the reserved `email` key. Every recipient row must contain exactly one valid
-email address. Provider rate limits are aggregated by integration and stable
-mailbox identity; they move pending recipients to `rate_limited`. A scheduled
-capacity wake-up returns eligible rows to `pending`. Normalized sender-address
-matching keeps pre-identity delivery history in the same quota window after a
-connection gains or changes its opaque mailbox identity. The integration also
-resolves historical delivery account IDs to their current canonical mailbox
-identity, so legacy rows remain in both quota windows when the sender changes
-between aliases. Candidate deliveries are resolved the same way before
-admission, including legacy queued rows whose stored identity is null.
+Each recipient's `variables` object is limited to 10,000 bytes, may not
+contain `email`, and each row must contain exactly one valid address. Rate
+limits are aggregated by integration and mailbox identity and move pending
+recipients to `rate_limited`. The scheduled capacity wake-up returns only the
+oldest waiting recipients that fit the mailbox's remaining minute and daily
+quotas to `pending`, subtracting recipients already pending across its deliveries.
+Repeated wake-ups therefore keep the excess parked until capacity is available.
+Quota windows also match history by normalized sender address and by
+resolving historical account IDs (via `mailboxIdentityQuery`) to the current
+identity, so rows sent before an identity existed or changed still count.
+
+## Marketing unsubscribe and shared suppression
+
+For marketing mail merges, set `bulkEmailDelivery` to the system's configured
+`BulkEmailDeliveryBlock` and add both blocks to the system. This enables the
+same `bulk_email_suppressions` list used by platform campaigns. Direct individual
+emails sent through the integration do not use this outbox and are unaffected.
+
+Every marketing mail merge appends the shared visible unsubscribe footer and
+provides a reserved `unsubscribe_url` variable. Recipient-supplied `email`,
+`unsubscribe_url`, and `one_click_unsubscribe_url` variables are rejected.
+The connected-account path provides a visible confirmation link; it does not
+add provider-native one-click unsubscribe headers.
+
+The block owns `/connected-account-email/unsubscribe` on the global API.
+GET displays confirmation without changing consent, so link scanners cannot
+unsubscribe recipients. POST records an idempotent, normalized-email suppression
+shared across connected accounts and platform bulk delivery. Invalid POST tokens
+return the same generic confirmation without changing data. Links use opaque
+256-bit random tokens and require no login.
+
+Suppression and source eligibility are checked when enqueueing, when claiming queued work, and before
+provider dispatch (including the integration's `beforeEmailSent` boundary).
+Suppressed or source-ineligible recipients are recorded as `excluded` and never submitted. An
+entirely excluded delivery finishes as `excluded`; mixed deliveries retain
+individual sent/excluded results. Rate-limited work rechecks suppression when
+capacity becomes available. An opt-out cannot recall an email already submitted
+to the provider.
+
+### Schema additions
+
+When configured, `connected_account_email_recipient_outbox` adds two compatible
+nullable fields: `unsubscribe_token` (written at enqueue/legacy claim and read by
+the renderer and public confirmation endpoint) and `unsubscribed_at` (written by
+confirmation POST and read by recipient reports). Older queued rows acquire a
+token when claimed; previously sent messages cannot gain a footer retroactively.
+Both connected delivery and recipient status enums add `excluded`, written by
+suppression checks/terminal completion and read by reports. No new table or
+historical data rewrite is required.
 
 ## Outcomes and reporting
 
-Delivery status is `queued`, `sending`, `sent`, `failed`, or `send_unknown`.
-Recipient status additionally includes `pending`, `rate_limited`, and
-`sending`. A sending lease that expires after ten minutes becomes
-`send_unknown` rather than being retried, because the provider outcome cannot
-be proven. Use `summaryQuery(deliveryId)` and
-`recipientResultsQuery(deliveryId)` for source-owned UI or reporting.
+Owned tables: `connected_account_email_deliveries` (one immutable delivery
+snapshot) and `connected_account_email_recipient_outbox` (per-recipient
+variables and status).
 
-`ConnectedAccountEmailDeliveryReport` is a route-free report with searchable,
-paginated delivery history and aggregate counts. Place it inside the system's own route,
-navigation, and permission boundary:
+Delivery status is `queued`, `sending`, `sent`, `failed`, `send_unknown`, or `excluded`;
+recipient status replaces `queued` with `pending` and `rate_limited`. A sending lease that
+expires after ten minutes becomes `send_unknown` rather than being retried.
+Use the source's `summaryQuery(deliveryId)` and
+`recipientResultsQuery(deliveryId)` for source-owned UI.
+
+`ConnectedAccountEmailDeliveryReport` is a route-free report of delivery
+history and counts; place it inside the system's own route and permission
+boundary:
 
 ```tsx
 import { ConnectedAccountEmailDeliveryReport } from
@@ -172,8 +248,7 @@ import { ConnectedAccountEmailDeliveryReport } from
 <ConnectedAccountEmailDeliveryReport />;
 ```
 
-Use **View recipients** on a delivery to inspect each address, status, wrapped error or reconciliation evidence,
-and attempt/completion time. Search and status filters also apply to the CSV
-download across all pages. Failed recipients are recorded as unsent; unknown
-outcomes need provider confirmation, and pending/rate-limited/sending rows
-remain in progress. Inspecting or exporting results never sends mail.
+**View recipients** shows each address, status, error, timing, and (for marketing)
+unsubscribe time; filters
+also apply to the CSV download. Failed means unsent; unknown outcomes need
+provider confirmation. Inspecting or exporting results never sends mail.

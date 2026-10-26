@@ -1,7 +1,7 @@
 ---
 title: Forge API skill
-description: Correct Yolm system.api endpoint design for typed inputs, authentication, authorization, responses, transactions, and external interfaces.
-tags: [ai, forge, api, authentication, authorization]
+description: "Use before adding HTTP endpoints, webhooks, or external interfaces: typed inputs, authentication, authorization, and responses."
+tags: [ai, forge, skill, api, authentication]
 related:
   - api/overview.md
   - api/authentication.md
@@ -21,9 +21,17 @@ resource-specific authorization on the server, and return deliberate HTTP
 statuses and stable response shapes for success, validation, not-found,
 conflict, and authorization failures.
 
-Route shared state-changing behavior through a stored procedure. Keep multi-step
-writes transactional. For external interfaces, model retries, idempotency,
-replay, secrets, and failure recording from the delivery contract.
+Put state-changing behavior in a stored procedure by default; keep only
+one-off glue in the endpoint. Keep multi-step writes transactional. For
+external interfaces, model retries, idempotency, replay, secrets, and failure
+recording from the delivery contract.
+
+When an endpoint-owned transaction fails, catching the error does not roll it
+back. Begin its catch handler with `s.rollbackIfInTransaction()` before any
+helper that starts a transaction to record the failure. Review helper expansion,
+not just visible endpoint statements. Verify a failure after a write and before
+commit: the original error survives, business changes roll back, and exactly one
+error record persists. See [transaction cleanup in error handlers](../api/external_interfaces.md#transaction-cleanup-in-error-handlers).
 
 Read `docs/api/overview.md` and `docs/api/authentication.md` for ordinary
 endpoints; load `docs/api/external_interfaces.md` or
@@ -63,8 +71,6 @@ queries. Treat the returned URL as a temporary bearer credential. Recheck
 application permissions when a transfer acts as a user. These links need no
 authorization rows.
 
-A signed URL does not pin a blob or extend its storage lifetime. Blob garbage
-collection must retain staged download blobs for the full advertised link
-lifetime, including when content deduplication reuses an older blob. Revoking an
+A signed URL does not pin a blob or extend its storage lifetime. Revoking an
 MCP connection does not individually revoke already-issued signed URLs; their
 expiry and the endpoint's current user-permission checks remain authoritative.

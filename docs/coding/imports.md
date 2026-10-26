@@ -71,12 +71,13 @@ import { Form } from "std/form";
 ### std/sql_utils
 SQL utilities and tagged templates:
 ```typescript
-import { sql, Sql } from "std/sql_utils";
+import { sql } from "std/sql_utils";
+import type { Sql } from "std/sql_utils";
 
 sql`expression`        // SQL expressions
 sql.lit`literal`      // String literals
 sql.concat(...)       // String concatenation
-sql.ref(expr)         // Dynamic references
+sql.ref("db.users")   // Dynamic table/column identifiers, quoted as needed
 ```
 
 ### std/services

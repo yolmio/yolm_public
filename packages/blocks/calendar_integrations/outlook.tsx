@@ -10,6 +10,7 @@ import { AzureAD } from "services/microsoft/auth";
 import type { Oauth2TokenOpts } from "services/microsoft/auth";
 import { AuthApiICtxKey } from "std/ictx";
 import { getCapabilities } from "std/yolm_gen_api";
+import { storedScheduledProc } from "std/scheduled_utils";
 import {
   isLocalhostHost,
   localhostAwareScheme,
@@ -45,6 +46,14 @@ interface OutlookCalendarIntegrationOpts {
   notificationDomain: string | string[];
   adminDebugToken?: string;
   extensions?: OutlookCalendarIntegrationExtensions;
+  /** Opt in to periodic bounded conflict mirroring, also used by queued recovery. */
+  conflictSync?: {
+    schedule: string;
+    /** Booking horizon in minutes, including any desired buffer. Must be positive and finite. */
+    windowMinutes: Sql;
+    /** Query returning the users whose conflict calendars should be refreshed. */
+    forUsers: Sql;
+  };
 }
 
 /**
@@ -181,6 +190,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
       table.bool("add_to_calendar").notNull().default(false);
       table.timestampTz("expiration_date_time");
       table.string("notification_resource_id", 500);
+      table.string("notification_client_state", 64).collation("Binary");
       table.timestampUtc("last_event_sync_at").default(sql`now()`);
       table.recordDisplayNameFields(["summary"]);
     });
@@ -198,6 +208,8 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
       table.string("outlook_event_id", 500).notNull();
       table.string("series_master_id", 600);
     });
+    // Legacy bookkeeping has no consumer. Preserve its physical mapping and
+    // existing rows, but do not append new records on remote deletions.
     system.db.table("deleted_yolm_outlook_events", (table) => {
       table.sampleData({
         skipSampleData: true,
@@ -374,6 +386,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         },
         errorName: "outlook_create_err",
         catch: (s) => {
+          s.rollbackIfInTransaction();
           if (system.hasBlockNamed("SchedulingBlock")) {
             s.startTransaction();
             s.modify(
@@ -511,6 +524,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         },
         errorName: "outlook_update_err",
         catch: (s) => {
+          s.rollbackIfInTransaction();
           if (system.hasBlockNamed("SchedulingBlock")) {
             s.startTransaction();
             s.modify(
@@ -579,6 +593,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
       },
       errorName: "outlook_delete_err",
       catch: (s) => {
+        s.rollbackIfInTransaction();
         if (system.hasBlockNamed("SchedulingBlock")) {
           s.startTransaction();
           s.modify(
@@ -659,7 +674,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         sql`select * from user_outlook_accounts where id = db_calendar.user_outlook_account_id`,
       );
       s.if(
-        sql`account.status = 'active'`,
+        sql`account.status = 'active' and db_calendar.check_for_conflicts`,
         (s) => {
           const notificationDomain = Array.isArray(this.opts.notificationDomain)
             ? this.opts.notificationDomain[0]
@@ -677,9 +692,69 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           s.try({
             body: (s) => {
               s.defScalar("watch_reauth_required", sql`false`);
+              s.defScalar(
+                "watch_client_state",
+                sql`coalesce(
+                db_calendar.notification_client_state,
+                bytes.to_hex(crypto.random_bytes(32)))`,
+              );
+              // clientState cannot be patched. Retire legacy subscriptions
+              // before creating replacements to avoid Graph's duplicate check.
+              s.if(
+                sql`db_calendar.notification_resource_id is not null
+                and db_calendar.notification_client_state is null`,
+                (s) => {
+                  this.azureAD.events.stopWatch(s, {
+                    resourceId: sql`db_calendar.notification_resource_id`,
+                    ...this.#getOauthOpts(
+                      sql`account.id`,
+                      !!this.#caps?.watch_changes,
+                      "watch_reauth_required",
+                    ),
+                  });
+                  s.throwErrorIf(
+                    sql`watch_reauth_required`,
+                    sql
+                      .lit`Outlook subscription replacement requires reauthorization`,
+                  );
+                },
+              );
+              // Reserve the secret durably before POST. It identifies this watch
+              // generation, including a creation whose response never arrives.
+              s.startTransaction();
+              s.defScalar(
+                "claim_watch",
+                sql`exists(select 1 from user_outlook_calendars c
+                join user_outlook_accounts a on a.id = c.user_outlook_account_id
+                where c.id = ${opts.calendarId} and c.check_for_conflicts and a.status = 'active'
+                  and c.user_outlook_account_id = account.id
+                  and c.azure_calendar_id collate binary = db_calendar.azure_calendar_id
+                  and (c.notification_resource_id is not distinct from db_calendar.notification_resource_id)
+                  and (c.notification_client_state is not distinct from db_calendar.notification_client_state))`,
+              );
+              s.if(sql`claim_watch`, (s) => {
+                s.modify(sql`update user_outlook_calendars set
+                  notification_resource_id = case when notification_client_state is null then null else notification_resource_id end,
+                  notification_client_state = watch_client_state where id = ${opts.calendarId}`);
+                // Retiring a legacy watch creates a sync gap even if replacement
+                // creation fails. Keep that repair queued across retries.
+                s.modify(sql`insert into db.outlook_calendar_reconciliation_jobs
+                  (user_outlook_account_id, user_outlook_calendar_id, enqueued_at)
+                  select account.id as account_id, db_calendar.id as calendar_id, now()
+                  where db_calendar.notification_resource_id is not null
+                    and db_calendar.notification_client_state is null
+                    and not exists (select 1 from db.outlook_calendar_reconciliation_jobs j
+                      where j.user_outlook_calendar_id = db_calendar.id)`);
+              });
+              s.commitTransaction();
+              s.exitBlockIf(sql`not claim_watch`);
+              s.modify(sql`update db_calendar set
+                notification_resource_id = case when notification_client_state is null then null else notification_resource_id end,
+                notification_client_state = watch_client_state`);
               this.azureAD.events.watch(s, {
                 calendarId: sql`db_calendar.azure_calendar_id`,
                 subscriptionId: sql`db_calendar.notification_resource_id`,
+                clientState: sql`watch_client_state`,
                 createdSubscriptionRecord: "created_subscription",
                 notificationUrl: notificationUrl,
                 ...this.#getOauthOpts(
@@ -689,6 +764,43 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                 ),
               });
               s.if(sql`not watch_reauth_required`, (s) => {
+                s.if(
+                  sql`watch_response.token collate binary is distinct from watch_client_state`,
+                  (s) => {
+                    // A cancelled, response-lost creation can still block POST.
+                    // Never adopt its retired secret. Only the current reservation
+                    // may remove it; a stale caller must leave newer attempts alone.
+                    s.startTransaction();
+                    s.defScalar(
+                      "retire_watch",
+                      sql`exists(select 1 from user_outlook_calendars c
+                    join user_outlook_accounts a on a.id = c.user_outlook_account_id
+                    where c.id = ${opts.calendarId} and c.check_for_conflicts and a.status = 'active'
+                      and c.user_outlook_account_id = account.id
+                      and c.azure_calendar_id collate binary = db_calendar.azure_calendar_id
+                      and (c.notification_resource_id is not distinct from db_calendar.notification_resource_id)
+                      and c.notification_client_state collate binary = watch_client_state)
+                    and not exists(select 1 from user_outlook_calendars where notification_resource_id = watch_response.id)`,
+                    );
+                    s.commitTransaction();
+                    s.if(sql`retire_watch`, (s) => {
+                      // This secret was already revoked. Later watch attempts
+                      // cannot adopt it after this guard and before DELETE completes.
+                      this.azureAD.events.stopWatch(s, {
+                        resourceId: sql`watch_response.id`,
+                        ...this.#getOauthOpts(
+                          sql`account.id`,
+                          !!this.#caps?.watch_changes,
+                          "watch_reauth_required",
+                        ),
+                      });
+                    });
+                    s.throwError(
+                      sql
+                        .lit`Outlook subscription belongs to a retired watch; retry creation`,
+                    );
+                  },
+                );
                 this.opts.extensions?.afterWatch?.(s, {
                   calendarId: opts.calendarId,
                   responseRecord: sql.ref("watch_response"),
@@ -708,8 +820,9 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   join user_outlook_accounts a on a.id = c.user_outlook_account_id
                   where c.id = ${opts.calendarId}
                     and (c.notification_resource_id is not distinct from db_calendar.notification_resource_id)
+                    and (c.notification_client_state is not distinct from db_calendar.notification_client_state)
                     and c.user_outlook_account_id = account.id
-                    and c.azure_calendar_id = db_calendar.azure_calendar_id
+                    and c.azure_calendar_id collate binary = db_calendar.azure_calendar_id
                     and c.check_for_conflicts and a.status = 'active'
                 )`,
                 );
@@ -717,6 +830,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   s.modify(
                     sql`update user_outlook_calendars
             set notification_resource_id = watch_response.id,
+            notification_client_state = watch_response.token,
             expiration_date_time = coalesce(
               try_cast(watch_response.expiration as timestamptz) at time zone current_timezone at time zone current_timezone,
               try_cast(watch_response.expiration as timestamp) at time zone 'UTC',
@@ -741,7 +855,13 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   calendarId: opts.calendarId,
                   accountId: sql`account.id`,
                   subscriptionId: sql`case when publish_watch
-                    then db_calendar.notification_resource_id else watch_response.id end`,
+                    then case when db_calendar.notification_client_state is not null
+                      then db_calendar.notification_resource_id end
+                    else watch_response.id end`,
+                  reservation: {
+                    subscriptionId: sql`db_calendar.notification_resource_id`,
+                    clientState: sql`db_calendar.notification_client_state`,
+                  },
                 });
                 if (opts.successScalar) {
                   s.setScalar(opts.successScalar, sql`publish_watch`);
@@ -755,6 +875,10 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                 calendarId: opts.calendarId,
                 accountId: sql`account.id`,
                 subscriptionId: sql`created_subscription.id`,
+                reservation: {
+                  subscriptionId: sql`db_calendar.notification_resource_id`,
+                  clientState: sql`db_calendar.notification_client_state`,
+                },
               });
               s.defScalar(
                 "watch_error_message",
@@ -838,66 +962,87 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
 
   #cleanupSubscription<T extends IServerBaseStatements>(
     s: T,
-    opts: { calendarId: AnyExpr; accountId: Sql; subscriptionId: Sql },
+    opts: {
+      calendarId: AnyExpr;
+      accountId: Sql;
+      subscriptionId: Sql;
+      reservation?: { subscriptionId: Sql; clientState: Sql };
+    },
   ) {
     s.block((s) => {
       s.defScalar("cleanup_subscription_id", opts.subscriptionId);
-      s.if(
+      s.startTransaction();
+      s.defScalar(
+        "can_cleanup_subscription",
         sql`cleanup_subscription_id is not null
         and not exists(select 1 from user_outlook_calendars
           where notification_resource_id = cleanup_subscription_id)`,
-        (s) => {
-          s.try({
-            body: (s) => {
-              s.defScalar("cleanup_reauth_required", sql`false`);
-              this.azureAD.events.stopWatch(s, {
-                resourceId: sql`cleanup_subscription_id`,
-                ...this.#getOauthOpts(
-                  opts.accountId,
-                  !!this.#caps?.watch_changes,
-                  "cleanup_reauth_required",
-                ),
-              });
-              s.if(sql`cleanup_reauth_required`, (s) => {
-                s.throwError(
-                  sql
-                    .lit`Outlook subscription cleanup requires reauthorization`,
-                );
-              });
-            },
-            errorName: "cleanup_error",
-            catch: (s) => {
-              s.rollbackIfInTransaction();
-              s.logError(
-                sql`concat('Outlook subscription cleanup failed; calendar_id=',
+      );
+      if (opts.reservation) {
+        const reservation = opts.reservation;
+        // A recovery may have read this ID before cleanup's reference check.
+        // Revoke unpublished attempts in the same transaction as that check.
+        s.if(sql`can_cleanup_subscription`, (s) => {
+          s.modify(
+            sql`update user_outlook_calendars set notification_resource_id = null, notification_client_state = null
+            where id = ${opts.calendarId}
+              and (notification_resource_id is not distinct from ${reservation.subscriptionId})
+              and notification_client_state collate binary = ${reservation.clientState}`,
+          );
+        });
+      }
+      s.commitTransaction();
+      s.if(sql`can_cleanup_subscription`, (s) => {
+        s.try({
+          body: (s) => {
+            s.defScalar("cleanup_reauth_required", sql`false`);
+            this.azureAD.events.stopWatch(s, {
+              resourceId: sql`cleanup_subscription_id`,
+              ...this.#getOauthOpts(
+                opts.accountId,
+                !!this.#caps?.watch_changes,
+                "cleanup_reauth_required",
+              ),
+            });
+            s.if(sql`cleanup_reauth_required`, (s) => {
+              s.throwError(
+                sql
+                  .lit`Outlook subscription cleanup requires reauthorization`,
+              );
+            });
+          },
+          errorName: "cleanup_error",
+          catch: (s) => {
+            s.rollbackIfInTransaction();
+            s.logError(
+              sql`concat('Outlook subscription cleanup failed; calendar_id=',
             ${opts.calendarId}, '; subscription_id=', cleanup_subscription_id,
             '; error=', left(coalesce(cleanup_error.message, ''), 2000))`,
-              );
-              s.try({
-                body: (s) => {
-                  s.startTransaction();
-                  s.modify(sql`insert into user_outlook_calendar_error_logs
+            );
+            s.try({
+              body: (s) => {
+                s.startTransaction();
+                s.modify(sql`insert into user_outlook_calendar_error_logs
                 (user_outlook_calendar_id, operation, error_type, error_message, error_description)
                 values ((select id from user_outlook_calendars where id = ${opts.calendarId}),
                   'cleanup_subscription', cleanup_error.type,
                   left(coalesce(cleanup_error.message, ''), 2000),
                   concat('calendar_id=', ${opts.calendarId}, '; subscription_id=', cleanup_subscription_id))`);
-                  s.commitTransaction();
-                },
-                errorName: "cleanup_log_error",
-                catch: (s) => {
-                  s.rollbackIfInTransaction();
-                  s.logError(
-                    sql`concat('Outlook cleanup database logging failed; calendar_id=',
+                s.commitTransaction();
+              },
+              errorName: "cleanup_log_error",
+              catch: (s) => {
+                s.rollbackIfInTransaction();
+                s.logError(
+                  sql`concat('Outlook cleanup database logging failed; calendar_id=',
                 ${opts.calendarId}, '; subscription_id=', cleanup_subscription_id,
                 '; error=', coalesce(cleanup_log_error.message, 'Unknown logging failure'))`,
-                  );
-                },
-              });
-            },
-          });
-        },
-      );
+                );
+              },
+            });
+          },
+        });
+      });
     });
   }
 
@@ -938,13 +1083,14 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           from user_outlook_calendars c
           join user_outlook_accounts a on a.id = c.user_outlook_account_id
           where c.id = ${opts.calendarId} and a.status = 'active'
-            and c.notification_resource_id is not null
+            and (c.notification_resource_id is not null or c.notification_client_state is not null)
             and ${
           opts.onlyIfDisabled ? sql`not c.check_for_conflicts` : sql`true`
         }`,
       );
       s.modify(
-        sql`update user_outlook_calendars set notification_resource_id = null
+        sql`update user_outlook_calendars set notification_resource_id = null,
+          notification_client_state = null
         where id = stop_calendar.id`,
       );
       s.commitTransaction();
@@ -1004,7 +1150,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         table: "calendars",
         cursorName: "calendars",
         where: sql`
-    not exists (select 1 from user_outlook_calendars where azure_calendar_id = calendars.id and user_outlook_account_id = callback_outlook_account_id)`,
+    not exists (select 1 from user_outlook_calendars where azure_calendar_id collate binary = calendars.id and user_outlook_account_id = callback_outlook_account_id)`,
         body: (s) => {
           s.if(
             sql`not contains(calendars.name, '#holiday@') and not contains(calendars.name, '#contacts@')`,
@@ -1013,7 +1159,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           using (
             select callback_outlook_account_id as id
           ) as source
-          on target.azure_calendar_id = calendars.id and target.user_outlook_account_id = source.id
+          on target.azure_calendar_id collate binary = calendars.id and target.user_outlook_account_id = source.id
           when matched then update set
           summary = calendars.name,
           check_for_conflicts = calendars.is_default_calendar::boolean,
@@ -1342,6 +1488,14 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
     opts: { forUsers: Sql },
   ): void {
     s.startTransaction();
+    // Window sync only prunes within its fetched range. Retain the nightly
+    // cleanup of past mirrors so they do not accumulate indefinitely.
+    s.modify(sql`delete from db.user_outlook_calendar_events
+      where end_time <= now() and user_outlook_calendar_id in (
+        select c.id from db.user_outlook_calendars c
+        join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
+        where a.sys_user_id in (${opts.forUsers}) and a.status = 'active'
+          and c.check_for_conflicts)`);
     s.modify(
       sql`insert into db.outlook_calendar_reconciliation_jobs
             (user_outlook_account_id, user_outlook_calendar_id, enqueued_at)
@@ -1350,66 +1504,52 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
           where a.sys_user_id in (${opts.forUsers})
             and a.status = 'active'
-            and (c.add_to_calendar or c.check_for_conflicts)`,
+            and ${
+        this.opts.conflictSync
+          ? sql`c.add_to_calendar`
+          : sql`(c.add_to_calendar or c.check_for_conflicts)`
+      }
+            and not exists (select 1 from db.outlook_calendar_reconciliation_jobs j
+              where j.user_outlook_calendar_id = c.id)`,
     );
     s.commitTransaction();
   }
 
   reconcileCalendarEvents<T extends IServerBaseStatements>(
     s: T,
-    opts: { accountRecord: Sql; calendarRecord: Sql },
+    opts: {
+      accountRecord: Sql;
+      calendarRecord: Sql;
+      /** Leave mirroring to the frequent window sync for opted-in consumers. */
+      mirrorEvents?: boolean;
+      mirrorCounts?: { created: string; updated: string; deleted: string };
+    },
   ): void {
+    s.defScalar("reconcile_start", sql`now()`);
+    s.defScalar("reconcile_end", sql`date.add(month, 6, reconcile_start)`);
     this.azureAD.events.listAllEvents(s, {
       calendarId: sql`${opts.calendarRecord}.azure_calendar_id`,
       saveToTable: "temp_outlook_calendar_event",
-      endDateTime:
-        sql`date.to_rfc3339(date.add(month, 6, now()), 'milliseconds', false)`,
+      startDateTime:
+        sql`date.to_rfc3339(reconcile_start, 'milliseconds', false)`,
+      endDateTime: sql`date.to_rfc3339(reconcile_end, 'milliseconds', false)`,
       ...this.#getOauthOpts(
         sql`${opts.accountRecord}.id`,
         !!this.#caps?.read_events,
       ),
     });
     s.if(sql`${opts.calendarRecord}.check_for_conflicts`, (s) => {
-      s.startTransaction();
-      this.#mergeEvents(s, {
-        eventsTable: "temp_outlook_calendar_event",
-        calendarId: sql`${opts.calendarRecord}.id`,
-      });
-      s.defTable(
-        "incoming_outlook_calendar_event_ids",
-        {
-          fields: [
-            { name: "id", type: "Int", notNull: true },
-            {
-              name: "outlook_event_id",
-              type: { type: "String", maxLength: 500 },
-              notNull: true,
-            },
-          ],
-          query: sql`select distinct
-                  1 as id,
-                  coalesce(outlook_event_id, '') as outlook_event_id
-                from temp_outlook_calendar_event
-                where outlook_event_id is not null`,
-        },
-      );
-      s.defTable(
-        "outlook_calendar_events_to_prune",
-        {
-          fields: [{ name: "id", type: "Int", notNull: true }],
-          query: sql`select target.id
-                from user_outlook_calendar_events target
-                left join incoming_outlook_calendar_event_ids incoming
-                  on incoming.outlook_event_id = target.outlook_event_id
-                where target.user_outlook_calendar_id = ${opts.calendarRecord}.id
-                  and incoming.id is null`,
-        },
-      );
-      s.modify(
-        sql`delete from user_outlook_calendar_events
-            where id in (select id from outlook_calendar_events_to_prune)`,
-      );
-      s.commitTransaction();
+      if (opts.mirrorEvents !== false) {
+        s.startTransaction();
+        this.#reconcileMirroredEvents(s, {
+          eventsTable: "temp_outlook_calendar_event",
+          calendarId: sql`${opts.calendarRecord}.id`,
+          start: sql`reconcile_start`,
+          end: sql`reconcile_end`,
+          counts: opts.mirrorCounts,
+        });
+        s.commitTransaction();
+      }
       s.if(
         sql`${opts.calendarRecord}.notification_resource_id is null
           or ${opts.calendarRecord}.expiration_date_time is null
@@ -1432,12 +1572,15 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           "event",
           (s) => {
             s.conditional({
+              // Calendar views include ongoing meetings. A scheduled link is
+              // still valid after its start time; only absent/cancelled links
+              // make a Yolm event orphaned.
               condition:
-                sql`exists(select 1 from scheduling_appointments where outlook_event_id = event.outlook_event_id and status = 'scheduled' and start_time > now())`,
+                sql`exists(select 1 from scheduling_appointments where outlook_event_id collate binary = event.outlook_event_id and status = 'scheduled')`,
               then: (s) => {
                 s.defRecord(
                   "appointment_linked_to_event_record",
-                  sql`select * from scheduling_appointments where outlook_event_id = event.outlook_event_id `,
+                  sql`select * from scheduling_appointments where outlook_event_id collate binary = event.outlook_event_id `,
                 );
                 s.if(
                   sql`appointment_linked_to_event_record.start_time != event.start_date_time at time zone event.start_time_zone`,
@@ -1463,12 +1606,12 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           },
         );
         s.forEachQuery(
-          sql`select * from scheduling_appointments where start_time > now() and sys_user_id = ${opts.accountRecord}.sys_user_id and status = 'scheduled'`,
+          sql`select * from scheduling_appointments where start_time > reconcile_start and start_time < reconcile_end and sys_user_id = ${opts.accountRecord}.sys_user_id and status = 'scheduled'`,
           "appointment_record",
           (s) => {
             s.if(
               sql`appointment_record.outlook_event_id is null or
-              not exists(select 1 from temp_outlook_calendar_event where outlook_event_id = appointment_record.outlook_event_id)`,
+              not exists(select 1 from temp_outlook_calendar_event where outlook_event_id collate binary = appointment_record.outlook_event_id)`,
               (s) => {
                 runtimeAppointments.addAppointmentToCalendar(s, {
                   appointmentId: sql`appointment_record.id`,
@@ -1523,42 +1666,149 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
     opts: {
       eventsTable: string;
       calendarId: Sql;
+      counts?: { created: string; updated: string };
     },
   ) {
     const hasRuntimeDefinedAppointments = !!system.db.tables
       .scheduling_appointments;
+    s.block((s) => {
+      // Materialize only changed rows. Match existing rows across all dates so
+      // an event moved into the window is updated instead of duplicated.
+      s.defTable(
+        "outlook_event_changes",
+        sql`select target.id as target_id,
+        source.outlook_event_id, source.summary,
+        source.start_date_time at time zone source.start_time_zone as start_time,
+        source.end_date_time at time zone source.end_time_zone as end_time,
+        source.series_master_id
+        from ${sql.ref(opts.eventsTable)} source
+        left join (select id, outlook_event_id, summary, start_time, end_time, series_master_id
+          from db.user_outlook_calendar_events where user_outlook_calendar_id = ${opts.calendarId}) target
+          on target.outlook_event_id collate binary = source.outlook_event_id
+        where coalesce(source.scheduling_system, '') != 'Yolm'
+          and ${
+          hasRuntimeDefinedAppointments
+            ? sql`not exists (select 1 from db.scheduling_appointments sa
+                where sa.outlook_event_id collate binary = source.outlook_event_id)`
+            : sql.true
+        }
+          and (target.id is null
+            or (target.summary collate binary is distinct from source.summary)
+            or (target.start_time is distinct from source.start_date_time at time zone source.start_time_zone)
+            or (target.end_time is distinct from source.end_date_time at time zone source.end_time_zone)
+            or (target.series_master_id collate binary is distinct from source.series_master_id))`,
+      );
+      if (opts.counts) {
+        s.setScalar(
+          opts.counts.created,
+          sql`(select count(*) from outlook_event_changes where target_id is null)`,
+        );
+        s.setScalar(
+          opts.counts.updated,
+          sql`(select count(*) from outlook_event_changes where target_id is not null)`,
+        );
+      }
+      s.if(sql`exists(select 1 from outlook_event_changes)`, (s) => {
+        s.modify(sql`update db.user_outlook_calendar_events target
+          set summary = source.summary, start_time = source.start_time,
+            end_time = source.end_time, series_master_id = source.series_master_id
+          from outlook_event_changes source where target.id = source.target_id`);
+        s.modify(sql`insert into db.user_outlook_calendar_events
+          (outlook_event_id, summary, start_time, end_time, user_outlook_calendar_id, series_master_id)
+          select outlook_event_id, summary, start_time, end_time, ${opts.calendarId}, series_master_id
+          from outlook_event_changes where target_id is null`);
+        s.modify(
+          sql`update db.user_outlook_calendars set last_event_sync_at = now() where id = ${opts.calendarId}`,
+        );
+      });
+    });
+  }
 
-    // Put both match keys on the source so MERGE can hash-match the batch.
-    const sourceQuery = hasRuntimeDefinedAppointments
-      ? sql`select ev.*, ${opts.calendarId} as merge_calendar_id from ${
-        sql.ref(opts.eventsTable)
-      } ev
-            left join db.scheduling_appointments sa on sa.outlook_event_id = ev.outlook_event_id
-            where coalesce(ev.scheduling_system, '') != 'Yolm' and sa.id is null`
-      : sql`select *, ${opts.calendarId} as merge_calendar_id from ${
-        sql.ref(opts.eventsTable)
-      } where coalesce(scheduling_system, '') != 'Yolm'`;
-
-    s.modify(sql`merge into db.user_outlook_calendar_events as target
-          using (${sourceQuery}) as source
-          on target.outlook_event_id = source.outlook_event_id and target.user_outlook_calendar_id = source.merge_calendar_id
-          when matched then
-          update set
-          summary = source.summary,
-          start_time = source.start_date_time at time zone source.start_time_zone,
-          end_time = source.end_date_time at time zone source.end_time_zone
-          when not matched then
-          insert (outlook_event_id, summary, start_time, end_time, user_outlook_calendar_id, series_master_id) values
-          (source.outlook_event_id,
-          source.summary,
-          source.start_date_time at time zone source.start_time_zone,
-          source.end_date_time at time zone source.end_time_zone,
-          ${opts.calendarId},
-          source.series_master_id
-          )`);
-    s.modify(
-      sql`update db.user_outlook_calendars set last_event_sync_at = now() where id = ${opts.calendarId}`,
+  #reconcileMirroredEvents<T extends IServerBaseStatements>(s: T, opts: {
+    eventsTable: string;
+    calendarId: Sql;
+    start: Sql;
+    end: Sql;
+    counts?: { created: string; updated: string; deleted: string };
+  }) {
+    this.#mergeEvents(s, opts);
+    // No DISTINCT: case-insensitive deduplication would discard valid IDs.
+    s.defTable(
+      "outlook_events_to_prune",
+      sql`select target.id
+      from db.user_outlook_calendar_events target
+      where target.user_outlook_calendar_id = ${opts.calendarId}
+        and target.start_time < ${opts.end} and target.end_time > ${opts.start}
+        and not exists (select 1 from ${sql.ref(opts.eventsTable)} incoming
+          where incoming.outlook_event_id collate binary = target.outlook_event_id)`,
     );
+    if (opts.counts) {
+      s.setScalar(
+        opts.counts.deleted,
+        sql`(select count(*) from outlook_events_to_prune)`,
+      );
+    }
+    s.if(sql`exists(select 1 from outlook_events_to_prune)`, (s) => {
+      s.modify(
+        sql`delete from db.user_outlook_calendar_events where id in (select id from outlook_events_to_prune)`,
+      );
+      s.modify(
+        sql`update db.user_outlook_calendars set last_event_sync_at = now() where id = ${opts.calendarId}`,
+      );
+    });
+  }
+
+  /** Mirror a complete Graph window, without modifying appointments in Outlook.
+   * Call outside a transaction. Counts are written to the supplied local scalars.
+   */
+  syncCalendarWindow<T extends IServerBaseStatements>(s: T, opts: {
+    calendarId: Sql;
+    start: Sql;
+    end: Sql;
+    counts: { created: string; updated: string; deleted: string };
+  }) {
+    for (const name of Object.values(opts.counts)) s.setScalar(name, sql`0`);
+    s.throwErrorIf(
+      sql`${opts.start} is null or ${opts.end} is null or ${opts.end} <= ${opts.start}`,
+      sql.lit`Outlook sync requires a finite, positive time window`,
+    );
+    s.defRecord(
+      "sync_calendar",
+      sql`select c.id, c.azure_calendar_id, a.id as account_id
+      from db.user_outlook_calendars c
+      join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
+      where c.id = ${opts.calendarId} and c.check_for_conflicts and a.status = 'active'`,
+    );
+    s.if(sql`sync_calendar.id is not null`, (s) => {
+      this.azureAD.events.listAllEvents(s, {
+        calendarId: sql`sync_calendar.azure_calendar_id`,
+        saveToTable: "window_events",
+        startDateTime:
+          sql`date.to_rfc3339(${opts.start}, 'milliseconds', false)`,
+        endDateTime: sql`date.to_rfc3339(${opts.end}, 'milliseconds', false)`,
+        ...this.#getOauthOpts(
+          sql`sync_calendar.account_id`,
+          !!this.#caps?.read_events,
+        ),
+      });
+      s.startTransaction();
+      // Recheck eligibility after the network request (disconnect/disable may race it).
+      s.if(
+        sql`exists(select 1 from db.user_outlook_calendars c
+        join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
+        where c.id = sync_calendar.id and c.check_for_conflicts and a.status = 'active')`,
+        (s) => {
+          this.#reconcileMirroredEvents(s, {
+            eventsTable: "window_events",
+            calendarId: sql`sync_calendar.id`,
+            start: opts.start,
+            end: opts.end,
+            counts: opts.counts,
+          });
+        },
+      );
+      s.commitTransaction();
+    });
   }
 
   /**
@@ -1608,7 +1858,138 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
       try_cast(trim(trailing 'Z' from ${s}) as timestamp)
     )`;
 
+  #notificationFailed<T extends IServerBaseStatements>(
+    s: T,
+    subscriptionId?: Sql,
+  ) {
+    s.rollbackIfInTransaction();
+    if (subscriptionId) {
+      // Reuse the reconciliation queue. Redelivery of a permanently missing
+      // event cannot repair its mirror; a complete calendar window can.
+      s.startTransaction();
+      s.modify(sql`insert into db.outlook_calendar_reconciliation_jobs
+        (user_outlook_account_id, user_outlook_calendar_id, enqueued_at)
+        select c.user_outlook_account_id, c.id, now()
+        from db.user_outlook_calendars c
+        join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
+        where c.notification_resource_id = ${subscriptionId}
+          and c.check_for_conflicts and a.status = 'active'
+          and not exists (select 1 from db.outlook_calendar_reconciliation_jobs j
+            where j.user_outlook_calendar_id = c.id)`);
+      s.commitTransaction();
+    }
+    this.opts.extensions?.onNotificationError?.(s, {
+      errorRecord: sql.ref("error"),
+    });
+    if (system.hasBlockNamed("SchedulingBlock")) {
+      s.startTransaction();
+      s.modify(
+        // Notification bodies contain the authentication secret.
+        sql`insert into scheduling_outlook_integration_logs (operation, success, error_message, logged_at)
+                      values ('receive_notification', false, concat(error.type, ': ', coalesce(error.message, '')), now())`,
+      );
+      s.commitTransaction();
+    }
+  }
+
+  #registerConflictSync() {
+    const sync = this.opts.conflictSync;
+    if (!sync) return;
+    system.storedProcedure({
+      name: "outlook_sync_calendar_window",
+      transaction: "standalone",
+      inputScalars: [
+        { name: "calendar_id", type: "BigUint", notNull: true },
+      ],
+      outputScalars: [
+        { name: "created_count", type: "BigInt" },
+        { name: "updated_count", type: "BigInt" },
+        { name: "deleted_count", type: "BigInt" },
+      ],
+      procedure: (s) => {
+        s.defScalar("window_minutes", sync.windowMinutes);
+        s.throwErrorIf(
+          sql`window_minutes is null or window_minutes <= 0`,
+          sql
+            .lit`Outlook conflict sync requires a finite, positive booking horizon`,
+        );
+        s.defScalar("window_start", sql`now()`);
+        s.defScalar(
+          "window_end",
+          sql`date.add(minute, window_minutes, window_start)`,
+        );
+        this.syncCalendarWindow(s, {
+          calendarId: sql`calendar_id`,
+          start: sql`window_start`,
+          end: sql`window_end`,
+          counts: {
+            created: "created_count",
+            updated: "updated_count",
+            deleted: "deleted_count",
+          },
+        });
+      },
+    });
+    storedScheduledProc({
+      name: "outlook_conflict_calendar_resync",
+      schedule: sync.schedule,
+      procedure: (s) => {
+        s.captureExecution();
+        s.defScalar("calendars_checked", 0);
+        s.defScalar("calendars_failed", 0);
+        s.defScalar("created_count", { type: "BigInt" });
+        s.defScalar("updated_count", { type: "BigInt" });
+        s.defScalar("deleted_count", { type: "BigInt" });
+        s.defScalar("rows_created", 0);
+        s.defScalar("rows_updated", 0);
+        s.defScalar("rows_deleted", 0);
+        // Serial requests bound Graph traffic and isolate a failed calendar.
+        s.forEachQuery(
+          sql`select c.id from db.user_outlook_calendars c
+          join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
+          where c.check_for_conflicts and a.status = 'active'
+            and a.sys_user_id in (${sync.forUsers})`,
+          "sync_target",
+          (s) => {
+            s.try({
+              body: (s) => {
+                s.callStoredProcedure("outlook_sync_calendar_window", {
+                  inputScalars: {
+                    calendar_id: sql`sync_target.id`,
+                  },
+                  outputScalars: {
+                    created_count: "created_count",
+                    updated_count: "updated_count",
+                    deleted_count: "deleted_count",
+                  },
+                });
+                s.increment("calendars_checked");
+                s.increment("rows_created", sql`created_count`);
+                s.increment("rows_updated", sql`updated_count`);
+                s.increment("rows_deleted", sql`deleted_count`);
+              },
+              errorName: "sync_error",
+              catch: (s) => {
+                s.increment("calendars_failed");
+                s.logError(
+                  sql`concat('Outlook conflict sync failed; calendar_id=', sync_target.id,
+                '; ', coalesce(sync_error.message, ''), ' ', coalesce(sync_error.description, ''))`,
+                );
+              },
+            });
+          },
+        );
+        s.debugExpr(
+          sql`json_build_object('calendars_checked', calendars_checked,
+          'calendars_failed', calendars_failed, 'created', rows_created,
+          'updated', rows_updated, 'deleted', rows_deleted)`,
+        );
+      },
+    });
+  }
+
   populate() {
+    this.#registerConflictSync();
     system.storedProcedure({
       name: "outlook_calendar_watch",
       transaction: "standalone",
@@ -1687,10 +2068,11 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         query: sql`select c.id
             from db.user_outlook_calendars c
             join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
-            where c.expiration_date_time is not null
-              and c.notification_resource_id is not null
+            where c.notification_resource_id is not null
               and c.check_for_conflicts
-              and c.expiration_date_time <= date.add(hour, 6, now())
+              and (c.notification_client_state is null
+                or c.expiration_date_time is null
+                or c.expiration_date_time <= date.add(hour, 6, now()))
               and a.status = 'active'
               and ${watchRetryReadyCondition(sql`c.id`)}`,
         recordName: "calendar_record",
@@ -1707,7 +2089,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
               from db.user_outlook_calendars c
               join db.user_outlook_accounts a on a.id = c.user_outlook_account_id
               where not c.check_for_conflicts
-                and c.notification_resource_id is not null
+                and (c.notification_resource_id is not null or c.notification_client_state is not null)
                 and a.status = 'active'`,
         recordName: "calendar_record",
         procedure: (s) => {
@@ -1761,6 +2143,21 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
         s.defScalar("created_events", { expr: 0, allowNoRead: true });
         s.defScalar("updated_events", { expr: 0, allowNoRead: true });
         s.defScalar("deleted_events", { expr: 0, allowNoRead: true });
+        s.defScalar("mirrored_created", {
+          type: "BigInt",
+          expr: 0,
+          allowNoRead: true,
+        });
+        s.defScalar("mirrored_updated", {
+          type: "BigInt",
+          expr: 0,
+          allowNoRead: true,
+        });
+        s.defScalar("mirrored_deleted", {
+          type: "BigInt",
+          expr: 0,
+          allowNoRead: true,
+        });
         s.if(
           sql`outlook_account_record.id is not null
               and calendar_record.id is not null
@@ -1768,10 +2165,41 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
           (s) => {
             s.try({
               body: (s) => {
-                this.reconcileCalendarEvents(s, {
-                  accountRecord: sql.ref("outlook_account_record"),
-                  calendarRecord: sql.ref("calendar_record"),
-                });
+                if (this.opts.conflictSync) {
+                  // Both webhook recovery and nightly jobs use this queue.
+                  // Always repair the bounded mirror before outbound work.
+                  s.forEachQuery(
+                    sql`select id from db.user_outlook_calendars where id = calendar_record.id`,
+                    "recovery_calendar",
+                    (s) =>
+                      s.callStoredProcedure("outlook_sync_calendar_window", {
+                        inputScalars: {
+                          calendar_id: sql`recovery_calendar.id`,
+                        },
+                        outputScalars: {
+                          created_count: "mirrored_created",
+                          updated_count: "mirrored_updated",
+                          deleted_count: "mirrored_deleted",
+                        },
+                      }),
+                  );
+                }
+                s.if(
+                  this.opts.conflictSync
+                    ? sql`calendar_record.add_to_calendar`
+                    : sql.true,
+                  (s) =>
+                    this.reconcileCalendarEvents(s, {
+                      accountRecord: sql.ref("outlook_account_record"),
+                      calendarRecord: sql.ref("calendar_record"),
+                      mirrorEvents: !this.opts.conflictSync,
+                      mirrorCounts: {
+                        created: "mirrored_created",
+                        updated: "mirrored_updated",
+                        deleted: "mirrored_deleted",
+                      },
+                    }),
+                );
                 if (system.blockOptional(DevLogBlock)) {
                   s.startTransaction();
                   system.block(DevLogBlock).log(s, {
@@ -1784,12 +2212,18 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                       sql`outlook_account_record.id::string`,
                     ),
                     description: sql.concat(
-                      "created=",
+                      "outbound_created=",
                       sql`created_events::string`,
-                      " updated=",
+                      " outbound_updated=",
                       sql`updated_events::string`,
-                      " deleted=",
+                      " outbound_deleted=",
                       sql`deleted_events::string`,
+                      " mirrored_created=",
+                      sql`mirrored_created::string`,
+                      " mirrored_updated=",
+                      sql`mirrored_updated::string`,
+                      " mirrored_deleted=",
+                      sql`mirrored_deleted::string`,
                     ),
                   });
                   s.commitTransaction();
@@ -1834,6 +2268,10 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   errorMessage: sql`reconcile_error.message`,
                   accountWhere: sql`id = outlook_account_record.id`,
                 });
+                s.throwError(
+                  sql`coalesce(reconcile_error.message, 'Outlook reconciliation failed')`,
+                  sql`reconcile_error.description`,
+                );
               },
             });
           },
@@ -1867,6 +2305,7 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
             this.opts.extensions?.onNotificationReceived?.(s, {
               body: sql`body`,
             });
+            s.defScalar("notification_failed", false);
             s.try({
               body: (s) => {
                 s.defTable(
@@ -1874,12 +2313,14 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   sql`select
             (value->'resourceData'->>'id') as event_id,
             (value->>'changeType') as change_type,
-            (value->>'subscriptionId') as subscription_id
+            (value->>'subscriptionId') as subscription_id,
+            (value->>'clientState') as client_state
 
           from json.array_each(try_cast(body as json) -> 'value') as value`,
                 );
                 s.defTable("processed_outlook_series", {
                   fields: [
+                    { name: "calendar_id", type: "BigUint", notNull: true },
                     {
                       name: "series_master_id",
                       type: { type: "String", maxLength: 600 },
@@ -1888,143 +2329,149 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                   ],
                 });
                 s.forEachTable("events", "event", (s) => {
-                  s.defRecord(
-                    "db_calendar",
-                    sql`select * from user_outlook_calendars where notification_resource_id = event.subscription_id`,
-                  );
-                  s.if(sql`db_calendar.id is null`, (s) => {
-                    s.continue();
-                  });
-                  s.startTransaction();
-                  s.modify(
-                    sql`update user_outlook_calendars set last_event_sync_at = now() where id = db_calendar.id`,
-                  );
-                  s.commitTransaction();
-                  s.defRecord(
-                    "account",
-                    sql`select * from user_outlook_accounts where id = db_calendar.user_outlook_account_id`,
-                  );
-                  s.if(sql`event.change_type = 'deleted'`, (s) => {
-                    s.startTransaction();
-                    if (system.db.tables.scheduling_appointments) {
+                  s.try({
+                    body: (s) => {
+                      s.defRecord(
+                        "db_calendar",
+                        sql`select * from user_outlook_calendars where notification_resource_id = event.subscription_id`,
+                      );
                       s.if(
-                        sql`exists(select 1 from db.scheduling_appointments where outlook_event_id = event.event_id)`,
+                        sql`db_calendar.id is null
+                        or db_calendar.notification_client_state is null
+                        or event.client_state is null
+                        or event.client_state collate binary != db_calendar.notification_client_state`,
                         (s) => {
-                          s.startTransaction();
-                          s.modify(sql`
-                          insert into deleted_yolm_outlook_events (outlook_event_id, deleted_at)
-                          select event.event_id, now()
-                          where not exists (
-                            select 1 from deleted_yolm_outlook_events
-                            where outlook_event_id = event.event_id
-                          )
-                        `);
+                          s.continue();
                         },
                       );
-                    }
-                    s.modify(
-                      sql`delete from user_outlook_calendar_events
+                      s.startTransaction();
+                      s.modify(
+                        sql`update user_outlook_calendars set last_event_sync_at = now() where id = db_calendar.id`,
+                      );
+                      s.commitTransaction();
+                      s.defRecord(
+                        "account",
+                        sql`select * from user_outlook_accounts where id = db_calendar.user_outlook_account_id`,
+                      );
+                      s.if(sql`event.change_type = 'deleted'`, (s) => {
+                        s.startTransaction();
+                        s.modify(
+                          sql`delete from user_outlook_calendar_events
                         where user_outlook_calendar_id = db_calendar.id
                           and (
-                            outlook_event_id = event.event_id
-                            or series_master_id = event.event_id
+                            outlook_event_id collate binary = event.event_id
+                            or series_master_id collate binary = event.event_id
                           )`,
-                    );
-                    s.commitTransaction();
-                    s.continue();
-                  });
-                  this.azureAD.events.getEvent(s, {
-                    eventId: sql`event.event_id`,
-                    ...this.#getOauthOpts(
-                      sql`account.id`,
-                      !!this.#caps?.read_events,
-                    ),
-                  });
+                        );
+                        s.commitTransaction();
+                        s.continue();
+                      });
+                      this.azureAD.events.getEvent(s, {
+                        eventId: sql`event.event_id`,
+                        calendarId: sql`db_calendar.azure_calendar_id`,
+                        onNotFound: (s) => {
+                          // An update may arrive after deletion or a move. Drop
+                          // only this calendar's stale mirror; a failed fetch
+                          // is not an explicit cancellation of an appointment.
+                          s.startTransaction();
+                          s.modify(sql`delete from user_outlook_calendar_events
+                            where user_outlook_calendar_id = db_calendar.id
+                              and (outlook_event_id collate binary = event.event_id
+                                or series_master_id collate binary = event.event_id)`);
+                          s.commitTransaction();
+                          s.continue();
+                        },
+                        ...this.#getOauthOpts(
+                          sql`account.id`,
+                          !!this.#caps?.read_events,
+                        ),
+                      });
 
-                  s.if(
-                    sql`(event_response->'extensions'->0->>'extensionName') = 'com.yolm.scheduling'`,
-                    (s) => {
-                      s.continue();
-                    },
-                  );
+                      s.if(
+                        sql`(event_response->'extensions'->0->>'extensionName') = 'com.yolm.scheduling'`,
+                        (s) => {
+                          s.continue();
+                        },
+                      );
 
-                  s.defScalar(
-                    "notified_series_master_id",
-                    sql`case
+                      s.defScalar(
+                        "notified_series_master_id",
+                        sql`case
                       when event_response->>'seriesMasterId' is not null
                         then event_response->>'seriesMasterId'
                       when event_response->>'type' = 'seriesMaster'
                         or event_response->>'recurrence' is not null
                         then event_response->>'id'
                     end`,
-                  );
-                  s.if(
-                    sql`notified_series_master_id is not null`,
-                    (s) => {
+                      );
                       s.if(
-                        sql`exists(
+                        sql`notified_series_master_id is not null`,
+                        (s) => {
+                          s.if(
+                            sql`exists(
                           select 1
                           from processed_outlook_series
-                          where series_master_id = notified_series_master_id
+                          where calendar_id = db_calendar.id
+                            and series_master_id collate binary = notified_series_master_id
                         )`,
-                        (s) => {
+                            (s) => {
+                              s.continue();
+                            },
+                          );
+                          this.azureAD.events.listAllEvents(s, {
+                            calendarId: sql`db_calendar.azure_calendar_id`,
+                            seriesMasterId: sql`notified_series_master_id`,
+                            saveToTable: "temp_notified_outlook_series",
+                            ...this.#getOauthOpts(
+                              sql`account.id`,
+                              !!this.#caps?.read_events,
+                            ),
+                          });
+                          s.startTransaction();
+                          s.modify(
+                            sql`delete from user_outlook_calendar_events
+                          where user_outlook_calendar_id = db_calendar.id
+                            and series_master_id collate binary = notified_series_master_id`,
+                          );
+                          this.#mergeEvents(s, {
+                            eventsTable: "temp_notified_outlook_series",
+                            calendarId: sql`db_calendar.id`,
+                          });
+                          s.modify(
+                            sql`insert into processed_outlook_series
+                          (calendar_id, series_master_id)
+                        values (db_calendar.id, notified_series_master_id)`,
+                          );
+                          s.commitTransaction();
                           s.continue();
                         },
                       );
-                      this.azureAD.events.listAllEvents(s, {
-                        calendarId: sql`db_calendar.azure_calendar_id`,
-                        seriesMasterId: sql`notified_series_master_id`,
-                        saveToTable: "temp_notified_outlook_series",
-                        ...this.#getOauthOpts(
-                          sql`account.id`,
-                          !!this.#caps?.read_events,
-                        ),
-                      });
+
+                      s.if(
+                        sql`event_response->>'showAs' = 'free'`,
+                        (s) => {
+                          s.startTransaction();
+                          s.modify(
+                            sql`delete from user_outlook_calendar_events where outlook_event_id collate binary = event.event_id and user_outlook_calendar_id = db_calendar.id`,
+                          );
+                          s.commitTransaction();
+                          s.continue();
+                        },
+                      );
+                      const startTime = sql`${
+                        this.#castToTimestamp(
+                          sql`(event_response->'start'->>'dateTime')`,
+                        )
+                      } at time zone (event_response->'start'->>'timeZone')`;
+                      const endTime = sql`${
+                        this.#castToTimestamp(
+                          sql`(event_response->'end'->>'dateTime')`,
+                        )
+                      } at time zone (event_response->'end'->>'timeZone')`;
+
                       s.startTransaction();
                       s.modify(
-                        sql`delete from user_outlook_calendar_events
-                          where user_outlook_calendar_id = db_calendar.id
-                            and series_master_id = notified_series_master_id`,
-                      );
-                      this.#mergeEvents(s, {
-                        eventsTable: "temp_notified_outlook_series",
-                        calendarId: sql`db_calendar.id`,
-                      });
-                      s.modify(
-                        sql`insert into processed_outlook_series
-                          (series_master_id)
-                        values (notified_series_master_id)`,
-                      );
-                      s.commitTransaction();
-                      s.continue();
-                    },
-                  );
-
-                  s.if(
-                    sql`event_response->>'showAs' = 'free'`,
-                    (s) => {
-                      s.startTransaction();
-                      s.modify(
-                        sql`delete from user_outlook_calendar_events where outlook_event_id = event.event_id and user_outlook_calendar_id = db_calendar.id`,
-                      );
-                      s.commitTransaction();
-                      s.continue();
-                    },
-                  );
-                  const startTime = sql`${
-                    this.#castToTimestamp(
-                      sql`(event_response->'start'->>'dateTime')`,
-                    )
-                  } at time zone (event_response->'start'->>'timeZone')`;
-                  const endTime = sql`${
-                    this.#castToTimestamp(
-                      sql`(event_response->'end'->>'dateTime')`,
-                    )
-                  } at time zone (event_response->'end'->>'timeZone')`;
-
-                  s.startTransaction();
-                  s.modify(
-                    sql`merge into user_outlook_calendar_events as target
+                        sql`merge into user_outlook_calendar_events as target
                       using (
                         select
                           event.event_id as outlook_event_id,
@@ -2035,9 +2482,13 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                           ${startTime} as start_time,
                           ${endTime} as end_time
                       ) as source
-                      on target.outlook_event_id = source.outlook_event_id
+                      on target.outlook_event_id collate binary = source.outlook_event_id
                         and target.user_outlook_calendar_id = db_calendar.id
-                      when matched then
+                      when matched and (
+                        (target.summary collate binary is distinct from source.summary)
+                        or (target.start_time is distinct from source.start_time)
+                        or (target.end_time is distinct from source.end_time)
+                      ) then
                         update set
                           summary = source.summary,
                           start_time = source.start_time,
@@ -2057,28 +2508,27 @@ export class OutlookCalendarIntegration implements CalendarIntegration {
                           source.end_time,
                           db_calendar.id
                         )`,
-                  );
-                  s.commitTransaction();
+                      );
+                      s.commitTransaction();
+                    },
+                    errorName: "error",
+                    catch: (s) => {
+                      this.#notificationFailed(s, sql`event.subscription_id`);
+                      s.setScalar("notification_failed", true);
+                    },
+                  });
                 });
-                s.setHttpStatus(200);
+                s.if(
+                  sql`notification_failed`,
+                  (s) => s.setHttpStatus(503),
+                  (s) => s.setHttpStatus(200),
+                );
                 s.return();
               },
               errorName: "error",
               catch: (s) => {
-                //always return 200 even after internally throwing an error because Outlook will keep sending the same notification over and over if we don't
-                s.rollbackIfInTransaction();
-                this.opts.extensions?.onNotificationError?.(s, {
-                  errorRecord: sql.ref("error"),
-                });
-                if (system.hasBlockNamed("SchedulingBlock")) {
-                  s.startTransaction();
-                  s.modify(
-                    sql`insert into scheduling_outlook_integration_logs (operation, raw_response, success, error_message, logged_at)
-                      values ('receive_notification', try_cast(body as json), false, concat(error.type, ': ', coalesce(error.message, '')), now())`,
-                  );
-                  s.commitTransaction();
-                }
-                s.setHttpStatus(200);
+                this.#notificationFailed(s);
+                s.setHttpStatus(503);
                 s.return();
               },
             });

@@ -11,6 +11,7 @@ import { Textarea } from "components/textarea";
 import { Typography } from "components/typography";
 import { ActionButton, ActionMenuItem } from "std/action_button";
 import { Data } from "std/data";
+import { system } from "std/system";
 import { useJsModule } from "std/js_modules";
 import { sql } from "std/sql_utils";
 import type { AnyExpr, Sql } from "std/sql_utils";
@@ -19,6 +20,7 @@ import { Each, EventHandlers, Show, useUniqueId } from "std/ui";
 import type { Node } from "std/ui";
 import { driveText } from "./i18n";
 import type { DriveBlock, DriveSpaceType } from "./index.tsx";
+import type { ControlledFileLifecycle } from "./controlled_lifecycle";
 
 const CHUNK_THRESHOLD = 16 * 1024 * 1024;
 const CHUNK_SIZE = 8 * 1024 * 1024;
@@ -31,6 +33,7 @@ export interface DriveWorkspaceProps {
   initialFolderId?: AnyExpr;
   /** Keeps folder navigation in this URL query parameter using replace-state. */
   folderQueryParam?: string;
+  /** Defaults to the space name. Null omits the redundant workspace heading. */
   title?: Node;
   heightClassName?: string;
   /**
@@ -51,6 +54,13 @@ export interface DriveWorkspaceProps {
   }) => Node;
   /** Defaults to true. Disable for representation-only spaces. */
   allowUploads?: boolean;
+  /** Hide editing controls for a browsing-only surface; server permissions still apply. */
+  readOnly?: boolean;
+  /** Browse preferred publications; defaults to read-only unless readOnly is explicitly false. */
+  published?: {
+    control: ControlledFileLifecycle;
+    preferredLanguage: Sql;
+  };
   /** Optional product rule for items that must not be moved to trash. */
   canTrashItem?: (itemId: Sql) => Sql;
   /** Enables Drive-style multi-selection and the built-in action toolbar. */
@@ -63,6 +73,14 @@ export interface DriveFileUploadButtonProps {
   spaceId: AnyExpr;
   parentItemId?: AnyExpr;
   fileHref: (itemId: Sql) => Sql;
+  /** Authenticated product endpoint returning the Drive itemId/versionId shape. */
+  uploadEndpoint?: AnyExpr;
+  /** File-picker formats; the upload endpoint remains authoritative. */
+  accept?: AnyExpr;
+  /** Upload a batch, then navigate once all files have completed. */
+  multiple?: boolean;
+  /** Runs after a successful batch, before navigation. */
+  onUploaded?: (s: DomStatements) => void;
   children?: Node;
 }
 
@@ -85,11 +103,14 @@ function selectOnlyWorkspaceItem(
   s.setScalar("files_selection_anchor_ordinal", ordinal);
 }
 
-function selectedWorkspaceRootsSql(spaceId: AnyExpr) {
+function selectedWorkspaceRootsSql(
+  spaceId: AnyExpr,
+  selection: Sql = selectionUiTable,
+) {
   return sql`
     with recursive selected_candidates(id, parent_file_item_id) as (
       select item.id, item.parent_file_item_id
-      from ${selectionUiTable} selected
+      from ${selection} selected
       join db.file_items item on item.id = selected.id
       where item.file_space_id = ${spaceId}
     ), selected_ancestors(selected_id, ancestor_id) as (
@@ -110,11 +131,75 @@ function selectedWorkspaceRootsSql(spaceId: AnyExpr) {
     where not exists (
       select 1
       from selected_ancestors ancestor
-      join ${selectionUiTable} selected_parent
+      join ${selection} selected_parent
         on selected_parent.id = ancestor.ancestor_id
       where ancestor.selected_id = selected.id
     )
   `;
+}
+
+/** Keeps the bulk selection mutations out of every workspace route's handlers. */
+export function registerDriveWorkspaceProcedures() {
+  const selectedRoots = selectedWorkspaceRootsSql(
+    sql`p_space_id`,
+    sql.ref("p_selected_items"),
+  );
+  const selectedItems = [{
+    name: "p_selected_items",
+    fields: [{ name: "id", type: "BigInt" as const }],
+  }];
+  system.storedProcedure({
+    name: "files_bulk_move_items",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_space_id", type: "BigInt" },
+      { name: "p_destination_parent_id", type: "BigInt" },
+    ],
+    inputTables: selectedItems,
+    procedure: (s) => {
+      s.forEachQuery(selectedRoots, "files_bulk_move_item", (s) => {
+        s.callStoredProcedure("files_move_item", {
+          inputScalars: {
+            p_space_id: sql`p_space_id`,
+            p_item_id: sql`files_bulk_move_item.id`,
+            p_destination_parent_id: sql`p_destination_parent_id`,
+          },
+        });
+      });
+    },
+  });
+  system.storedProcedure({
+    name: "files_bulk_trash_items",
+    transaction: "caller",
+    inputScalars: [{ name: "p_space_id", type: "BigInt" }],
+    inputTables: selectedItems,
+    procedure: (s) => {
+      s.forEachQuery(selectedRoots, "files_bulk_trash_item", (s) => {
+        s.callStoredProcedure("files_trash_item", {
+          inputScalars: {
+            p_space_id: sql`p_space_id`,
+            p_item_id: sql`files_bulk_trash_item.id`,
+          },
+        });
+      });
+    },
+  });
+  system.storedProcedure({
+    name: "files_bulk_restore_items",
+    transaction: "caller",
+    inputScalars: [{ name: "p_space_id", type: "BigInt" }],
+    inputTables: selectedItems,
+    procedure: (s) => {
+      s.forEachQuery(selectedRoots, "files_bulk_restore_item", (s) => {
+        s.callStoredProcedure("files_restore_item", {
+          inputScalars: {
+            p_space_id: sql`p_space_id`,
+            p_item_id: sql`files_bulk_restore_item.id`,
+          },
+        });
+      });
+    },
+  });
 }
 
 function MoveSelectedItemsButton(props: {
@@ -122,7 +207,6 @@ function MoveSelectedItemsButton(props: {
   destinationParentId: Sql;
   children: Node;
 }) {
-  const selectedRoots = selectedWorkspaceRootsSql(props.spaceId);
   return (
     <ActionButton
       size="sm"
@@ -130,19 +214,18 @@ function MoveSelectedItemsButton(props: {
       color="neutral"
       className="w-full justify-start"
       action={(s) => {
+        callSelectedWorkspaceRoots(s, props.spaceId);
         s.throwErrorIf(
-          sql`not exists (${selectedRoots})`,
+          sql`not exists (select 1 from files_selected_roots)`,
           driveText("selectionUnavailable"),
         );
         s.startTransaction();
-        s.forEachQuery(selectedRoots, "files_bulk_move_item", (s) => {
-          s.callStoredProcedure("files_move_item", {
-            inputScalars: {
-              p_space_id: props.spaceId,
-              p_item_id: sql`files_bulk_move_item.id`,
-              p_destination_parent_id: props.destinationParentId,
-            },
-          });
+        s.callStoredProcedure("files_bulk_move_items", {
+          inputScalars: {
+            p_space_id: props.spaceId,
+            p_destination_parent_id: props.destinationParentId,
+          },
+          inputTables: { p_selected_items: "ui.files_selected_items" },
         });
         s.commitTransaction();
       }}
@@ -155,6 +238,15 @@ function MoveSelectedItemsButton(props: {
     >
       {props.children}
     </ActionButton>
+  );
+}
+
+function callSelectedWorkspaceRoots(s: UiServerStatements, spaceId: AnyExpr) {
+  // Keep this read local: transferring the selection into a procedure slowed
+  // large selections, even when that procedure used a local result table.
+  s.defTable(
+    "files_selected_roots",
+    selectedWorkspaceRootsSql(spaceId, sql.ref("ui.files_selected_items")),
   );
 }
 
@@ -389,7 +481,7 @@ function startFileSelection(
   });
 }
 
-/** Uploads one file directly into a known Drive location without a workspace. */
+/** Uploads files directly into a known Drive location without a workspace. */
 export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
   useJsModule("http_file_upload");
   return (
@@ -428,12 +520,14 @@ export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
                     handle: sql`drive_direct_upload_handle`,
                     argJson: sql`json_build_object(
                       'handle', drive_direct_upload_handle,
-                      'endpoint', '/api/files/spaces/' ||
+                      'endpoint', ${
+                      props.uploadEndpoint ?? sql`'/api/files/spaces/' ||
                         cast(${props.spaceId} as string) ||
                         '/items/upload?parent_id=' ||
                         coalesce(cast(${
-                      props.parentItemId ?? sql`null`
-                    } as string), ''),
+                        props.parentItemId ?? sql`null`
+                      } as string), '')`
+                    },
                       'concurrency', 1,
                       'chunkThreshold', ${CHUNK_THRESHOLD},
                       'chunkSize', ${CHUNK_SIZE}
@@ -453,7 +547,9 @@ export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
                 )`,
               );
               s.if(sql`drive_direct_uploaded_item_id is not null`, (s) => {
+                props.onUploaded?.(s);
                 s.navigate(props.fileHref(sql`drive_direct_uploaded_item_id`));
+                if (props.multiple) s.refetch();
               }).else((s) => {
                 s.setScalar(
                   "drive_direct_upload_error",
@@ -476,10 +572,12 @@ export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
               s.setScalar(
                 "drive_direct_upload_error",
                 sql`coalesce(
+                  event.payload_json->'results'->0->'response'->>'error',
                   event.payload_json->>'error',
                   ${driveText("uploadFailed")}
                 )`,
               );
+              if (props.multiple) s.refetch();
             },
             "http_file_upload.selectionCancelled": (s) => {
               s.setScalar("drive_direct_uploading", false);
@@ -499,7 +597,8 @@ export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
               handle: sql`drive_direct_upload_handle`,
               argJson: sql`json_build_object(
                 'handle', drive_direct_upload_handle,
-                'multiple', false
+                'accept', ${props.accept ?? sql.null},
+                'multiple', ${props.multiple ? sql`true` : sql`false`}
               )`,
             });
           }}
@@ -526,11 +625,49 @@ export function DriveFileUploadButton(props: DriveFileUploadButtonProps) {
  * bulk upload, rename, move, trash/restore, tags, and immutable history.
  */
 export function DriveWorkspace(props: DriveWorkspaceProps) {
+  const origin =
+    sql`case when regex.is_match(location.host, '^(localhost|127[.]0[.]0[.]1)(:[0-9]+)?$') then 'http://' else 'https://' end || location.host`;
+  const copyFolderLink = (s: DomStatements, folder: Sql) => {
+    const param = sql.lit(props.folderQueryParam ?? "folder");
+    s.clipboard.writeText(sql`${origin} || location.pathname || (
+      select case when params = '' then '' else '?' || params end
+      from (
+        select coalesce(string_agg(value, '&' order by ordinal), '') ||
+          case when ${folder} is null then '' else
+            case when count(*) > 0 then '&' else '' end ||
+            uri.encode_component(${param}) || '=' || cast(${folder} as string)
+          end as params
+        from string.split(regex.replace(location.query, '^[?]', ''), '&')
+        where value <> '' and uri.form_url_decode(split_part(value, '=', 1)) <> ${param}
+      ) remaining
+    )`);
+  };
+  const copyFileLink = (s: DomStatements, href: Sql) =>
+    s.clipboard.writeText(
+      sql`case when ${href} like '/%' and ${href} not like '//%'
+        then ${origin} || ${href} else ${href} end`,
+    );
+  const versionHref = props.fileVersionHref
+    ? props.fileVersionHref(
+      sql`files_selected_item.id`,
+      sql`files_version.id`,
+      sql`files_version.content_type`,
+    )
+    : sql`case when files_version.blob_hash is not null then ${
+      props.files.versionBlobUrl(
+        sql`files_version.id`,
+        sql`files_version.blob_hash`,
+      )
+    } end`;
   const height = props.heightClassName ?? "h-[44rem]";
-  const allowUploads = props.allowUploads ?? props.type.blobUploads !== false;
-  const selectable = props.selectable === true;
+  const readOnly = props.readOnly ?? props.published !== undefined;
+  const allowUploads = !readOnly &&
+    (props.allowUploads ?? props.type.blobUploads !== false);
+  const selectable = props.selectable === true && !readOnly;
+  const hideHeader = props.title === null &&
+    (readOnly || (props.published !== undefined && !allowUploads));
+  const inlineSelection = selectable && hideHeader;
   const itemRowIdPrefix = useUniqueId();
-  const selectedRoots = selectedWorkspaceRootsSql(props.spaceId);
   const openFolder = (
     s: DomStatements,
     folderId: Sql,
@@ -544,6 +681,199 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
     }
     if (selectable) clearWorkspaceSelection(s);
   };
+  const defaultHeader = () => (
+    <>
+      <div
+        className={props.title === null ? "hidden" : "min-w-0"}
+      >
+        <Typography level="title-lg" startIcon="Folder">
+          {props.title ?? sql`files_space.name`}
+        </Typography>
+        <Show
+          when={sql`coalesce(files_space.description, '') <> ''`}
+        >
+          <p className="truncate text-xs text-secondary">
+            {sql`files_space.description`}
+          </p>
+        </Show>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          className={readOnly ? "hidden" : undefined}
+          dynamicClassNames={props.published
+            ? [{
+              condition: sql`files_published_only or not files_can_edit`,
+              classNames: "hidden",
+            }]
+            : undefined}
+          size="sm"
+          variant="plain"
+          color="neutral"
+          startIcon="DeleteOutline"
+          onClick={(s) => {
+            s.setScalar(
+              "files_show_trash",
+              sql`not files_show_trash`,
+            );
+            s.setScalar(
+              "files_details_item_id",
+              sql`cast(null as bigint)`,
+            );
+            if (selectable) clearWorkspaceSelection(s);
+          }}
+        >
+          {driveText("trash")}
+        </Button>
+        {allowUploads
+          ? (
+            <Show
+              when={sql`files_can_create_file and not ui.files_show_trash`}
+            >
+              <Button
+                size="sm"
+                variant="outlined"
+                startIcon="UploadFile"
+                loading={sql`files_uploading`}
+                onClick={(s) => startFileSelection(s)}
+              >
+                {driveText("upload")}
+              </Button>
+            </Show>
+          )
+          : null}
+      </div>
+    </>
+  );
+  const selectionActions = () => (
+    <div
+      className={inlineSelection
+        ? "flex min-w-max flex-1 items-center gap-2"
+        : "flex min-w-0 flex-1 items-center gap-2"}
+    >
+      <IconButton
+        size="sm"
+        variant="plain"
+        color="neutral"
+        aria-label={driveText("clearSelection")}
+        onClick={clearWorkspaceSelection}
+      >
+        <MaterialIcon icon="Close" />
+      </IconButton>
+      <span className="whitespace-nowrap text-sm font-medium">
+        {sql`cast((select count(*) from ${selectionTable}) as string)
+                          || ' ' || ${driveText("selected")}`}
+      </span>
+      <div className="min-w-0 flex-1" />
+      {props.bulkActions?.(SELECTION_TABLE)}
+      <Show
+        when={sql`(select count(*) from ${selectionTable}) = 1`}
+      >
+        <Each
+          table="files_items"
+          recordName="files_download_item"
+          where={sql`files_download_item.id in (select id from ${selectionTable})
+                            and files_download_item.item_kind = 'file'
+                            and files_download_item.current_file_version_id is not null
+                            and files_download_item.has_blob`}
+        >
+          <a
+            href={props.files.versionBlobUrl(
+              sql`files_download_item.current_file_version_id`,
+            )}
+            download={sql`files_download_item.name`}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm font-medium hover:bg-level1"
+          >
+            <MaterialIcon icon="Download" />
+            {driveText("download")}
+          </a>
+        </Each>
+      </Show>
+      <Show
+        when={sql`files_can_edit and not ui.files_show_trash`}
+      >
+        <Button
+          size="sm"
+          variant="plain"
+          color="neutral"
+          startIcon="DriveFileMove"
+          onClick={(s) => s.setScalar("files_move_open", true)}
+        >
+          {driveText("moveTo")}
+        </Button>
+        <ActionButton
+          size="sm"
+          variant="plain"
+          color="danger"
+          startIcon="DeleteOutline"
+          confirm={{
+            description: driveText("trashSelectedConfirmation"),
+            confirmText: driveText("delete"),
+          }}
+          action={(s) => {
+            if (props.canTrashItem) {
+              callSelectedWorkspaceRoots(s, props.spaceId);
+              s.throwErrorIf(
+                sql`exists (
+                                  select 1
+                                  from files_selected_roots selected_root
+                                  where not (${
+                  props.canTrashItem(sql`selected_root.id`)
+                })
+                                )`,
+                driveText("cannotTrash"),
+              );
+            }
+            s.startTransaction();
+            s.callStoredProcedure("files_bulk_trash_items", {
+              inputScalars: { p_space_id: props.spaceId },
+              inputTables: {
+                p_selected_items: "ui.files_selected_items",
+              },
+            });
+            s.commitTransaction();
+          }}
+          afterSuccessClient={(s) => {
+            s.setScalar(
+              "files_details_item_id",
+              sql`cast(null as bigint)`,
+            );
+            clearWorkspaceSelection(s);
+          }}
+          successMessage={driveText("itemsTrashed")}
+        >
+          {driveText("delete")}
+        </ActionButton>
+      </Show>
+      <Show when={sql`files_can_edit and ui.files_show_trash`}>
+        <ActionButton
+          size="sm"
+          variant="plain"
+          color="neutral"
+          startIcon="RestoreFromTrash"
+          action={(s) => {
+            s.startTransaction();
+            s.callStoredProcedure("files_bulk_restore_items", {
+              inputScalars: { p_space_id: props.spaceId },
+              inputTables: {
+                p_selected_items: "ui.files_selected_items",
+              },
+            });
+            s.commitTransaction();
+          }}
+          afterSuccessClient={(s) => {
+            s.setScalar(
+              "files_details_item_id",
+              sql`cast(null as bigint)`,
+            );
+            clearWorkspaceSelection(s);
+          }}
+          successMessage={driveText("itemsRestored")}
+        >
+          {driveText("restore")}
+        </ActionButton>
+      </Show>
+    </div>
+  );
   return (
     <Data
       local
@@ -611,15 +941,39 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
               files_available_tags: "files_available_tags",
             },
           });
+          s.defTable("files_published_versions", {
+            fields: [
+              { name: "file_item_id", type: "BigInt" },
+              { name: "file_version_id", type: "BigInt" },
+            ],
+          });
+          s.defScalar("files_published_only", Boolean(props.published));
+          if (props.published) {
+            const publication = props.published;
+            s.modify(sql`insert into files_published_versions
+                  select item.id, revision.file_version_id
+                  from db.file_items item
+                  join db.controlled_file_revisions revision on revision.id = ${
+              publication.control.resolvePreferredPublishedRevision({
+                fileItemId: sql`item.id`,
+                preferredLanguage: publication.preferredLanguage,
+              })
+            }
+                  where item.file_space_id = ${props.spaceId}
+                    and item.item_kind = 'file' and item.trashed_at is null`);
+          }
           s.callStoredProcedure("files_workspace_items_state", {
             inputScalars: {
               p_space_id: props.spaceId,
               p_folder_id: sql`ui.files_folder_id`,
               p_search: sql`ui.files_search`,
-              p_show_trash: sql`ui.files_show_trash`,
+              p_show_trash:
+                sql`not files_published_only and ui.files_show_trash`,
               p_selected_item_id: sql`ui.files_details_item_id`,
               p_custom_ordering: sql`files_custom_ordering`,
+              p_published_only: sql`files_published_only`,
             },
+            inputTables: { p_published_versions: "files_published_versions" },
             outputRecords: {
               files_selected_item: "files_selected_item",
             },
@@ -632,6 +986,8 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
             inputScalars: {
               p_space_id: props.spaceId,
               p_selected_item_id: sql`files_selected_item.id`,
+              p_version_id:
+                sql`case when files_published_only then files_selected_item.current_file_version_id else null end`,
             },
             outputScalars: {
               files_can_create_version: "files_can_create_version",
@@ -640,6 +996,12 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
               files_selected_versions: "files_selected_versions",
             },
           });
+          if (readOnly) {
+            s.setScalar("files_can_edit", false);
+            s.setScalar("files_can_create_file", false);
+            s.setScalar("files_can_manage", false);
+            s.setScalar("files_can_create_version", false);
+          }
           s.defScalar(
             "files_can_trash_selected",
             props.canTrashItem
@@ -693,6 +1055,7 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
           <section
             aria-label={driveText("fileWorkspace")}
             className={`${height} flex min-h-0 flex-col overflow-hidden rounded-lg border border-divider bg-surface`}
+            sx={{ containerType: "inline-size" }}
           >
             {selectable
               ? (
@@ -711,266 +1074,22 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
                 />
               )
               : null}
-            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-divider px-4 py-3">
-              {selectable
-                ? (
-                  <Show
-                    when={sql`exists (select 1 from ${selectionTable})`}
-                    fallback={
-                      <>
-                        <div className="min-w-0">
-                          <Typography level="title-lg" startIcon="Folder">
-                            {props.title ?? sql`files_space.name`}
-                          </Typography>
-                          <Show
-                            when={sql`coalesce(files_space.description, '') <> ''`}
-                          >
-                            <p className="truncate text-xs text-secondary">
-                              {sql`files_space.description`}
-                            </p>
-                          </Show>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            size="sm"
-                            variant="plain"
-                            color="neutral"
-                            startIcon="DeleteOutline"
-                            onClick={(s) => {
-                              s.setScalar(
-                                "files_show_trash",
-                                sql`not files_show_trash`,
-                              );
-                              s.setScalar(
-                                "files_details_item_id",
-                                sql`cast(null as bigint)`,
-                              );
-                              clearWorkspaceSelection(s);
-                            }}
-                          >
-                            {driveText("trash")}
-                          </Button>
-                          {allowUploads
-                            ? (
-                              <Show
-                                when={sql`files_can_create_file and not ui.files_show_trash`}
-                              >
-                                <Button
-                                  size="sm"
-                                  variant="outlined"
-                                  startIcon="UploadFile"
-                                  loading={sql`files_uploading`}
-                                  onClick={(s) => startFileSelection(s)}
-                                >
-                                  {driveText("upload")}
-                                </Button>
-                              </Show>
-                            )
-                            : null}
-                        </div>
-                      </>
-                    }
-                  >
-                    <div className="flex min-w-0 flex-1 items-center gap-2">
-                      <IconButton
-                        size="sm"
-                        variant="plain"
-                        color="neutral"
-                        aria-label={driveText("clearSelection")}
-                        onClick={clearWorkspaceSelection}
-                      >
-                        <MaterialIcon icon="Close" />
-                      </IconButton>
-                      <span className="whitespace-nowrap text-sm font-medium">
-                        {sql`cast((select count(*) from ${selectionTable}) as string)
-                          || ' ' || ${driveText("selected")}`}
-                      </span>
-                      <div className="min-w-0 flex-1" />
-                      {props.bulkActions?.(SELECTION_TABLE)}
+            {hideHeader
+              ? null
+              : (
+                <header className="flex shrink-0 items-center justify-between gap-3 border-b border-divider px-4 py-3">
+                  {selectable
+                    ? (
                       <Show
-                        when={sql`(select count(*) from ${selectionTable}) = 1
-                          and exists (
-                            select 1
-                            from files_items item
-                            join ${selectionTable} selected
-                              on selected.id = item.id
-                            where item.item_kind = 'file'
-                              and item.current_file_version_id is not null
-                          )`}
+                        when={sql`exists (select 1 from ${selectionTable})`}
+                        fallback={defaultHeader()}
                       >
-                        <a
-                          href={props.files.versionBlobUrl(sql`(
-                            select item.current_file_version_id
-                            from files_items item
-                            join ${selectionTable} selected
-                              on selected.id = item.id
-                            limit 1
-                          )`)}
-                          download={sql`(
-                            select item.name
-                            from files_items item
-                            join ${selectionTable} selected
-                              on selected.id = item.id
-                            limit 1
-                          )`}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm font-medium hover:bg-level1"
-                        >
-                          <MaterialIcon icon="Download" />
-                          {driveText("download")}
-                        </a>
+                        {selectionActions()}
                       </Show>
-                      <Show
-                        when={sql`files_can_edit and not ui.files_show_trash`}
-                      >
-                        <Button
-                          size="sm"
-                          variant="plain"
-                          color="neutral"
-                          startIcon="DriveFileMove"
-                          onClick={(s) => s.setScalar("files_move_open", true)}
-                        >
-                          {driveText("moveTo")}
-                        </Button>
-                        <ActionButton
-                          size="sm"
-                          variant="plain"
-                          color="danger"
-                          startIcon="DeleteOutline"
-                          confirm={{
-                            description: driveText("trashSelectedConfirmation"),
-                            confirmText: driveText("delete"),
-                          }}
-                          action={(s) => {
-                            if (props.canTrashItem) {
-                              s.throwErrorIf(
-                                sql`exists (
-                                  select 1
-                                  from (${selectedRoots}) selected_root
-                                  where not (${
-                                  props.canTrashItem(sql`selected_root.id`)
-                                })
-                                )`,
-                                driveText("cannotTrash"),
-                              );
-                            }
-                            s.startTransaction();
-                            s.forEachQuery(
-                              selectedRoots,
-                              "files_bulk_trash_item",
-                              (s) => {
-                                s.callStoredProcedure("files_trash_item", {
-                                  inputScalars: {
-                                    p_space_id: props.spaceId,
-                                    p_item_id: sql`files_bulk_trash_item.id`,
-                                  },
-                                });
-                              },
-                            );
-                            s.commitTransaction();
-                          }}
-                          afterSuccessClient={(s) => {
-                            s.setScalar(
-                              "files_details_item_id",
-                              sql`cast(null as bigint)`,
-                            );
-                            clearWorkspaceSelection(s);
-                          }}
-                          successMessage={driveText("itemsTrashed")}
-                        >
-                          {driveText("delete")}
-                        </ActionButton>
-                      </Show>
-                      <Show when={sql`files_can_edit and ui.files_show_trash`}>
-                        <ActionButton
-                          size="sm"
-                          variant="plain"
-                          color="neutral"
-                          startIcon="RestoreFromTrash"
-                          action={(s) => {
-                            s.startTransaction();
-                            s.forEachQuery(
-                              selectedRoots,
-                              "files_bulk_restore_item",
-                              (s) => {
-                                s.callStoredProcedure("files_restore_item", {
-                                  inputScalars: {
-                                    p_space_id: props.spaceId,
-                                    p_item_id: sql`files_bulk_restore_item.id`,
-                                  },
-                                });
-                              },
-                            );
-                            s.commitTransaction();
-                          }}
-                          afterSuccessClient={(s) => {
-                            s.setScalar(
-                              "files_details_item_id",
-                              sql`cast(null as bigint)`,
-                            );
-                            clearWorkspaceSelection(s);
-                          }}
-                          successMessage={driveText("itemsRestored")}
-                        >
-                          {driveText("restore")}
-                        </ActionButton>
-                      </Show>
-                    </div>
-                  </Show>
-                )
-                : (
-                  <>
-                    <div className="min-w-0">
-                      <Typography level="title-lg" startIcon="Folder">
-                        {props.title ?? sql`files_space.name`}
-                      </Typography>
-                      <Show
-                        when={sql`coalesce(files_space.description, '') <> ''`}
-                      >
-                        <p className="truncate text-xs text-secondary">
-                          {sql`files_space.description`}
-                        </p>
-                      </Show>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="plain"
-                        color="neutral"
-                        startIcon="DeleteOutline"
-                        onClick={(s) => {
-                          s.setScalar(
-                            "files_show_trash",
-                            sql`not files_show_trash`,
-                          );
-                          s.setScalar(
-                            "files_details_item_id",
-                            sql`cast(null as bigint)`,
-                          );
-                        }}
-                      >
-                        {driveText("trash")}
-                      </Button>
-                      {allowUploads
-                        ? (
-                          <Show
-                            when={sql`files_can_create_file and not ui.files_show_trash`}
-                          >
-                            <Button
-                              size="sm"
-                              variant="outlined"
-                              startIcon="UploadFile"
-                              loading={sql`files_uploading`}
-                              onClick={(s) => startFileSelection(s)}
-                            >
-                              {driveText("upload")}
-                            </Button>
-                          </Show>
-                        )
-                        : null}
-                    </div>
-                  </>
-                )}
-            </header>
+                    )
+                    : defaultHeader()}
+                </header>
+              )}
 
             <Show when={sql`ui.files_error <> ''`}>
               <Alert color="danger" className="m-3 mb-0">
@@ -1015,61 +1134,123 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
 
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
-                <div className="flex shrink-0 items-center gap-2 border-b border-divider px-3 py-2">
-                  <IconButton
-                    size="sm"
-                    variant="plain"
-                    aria-label={driveText("parentFolder")}
-                    disabled={sql`ui.files_folder_id is null`}
-                    onClick={(s) => {
-                      openFolder(
-                        s,
-                        sql`files_current_folder.parent_file_item_id`,
-                      );
-                    }}
+                <div className="relative shrink-0 border-b border-divider">
+                  <div
+                    className="flex items-center gap-2 px-3 py-2"
+                    dynamicClassNames={inlineSelection
+                      ? [{
+                        condition:
+                          sql`exists (select 1 from ${selectionTable})`,
+                        classNames: "invisible",
+                      }]
+                      : undefined}
                   >
-                    <MaterialIcon icon="ArrowUpward" />
-                  </IconButton>
-                  <div className="min-w-0 flex-1 truncate text-sm font-medium">
-                    <Button
+                    <IconButton
                       size="sm"
                       variant="plain"
-                      color="neutral"
+                      aria-label={driveText("parentFolder")}
+                      disabled={sql`ui.files_folder_id is null`}
                       onClick={(s) => {
                         openFolder(
                           s,
-                          sql`cast(null as bigint)`,
+                          sql`files_current_folder.parent_file_item_id`,
                         );
                       }}
                     >
-                      {sql`files_space.name`}
-                    </Button>
-                    <Show when={sql`files_current_folder.id is not null`}>
-                      <span className="text-secondary">/</span>
-                      <span>{sql`files_current_folder.name`}</span>
-                    </Show>
+                      <MaterialIcon icon="ArrowUpward" />
+                    </IconButton>
+                    <div className="flex min-w-0 flex-1 items-center gap-1 text-sm font-medium">
+                      <Button
+                        className="min-w-0 max-w-full shrink px-1"
+                        title={sql`files_space.name`}
+                        size="sm"
+                        variant="plain"
+                        color="neutral"
+                        onClick={(s) => {
+                          openFolder(
+                            s,
+                            sql`cast(null as bigint)`,
+                          );
+                        }}
+                      >
+                        <span className="truncate">
+                          {sql`files_space.name`}
+                        </span>
+                      </Button>
+                      <Show when={sql`files_current_folder.id is not null`}>
+                        <span className="shrink-0 text-secondary">/</span>
+                        <span
+                          className="min-w-0 truncate"
+                          title={sql`files_current_folder.name`}
+                        >
+                          {sql`files_current_folder.name`}
+                        </span>
+                      </Show>
+                    </div>
+                    {props.folderQueryParam
+                      ? (
+                        <Menu>
+                          <Menu.IconButton
+                            size="sm"
+                            variant="plain"
+                            color="neutral"
+                            aria-label={driveText("folderActions")}
+                          >
+                            <MaterialIcon icon="MoreVert" />
+                          </Menu.IconButton>
+                          <Menu.Content floating={{ placement: "bottom-end" }}>
+                            <Menu.Item
+                              onClick={(s) =>
+                                copyFolderLink(s, sql`ui.files_folder_id`)}
+                            >
+                              <MaterialIcon icon="Link" />
+                              {driveText("copyFolderLink")}
+                            </Menu.Item>
+                          </Menu.Content>
+                        </Menu>
+                      )
+                      : null}
+                    <Input
+                      size="sm"
+                      value={sql`ui.files_search`}
+                      onInput={(s) => {
+                        s.setScalar("files_search", sql`target_value`);
+                        s.setScalar(
+                          "files_details_item_id",
+                          sql`cast(null as bigint)`,
+                        );
+                        if (selectable) clearWorkspaceSelection(s);
+                      }}
+                      startIcon="Search"
+                      placeholder={driveText("search")}
+                      aria-label={driveText("searchSpace")}
+                      sx={{
+                        width: "8rem",
+                        minWidth: 0,
+                        flexShrink: 0,
+                        "@container (min-width: 480px)": { width: "12rem" },
+                        "@container (min-width: 720px)": { width: "16rem" },
+                      }}
+                    />
                   </div>
-                  <Input
-                    size="sm"
-                    value={sql`ui.files_search`}
-                    onInput={(s) => {
-                      s.setScalar("files_search", sql`target_value`);
-                      s.setScalar(
-                        "files_details_item_id",
-                        sql`cast(null as bigint)`,
-                      );
-                      if (selectable) clearWorkspaceSelection(s);
-                    }}
-                    startIcon="Search"
-                    placeholder={driveText("searchSpace")}
-                    className="w-64"
-                  />
+                  {inlineSelection
+                    ? (
+                      <Show
+                        when={sql`exists (select 1 from ${selectionTable})`}
+                      >
+                        {/* Replace the navigation controls without moving the rows. */}
+                        <div className="absolute inset-0 flex items-center overflow-x-auto bg-surface px-3 py-2">
+                          {selectionActions()}
+                        </div>
+                      </Show>
+                    )
+                    : null}
                 </div>
 
                 <Show
                   when={sql`files_can_edit and not ui.files_show_trash`}
                 >
-                  <div className="flex shrink-0 items-center gap-2 border-b border-divider bg-level1 px-3 py-2">
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-divider bg-level1 px-3 py-2">
                     {props.createFile?.({
                       spaceId: sql`${props.spaceId}`,
                       parentItemId: sql`ui.files_folder_id`,
@@ -1508,6 +1689,39 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
                                   end`
                                 : driveText("open")}
                             </Menu.Item>
+                            <Show
+                              when={sql`files_item.item_kind='file'${
+                                props.folderQueryParam
+                                  ? sql` or files_item.item_kind='folder'`
+                                  : sql``
+                              }`}
+                            >
+                              <Menu.Item
+                                onClick={(s) => {
+                                  s.if(
+                                    sql`files_item.item_kind='folder'`,
+                                    (s) =>
+                                      copyFolderLink(s, sql`files_item.id`),
+                                    (s) =>
+                                      copyFileLink(
+                                        s,
+                                        props.fileHref
+                                          ? props.fileHref(
+                                            sql`files_item.id`,
+                                            sql`files_item.current_file_version_id`,
+                                            sql`files_item.content_type`,
+                                          )
+                                          : props.files.versionBlobUrl(
+                                            sql`files_item.current_file_version_id`,
+                                          ),
+                                      ),
+                                  );
+                                }}
+                              >
+                                <MaterialIcon icon="Link" />
+                                {driveText("copyLink")}
+                              </Menu.Item>
+                            </Show>
                             <Show
                               when={sql`
                                 files_custom_ordering
@@ -2070,43 +2284,63 @@ export function DriveWorkspace(props: DriveWorkspaceProps) {
                             table="files_selected_versions"
                             recordName="files_version"
                           >
-                            <a
-                              href={props.fileVersionHref
-                                ? props.fileVersionHref(
-                                  sql`files_selected_item.id`,
-                                  sql`files_version.id`,
-                                  sql`files_version.content_type`,
-                                )
-                                : props.files.versionBlobUrl(
-                                  sql`files_version.id`,
-                                  sql`files_version.blob_hash`,
-                                )}
-                              target="_blank"
-                              className="block rounded-md border border-divider p-2 hover:bg-level1"
-                            >
-                              <div className="flex justify-between gap-2 text-sm">
-                                <span className="font-medium">
-                                  {sql`${driveText("version")} || ' ' ||
+                            <div className="flex items-start gap-1">
+                              <a
+                                href={versionHref}
+                                target="_blank"
+                                className="min-w-0 flex-1 rounded-md border border-divider p-2 hover:bg-level1"
+                              >
+                                <div className="flex justify-between gap-2 text-sm">
+                                  <span className="font-medium">
+                                    {sql`${driveText("version")} || ' ' ||
                                   cast(files_version.version_number as string)`}
-                                </span>
-                                <Show
-                                  when={sql`files_version.id = files_selected_item.current_file_version_id`}
-                                >
-                                  <Chip size="sm" color="success">
-                                    {driveText("current")}
-                                  </Chip>
-                                </Show>
-                              </div>
-                              <div className="mt-1 truncate text-xs text-secondary">
-                                {sql`files_version.file_name`}
-                              </div>
-                              <div className="mt-1 text-xs text-secondary">
-                                {sql`format.date(
+                                  </span>
+                                  <Show
+                                    when={sql`files_version.id = files_selected_item.current_file_version_id`}
+                                  >
+                                    <Chip size="sm" color="success">
+                                      {driveText("current")}
+                                    </Chip>
+                                  </Show>
+                                </div>
+                                <div className="mt-1 truncate text-xs text-secondary">
+                                  {sql`files_version.file_name`}
+                                </div>
+                                <div className="mt-1 text-xs text-secondary">
+                                  {sql`format.date(
                                 files_version.created_at,
                                 ${driveText("dateTimeFormat")}
                               )`}
-                              </div>
-                            </a>
+                                </div>
+                              </a>
+                              <Show when={sql`${versionHref} is not null`}>
+                                <Menu>
+                                  <Menu.IconButton
+                                    size="sm"
+                                    variant="plain"
+                                    color="neutral"
+                                    aria-label={sql`${
+                                      driveText("actionsFor")
+                                    } || ' ' || ${
+                                      driveText("version")
+                                    } || ' ' || files_version.version_number::string`}
+                                  >
+                                    <MaterialIcon icon="MoreVert" />
+                                  </Menu.IconButton>
+                                  <Menu.Content
+                                    floating={{ placement: "bottom-end" }}
+                                  >
+                                    <Menu.Item
+                                      onClick={(s) =>
+                                        copyFileLink(s, versionHref)}
+                                    >
+                                      <MaterialIcon icon="Link" />
+                                      {driveText("copyVersionLink")}
+                                    </Menu.Item>
+                                  </Menu.Content>
+                                </Menu>
+                              </Show>
+                            </div>
                           </Each>
                         </div>
                       </div>

@@ -429,13 +429,7 @@ export class PdfMarkupExtension implements DriveExtension {
           p_show_markup
           and not p_read_only
           and (
-            ${
-          files.runtimeAccessSql(
-            sql`p_space_id`,
-            sql`current_user`,
-            "write",
-          )
-        }
+            files_pdf_space_writable
             ${
           this.opts.canEditVersion
             ? sql`or ${
@@ -451,6 +445,20 @@ export class PdfMarkupExtension implements DriveExtension {
         s.defScalar(
           "files_pdf_custom_ordering",
           files.customOrderingSql(sql`p_space_id`),
+        );
+        // Do not trust p_can_view as an authorization proof: this stored
+        // procedure can be called independently of the access-state procedure.
+        s.defScalar(
+          "files_pdf_space_readable",
+          sql`case when p_can_view then ${
+            files.runtimeAccessSql(sql`p_space_id`, sql`current_user`, "read")
+          } else false end`,
+        );
+        // Space write access is invariant across this invocation's documents.
+        // Keep the version-specific editing alternative in documentCanEdit.
+        s.defScalar(
+          "files_pdf_space_writable",
+          files.runtimeAccessSql(sql`p_space_id`, sql`current_user`, "write"),
         );
         s.defScalar(
           "files_pdf_folder_id",
@@ -534,14 +542,17 @@ export class PdfMarkupExtension implements DriveExtension {
               )
               and version.content_type = 'application/pdf' collate nocase
               and p_can_view
+              and files_pdf_space_readable
+              and version.file_item_id = item.id
               and ${
-            files.canReadVersionSql({
+            // Space access is proven once above, and every candidate item is
+            // restricted to that space. Keep the per-version extension checks.
+            files.canReadVersionForAuthorizedSpaceSql({
               spaceRecord: sql`document_space`,
               itemRecord: sql`item`,
               versionRecord: sql`version`,
               sysUserId: sql`current_user`,
-            })
-          }
+            })}
           `,
         );
         s.setScalar(

@@ -2121,7 +2121,8 @@ function EmailThreadsList(props: {
     : sql`coalesce(thread_id, 'message:' || cast(id as string))`;
   return (
     <Data
-      watch={[sql`search_query`, sql`page`, sql`expanded_thread_key`]}
+      watch={[sql`search_query`, sql`page`]}
+      debounce={{ wait: 300 }}
       pendingFallback={null}
       procedure={(s) => {
         const whereExpr = props.where ?? true;
@@ -2720,10 +2721,11 @@ export function EmailBodyFieldNode(
                   errorDisplay="inline"
                   successMessage="Message body downloaded"
                   action={(s) => {
-                    system.block(OutlookEmailIntegration).hydrateEmailNow(
-                      s,
-                      { emailId: sql`hydrating_email_id` },
-                    );
+                    system.block(OutlookEmailIntegration)
+                      .hydrateEmailNowWithProcedure(
+                        s,
+                        { emailId: sql`hydrating_email_id` },
+                      );
                   }}
                 >
                   Get now
@@ -2742,7 +2744,7 @@ export function EmailBodyFieldNode(
             onClick={(s) => {
               s.server((s) => {
                 system.block(OutlookEmailIntegration)
-                  .fetchNextInlineAttachmentContent(s, {
+                  .fetchNextInlineAttachmentContentWithProcedure(s, {
                     emailId: sql`hydrating_email_id`,
                   });
               });

@@ -30,12 +30,15 @@ the system and executed through the compiler's explicit test mode:
 
 ### Automatic Isolation
 
-Each test runs in its own isolated environment:
+Each test runs against its own fresh in-memory system:
 
-- Transaction-based isolation
-- Automatic rollback after each test
+- The test's data set runs first, then the test procedure
+- Nothing is rolled back; the whole system is discarded after the test
 - No manual cleanup needed
 - Tests can't affect each other
+
+Writes inside a test procedure still need explicit transactions; see
+[Transactions and isolation](./test_statements.md#transactions-and-isolation).
 
 ### Deterministic Testing
 
@@ -47,47 +50,85 @@ Tests support frozen time and seeding:
 
 ## Quick Start
 
+Test production behavior that nothing else covers: call the real procedure or
+API and assert the business outcome or rejection. Do not assert fixture
+contents or that an insert you just made exists. See the
+[test policy](../ai/review.md#tests).
+
 ```typescript
 import { system } from "std/system";
 import { sql } from "std/sql_utils";
 
-// Define test data set
-system.test.testDataProc("basic", new Date("2025-01-15T10:00:00-05:00"), (s) => {
+// Define test data set: limited stock and two orders against it
+system.test.testDataProc("orders", new Date("2025-01-15T10:00:00-05:00"), (s) => {
+  s.modify(sql`insert into db.products (sku, on_hand) values ('WIDGET', 5)`);
   s.modify(sql`
-    INSERT INTO db.users (name, email, created_at)
-    VALUES ('Test User', 'test@example.com', NOW())
+    insert into db.orders (reference, status)
+    values ('ORD-001', 'open'), ('ORD-002', 'open')
+  `);
+  s.modify(sql`
+    insert into db.order_lines (order_id, product_id, quantity)
+    select o.id, p.id, case o.reference when 'ORD-001' then 3 else 10 end
+    from db.orders o, db.products p
   `);
 });
 
 // Register a test
-system.test.test({
-  name: "user creation works",
-  data: "basic",  // Reference to data set
+system.test({
+  name: "ship_order decrements stock and refuses to oversell",
+  data: "orders",  // Reference to data set
   time: new Date("2025-01-15T10:00:00-05:00"),
   procedure: (s) => {
-    // Verify data exists
-    s.assertEqual(
-      sql`(SELECT COUNT(*) FROM db.users WHERE email = 'test@example.com')`,
-      sql`1`,
-    );
+    // Call the production procedure
+    s.startTransaction();
+    s.callStoredProcedure("ship_order", {
+      inputScalars: { p_reference: sql.lit`ORD-001` },
+    });
+    s.commitTransaction();
+    s.assertEqual(sql`(select on_hand from db.products where sku = 'WIDGET')`, sql`2`);
+
+    // Shipping 10 with 2 on hand is rejected and changes nothing. ship_order
+    // rejects with s.throwError(sql.lit`insufficient_stock`), a stable code.
+    s.defScalar("rejection", sql`cast(null as string)`);
+    s.try({
+      body: (s) => {
+        s.startTransaction();
+        s.callStoredProcedure("ship_order", {
+          inputScalars: { p_reference: sql.lit`ORD-002` },
+        });
+        s.commitTransaction();
+      },
+      errorName: "ship_error",
+      catch: (s) => {
+        s.rollbackIfInTransaction();
+        s.setScalar("rejection", sql`ship_error.message`);
+      },
+    });
+    s.assertEqual(sql`rejection`, sql`'insufficient_stock'`);
+    s.assertEqual(sql`(select on_hand from db.products where sku = 'WIDGET')`, sql`2`);
   },
 });
 ```
 
 ## Test Registration API
 
-`system.test` is callable. The common form in real tests is the direct call
-`system.test("name", (s) => { ... })`; the object form
-`system.test.test({ name, data, time, procedure })` is equivalent and reads
-better when you set many options.
+`system.test` is callable. Register tests with one of three forms:
 
 ```typescript
-// Direct call (most common)
-system.test("user creation works", (s) => { /* ... */ });
+// Name and procedure; uses system.test.defaultTime and defaultData
+system.test("ship_order refuses to oversell", (s) => { /* ... */ });
 
-// Direct call with options
-system.test("user creation works", { data: "basic" }, (s) => { /* ... */ });
+// Name, options, and procedure
+system.test("ship_order refuses to oversell", { data: "orders" }, (s) => { /* ... */ });
+
+// Full configuration object
+system.test({ name: "ship_order refuses to oversell", data: "orders", procedure: (s) => { /* ... */ } });
 ```
+
+`system.test.test(...)` is an alias with the same overloads; prefer calling
+`system.test(...)` directly. Every test needs a time and a data set, either
+passed explicitly or supplied by `system.test.defaultTime` and
+`system.test.defaultData`.
 
 ### system.test.testDataProc
 
@@ -96,17 +137,20 @@ Define a named test data set that can be referenced by multiple tests:
 ```typescript
 system.test.testDataProc(
   name: string,           // Data set name
-  time: Date,             // Frozen time for data setup
+  time: Date | string,    // Frozen time for data setup
   procedure: BasicStatementsOrFn
 )
 ```
 
-### system.test.test
+The data procedure runs inside one implicit transaction that is committed when
+it finishes, so it does not call `startTransaction()`.
 
-Register an individual test:
+### system.test
+
+Register an individual test with the full configuration object:
 
 ```typescript
-system.test.test({
+system.test({
   name: string,           // Test name (required)
   time?: Date | string,   // Optional frozen time; falls back to defaultTime
   data?: string,          // Optional test data set; falls back to defaultData
@@ -119,8 +163,9 @@ system.test.test({
 
 ## Running Tests
 
-Use native Forge `validate()` to check test definitions without executing them
-and native `runTests({ filters })` to run a focused selection. Omit the filter
+Use native Forge `validate({ include: ["tests"] })` to check test definitions
+without executing them (bare `validate()` skips them), and native
+`runTests({ filters })` to run a focused selection. Omit the filter
 for the broader suite. When using external Forge MCP `exec`, pass a persisted
 non-nil `requestId` to the asynchronous `runTests` call and poll its returned
 run ID with `getTestRun`. A filter that selects no tests is unfinished
@@ -133,74 +178,10 @@ Forge supplies the documentation index used by `readFile("docs/...")`.
 
 ## Testing with Reactors
 
-When tests involve reactors, use `flushReactors()` to ensure reactor processing completes before assertions:
-
-```typescript
-system.test.test({
-  name: "E2E: API submission through import to dispatch",
-  time: new Date("2025-01-15T10:00:00-05:00"),
-  data: "master",
-  procedure: (s) => {
-    s.startTransaction();
-
-    // Insert order that triggers import reactor
-    s.modify(sql`
-      INSERT INTO db.new_orders (
-        internal_id, client_id, reference, first_name, last_name,
-        search_type, jurisdiction_id, status
-      ) VALUES (
-        random.uuid(),
-        (SELECT id FROM db.clients WHERE acronym = 'CHEC'),
-        'E2E-TEST-001',
-        'John',
-        'Smith',
-        'felony_misdemeanor',
-        (SELECT id FROM db.jurisdictions WHERE code = 'LA'),
-        'new'
-      )
-    `);
-
-    s.commitTransaction();
-
-    // CRITICAL: Flush reactors to process the import
-    s.flushReactors();
-
-    // Now verify reactor processed the order
-    s.assertEqual(
-      sql`(SELECT COUNT(*) FROM db.orders WHERE reference = 'E2E-TEST-001')`,
-      sql`1`,
-    );
-
-    // Verify order was normalized properly
-    s.assertEqual(
-      sql`(SELECT first_name FROM db.orders WHERE reference = 'E2E-TEST-001')`,
-      sql.lit`JOHN`,
-    );
-
-    // Verify order status changed (by reactor)
-    s.assertEqual(
-      sql`(SELECT status FROM db.orders WHERE reference = 'E2E-TEST-001')`,
-      sql`'dispatched'::enums.order_status`,
-    );
-  },
-});
-```
-
-### Why flushReactors is Needed
-
-Reactors are asynchronous. Without `flushReactors()`:
-
-1. Your insert/update completes
-2. Test continues to assertions
-3. Reactors haven't run yet
-4. Assertions fail because expected changes haven't happened
-
-With `flushReactors()`:
-
-1. Your insert/update completes
-2. `flushReactors()` forces all pending reactor work to complete
-3. Test continues to assertions
-4. Assertions pass because reactor changes are applied
+Reactors do not run on their own during a test. After committing a change that
+should trigger reactor work, call `s.flushReactors()` before asserting on the
+result. See [flushReactors](./test_statements.md#flushreactors) for the
+details.
 
 ## Related Documentation
 

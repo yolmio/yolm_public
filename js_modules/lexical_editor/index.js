@@ -1,3 +1,5 @@
+import { applyImageLayout, createImageFigure } from "./image_controls.js";
+import { captureVideoThumbnail, VideoNode, videoSource } from "./video.js";
 const __v2 = 2;
 // Lexical Editor Module for Yolm
 // This module provides a rich text editor using Lexical with full toolbar support
@@ -166,21 +168,6 @@ function ensureMentionNodeDefined() {
   };
 }
 
-function applyImageLayout(figure, align) {
-  const wrapped = align === "left" || align === "right";
-  figure.style.boxSizing = "border-box";
-  figure.style.clear = wrapped ? "none" : "both";
-  figure.style.float = wrapped ? align : "none";
-  figure.style.margin = align === "left"
-    ? "0 16px 12px 0"
-    : align === "right"
-    ? "0 0 12px 16px"
-    : "0 0 12px 0";
-  figure.style.maxWidth = "100%";
-  figure.style.textAlign = align;
-  figure.style.width = wrapped ? "fit-content" : "100%";
-}
-
 function ensureImageNodeDefined() {
   if (ImageNode) return;
   const { ElementNode } = lexical;
@@ -279,69 +266,10 @@ function ensureImageNodeDefined() {
     }
 
     createDOM() {
-      const figure = document.createElement("figure");
-      figure.className = "lexical-image";
-      figure.contentEditable = "false";
-      figure.dataset.lexicalImageKey = this.getKey();
-      applyImageLayout(figure, this.__align);
-
-      const frame = document.createElement("span");
-      frame.className = "lexical-image-frame";
-      frame.style.display = "inline-block";
-      frame.style.lineHeight = "0";
-      frame.style.maxWidth = "100%";
-      frame.style.position = "relative";
-
-      const img = document.createElement("img");
-      img.src = this.__src;
-      img.alt = this.__altText;
-      img.draggable = false;
-      img.style.maxWidth = "100%";
-      img.style.height = this.__height ? `${this.__height}px` : "auto";
-      img.style.width = `${this.__width}px`;
-      img.style.display = "inline-block";
-      img.style.verticalAlign = "top";
-      img.style.border = "1px solid transparent";
-      img.style.borderRadius = "2px";
-      frame.append(img);
-      const cornerLabel = {
-        nw: "top left",
-        ne: "top right",
-        sw: "bottom left",
-        se: "bottom right",
-      };
-      for (const corner of ["nw", "ne", "sw", "se"]) {
-        const handle = document.createElement("button");
-        handle.type = "button";
-        handle.className =
-          `lexical-image-resize-handle lexical-image-resize-${corner}`;
-        handle.dataset.lexicalImageResizeCorner = corner;
-        handle.setAttribute(
-          "aria-label",
-          `Resize image from ${cornerLabel[corner]}`,
-        );
-        handle.style.background = "white";
-        handle.style.border = "2px solid #2563eb";
-        handle.style.borderRadius = "2px";
-        handle.style.boxSizing = "border-box";
-        handle.style.cursor = corner === "nw" || corner === "se"
-          ? "nwse-resize"
-          : "nesw-resize";
-        handle.style.display = "none";
-        handle.style.height = "12px";
-        handle.style.margin = "0";
-        handle.style.padding = "0";
-        handle.style.position = "absolute";
-        handle.style.width = "12px";
-        handle.style.zIndex = "1";
-        if (corner.includes("n")) handle.style.top = "-6px";
-        if (corner.includes("s")) handle.style.bottom = "-6px";
-        if (corner.includes("w")) handle.style.left = "-6px";
-        if (corner.includes("e")) handle.style.right = "-6px";
-        frame.append(handle);
-      }
-      figure.append(frame);
-      return figure;
+      return createImageFigure({
+        key: this.getKey(),
+        ...this.getImageData(),
+      });
     }
 
     updateDOM(previousNode, figure) {
@@ -958,10 +886,9 @@ function registerTabIndent(editor) {
   );
 }
 
-function getClipboardTextStyle(element, inheritedStyle) {
-  if (!element?.style) return inheritedStyle;
-
-  const style = { ...inheritedStyle };
+function getClipboardTextStyle(element) {
+  const style = {};
+  if (!element?.style) return style;
   for (
     const [cssProperty, styleProperty] of [
       ["color", "color"],
@@ -1097,7 +1024,14 @@ function materializeClipboardStyles(dom) {
     }
 
     const inlineStyle = clipboardStyleFromDeclaration(element.style);
-    const ownStyle = { ...matchedStyle, ...inlineStyle };
+    // Office exports paragraph alignment as an HTML attribute, sometimes
+    // alongside a generic p { text-align: left } rule. Preserve the explicit
+    // paragraph alignment unless an inline style overrides it.
+    const alignment = element.getAttribute("align")?.toLowerCase();
+    const alignmentStyle = /^(left|center|right|justify)$/.test(alignment || "")
+      ? { "text-align": alignment }
+      : {};
+    const ownStyle = { ...matchedStyle, ...alignmentStyle, ...inlineStyle };
     const effectiveStyle = { ...inheritedStyle, ...ownStyle };
     if (effectiveStyle["font-weight"]) {
       effectiveStyle["font-weight"] = normalizeClipboardFontWeight(
@@ -1197,38 +1131,21 @@ function stringifyClipboardTextStyle(style) {
     .join(" ");
 }
 
-function collectClipboardStyledTextRanges(root) {
-  const ranges = [];
-  let offset = 0;
+function convertClipboardTextNode(domNode) {
+  const conversion = lexical.TextNode.importDOM()["#text"](domNode);
+  const output = conversion.conversion(domNode);
+  if (!output) return output;
 
-  const visit = (node, inheritedStyle) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const text = node.textContent ?? "";
-      const style = stringifyClipboardTextStyle(inheritedStyle);
-      if (text.length > 0 && style) {
-        ranges.push({
-          start: offset,
-          end: offset + text.length,
-          style,
-        });
-      }
-      offset += text.length;
-      return;
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-    const style = getClipboardTextStyle(node, inheritedStyle);
-    for (const child of node.childNodes) {
-      visit(child, style);
-    }
-  };
-
-  for (const child of root.childNodes) {
-    visit(child, {});
+  // Apply styles to the source text node during conversion. Raw HTML offsets
+  // diverge from Lexical offsets when whitespace is collapsed or discarded.
+  const style = stringifyClipboardTextStyle(
+    getClipboardTextStyle(domNode.parentElement),
+  );
+  const nodes = Array.isArray(output.node) ? output.node : [output.node];
+  for (const node of nodes) {
+    if (lexical.$isTextNode(node) && style) node.setStyle(style);
   }
-
-  return ranges;
+  return output;
 }
 
 function collectLexicalTextNodes(nodes) {
@@ -1246,51 +1163,6 @@ function collectLexicalTextNodes(nodes) {
 
   for (const node of nodes) visit(node);
   return textNodes;
-}
-
-function mergeTextStyles(existingStyle, pastedStyle) {
-  const existing = existingStyle?.trim();
-  if (!existing) return pastedStyle;
-  return `${existing}${existing.endsWith(";") ? "" : ";"} ${pastedStyle}`;
-}
-
-function applyStyleToTextNodeSlice(node, start, end, style) {
-  const textLength = node.getTextContentSize();
-  if (start <= 0 && end >= textLength) {
-    node.setStyle(mergeTextStyles(node.getStyle(), style));
-    return;
-  }
-
-  const splitNodes = start <= 0
-    ? node.splitText(end)
-    : node.splitText(start, end);
-  const target = start <= 0 ? splitNodes[0] : splitNodes[1];
-  if (target) target.setStyle(mergeTextStyles(target.getStyle(), style));
-}
-
-function applyClipboardInlineStyles(nodes, styledRanges) {
-  if (styledRanges.length === 0) return;
-
-  let offset = 0;
-  for (const node of collectLexicalTextNodes(nodes)) {
-    const textLength = node.getTextContentSize();
-    const nodeStart = offset;
-    const nodeEnd = offset + textLength;
-    offset = nodeEnd;
-
-    const overlaps = styledRanges
-      .map((range) => ({
-        start: Math.max(range.start, nodeStart) - nodeStart,
-        end: Math.min(range.end, nodeEnd) - nodeStart,
-        style: range.style,
-      }))
-      .filter((range) => range.start < range.end)
-      .sort((a, b) => b.start - a.start);
-
-    for (const range of overlaps) {
-      applyStyleToTextNodeSlice(node, range.start, range.end, range.style);
-    }
-  }
 }
 
 function stripSerializedTextStyles(value) {
@@ -1387,6 +1259,24 @@ function registerHtmlPaste(instance, preserveTextStyles) {
   return editor.registerCommand(
     PASTE_COMMAND,
     (event) => {
+      // Let Lexical's native paste preserve our node JSON (including media).
+      // HTML is only the fallback for content copied from other applications.
+      const structured = event.clipboardData?.getData(
+        "application/x-lexical-editor",
+      );
+      if (structured) {
+        try {
+          const payload = JSON.parse(structured);
+          if (
+            payload.namespace === "YolmLexicalEditor" &&
+            Array.isArray(payload.nodes)
+          ) {
+            return false;
+          }
+        } catch {
+          // Invalid clipboard JSON can still supply usable HTML/text.
+        }
+      }
       const html = event.clipboardData?.getData("text/html");
       if (!html) {
         const text = event.clipboardData?.getData("text/plain") ?? "";
@@ -1439,16 +1329,13 @@ function registerHtmlPaste(instance, preserveTextStyles) {
         }
         setTimeout(() => processImageUploads(instance), 0);
       }
-      let styledRanges = [];
       let blockIndents = [];
       if (preserveTextStyles) {
         materializeClipboardStyles(dom);
-        styledRanges = collectClipboardStyledTextRanges(dom.body);
         blockIndents = collectClipboardBlockIndents(dom.body);
       }
       const nodes = lexicalHtml.$generateNodesFromDOM(editor, dom);
       if (preserveTextStyles) {
-        applyClipboardInlineStyles(nodes, styledRanges);
         applyClipboardBlockIndents(nodes, blockIndents);
       } else {
         clearLexicalTextNodeStyles(nodes);
@@ -1484,7 +1371,30 @@ function updateSelectedImageDom(instance) {
     ) {
       handle.style.display = selected ? "block" : "none";
     }
+    const toolbar = node.querySelector(".lexical-image-alignment");
+    if (toolbar) {
+      toolbar.style.display = selected ? "flex" : "none";
+      for (const button of toolbar.querySelectorAll("button")) {
+        const active = button.dataset.imageAlign === node.style.textAlign;
+        button.setAttribute("aria-pressed", String(active));
+        button.style.background = active ? "#dbeafe" : "white";
+        button.style.color = active ? "#1d4ed8" : "#374151";
+      }
+    }
   }
+}
+
+// Toolbar state; a selected image reports its own alignment.
+function getEditorState(instance) {
+  const state = getSelectionState(instance.editor);
+  state.can_undo = instance.canUndo;
+  state.can_redo = instance.canRedo;
+  state.selected_image = !!instance.selectedImageKey;
+  instance.editor.getEditorState().read(() => {
+    const align = getSelectedImageNode(instance)?.getLatest().__align;
+    if (align) state.alignment = align;
+  });
+  return state;
 }
 
 function setSelectedImage(instance, key) {
@@ -1492,7 +1402,7 @@ function setSelectedImage(instance, key) {
   updateSelectedImageDom(instance);
   emit("stateChanged", {
     handle: instance.handle,
-    json: { selected_image: !!instance.selectedImageKey },
+    json: getEditorState(instance),
   });
 }
 
@@ -1503,12 +1413,23 @@ function registerImageInteraction(instance) {
       setSelectedImage(instance, null);
       return;
     }
+    if (event.target?.closest?.("a")) return;
     event.preventDefault();
     setSelectedImage(instance, image.dataset.lexicalImageKey);
+    const alignment = event.target?.closest?.("[data-image-align]")?.dataset
+      .imageAlign;
+    if (alignment) {
+      executeCommand({
+        handle: instance.handle,
+        command: "alignSelectedImage",
+        align: alignment,
+      });
+    }
   };
   instance.container.addEventListener("click", onContainerClick);
   instance.onImageClick = onContainerClick;
   const onKeyDown = (event) => {
+    if (event.target?.closest?.(".lexical-image-alignment")) return;
     if (
       instance.selectedImageKey &&
       (event.key.length === 1 ||
@@ -1566,7 +1487,8 @@ function registerImageInteraction(instance) {
       Math.min(
         720,
         Math.round(
-          resize.startWidth + direction * (event.clientX - resize.startX),
+          resize.startWidth +
+            direction * (event.clientX - resize.startX) / resize.scale,
         ),
       ),
     );
@@ -1585,13 +1507,15 @@ function registerImageInteraction(instance) {
     event.preventDefault();
     event.stopPropagation();
     setSelectedImage(instance, figure.dataset.lexicalImageKey);
-    const startWidth = image.getBoundingClientRect().width;
+    const startWidth = parseFloat(getComputedStyle(image).width);
+    const scale = image.getBoundingClientRect().width / startWidth;
     instance.imageResize = {
       corner: handle.dataset.lexicalImageResizeCorner,
       handle,
       image,
       pointerId: event.pointerId,
       startWidth,
+      scale,
       startX: event.clientX,
       width: startWidth,
     };
@@ -1702,7 +1626,6 @@ const emptyImagePreview =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
 const commentImageLimit = 10 * 1024 * 1024;
 // Leave a margin before the server's one-day pending-upload expiration.
-const commentImageRetryAfter = 23 * 60 * 60 * 1000;
 
 function visitImageNodes(node, visit) {
   if ($isImageNode(node)) visit(node);
@@ -1775,6 +1698,7 @@ function addImageUpload(instance, source, name) {
 }
 
 function insertImageFiles(instance, files, text = "") {
+  if (!instance.editor.isEditable()) return;
   instance.editor.update(() => {
     const nodes = [];
     if (text) {
@@ -1810,7 +1734,9 @@ async function processImageUploads(instance) {
   );
   for (const [id, job] of instance.imageUploads) {
     job.present = ids.has(id);
-    if (job.status === "done" && Date.now() >= job.retryAt) {
+    if (
+      job.status === "done" && job.retryAt != null && Date.now() >= job.retryAt
+    ) {
       job.status = "failed";
       job.error =
         "This image upload has expired. Retry to keep it in your comment.";
@@ -1925,12 +1851,16 @@ function finishImageUpload(instance, result) {
     // Keep the File while this editor is open so an expired draft can retry,
     // even after cleanup has removed the pending row and its blob.
     job.source = null;
-    job.retryAt = job.uploadStartedAt + commentImageRetryAfter;
+    job.retryAt = result.retryAfterMs > 0
+      ? job.uploadStartedAt + result.retryAfterMs
+      : null;
     clearTimeout(job.retryTimer);
-    job.retryTimer = setTimeout(
-      () => processImageUploads(instance),
-      Math.max(0, job.retryAt - Date.now()),
-    );
+    if (job.retryAt != null) {
+      job.retryTimer = setTimeout(
+        () => processImageUploads(instance),
+        Math.max(0, job.retryAt - Date.now()),
+      );
+    }
     instance.editor.update(() => {
       visitImageNodes(lexical.$getRoot(), (node) => {
         if (node.__assetKey !== job.id) return;
@@ -2041,6 +1971,7 @@ function chooseImageFile(instance) {
 }
 
 function handleImagePaste(instance, event) {
+  if (!instance.editor.isEditable()) return false;
   if (event.__yolmImageHandled) return true;
   if (!instance.externalImageInputId) return false;
   if (
@@ -2084,6 +2015,7 @@ function registerImagePaste(instance) {
 
 function registerImageDrop(instance) {
   const onDrop = (event) => {
+    if (!instance.editor.isEditable()) return;
     if (!instance.externalImageInputId) return;
     const files = Array.from(event.dataTransfer?.files || []);
     const imageFile = files.find((file) => file.type?.startsWith("image/"));
@@ -2184,7 +2116,7 @@ function getSelectedImageNode(instance) {
   const key = instance?.selectedImageKey;
   if (!key || !$isImageNode) return null;
   const node = lexical.$getNodeByKey(key);
-  return $isImageNode(node) ? node : null;
+  return $isImageNode(node) || node instanceof VideoNode ? node : null;
 }
 
 // Initialize the Lexical editor
@@ -2201,6 +2133,7 @@ function init(args) {
     preserveStoredTextStyles = preserveTextStyles ?? true,
     preservePastedTextStyles = preserveTextStyles ?? true,
     constrainTextStyles = false,
+    standardFormatting = false,
     allowImages = true,
   } = args;
 
@@ -2233,6 +2166,14 @@ function init(args) {
     // Create the editor config with all necessary nodes
     const config = {
       namespace: "YolmLexicalEditor",
+      html: {
+        import: {
+          "#text": () => ({
+            conversion: convertClipboardTextNode,
+            priority: 1,
+          }),
+        },
+      },
       theme: {
         paragraph: "lexical-paragraph",
         heading: {
@@ -2274,6 +2215,7 @@ function init(args) {
         lexicalList.ListItemNode,
         lexicalLink.LinkNode,
         lexicalLink.AutoLinkNode,
+        VideoNode,
         lexicalTable.TableNode,
         lexicalTable.TableRowNode,
         lexicalTable.TableCellNode,
@@ -2381,6 +2323,18 @@ function init(args) {
         : { enabled: false },
     };
     editors.set(handle, instance);
+    if (constrainTextStyles && container.parentElement) {
+      const surface = container.parentElement;
+      const fitDocument = () => {
+        if (!surface || !container.offsetWidth) return;
+        container.style.zoom = String(
+          Math.min(1, surface.clientWidth / container.offsetWidth),
+        );
+      };
+      instance.documentResizeObserver = new ResizeObserver(fitDocument);
+      instance.documentResizeObserver.observe(surface);
+      fitDocument();
+    }
     if (managedImageUploads) {
       instance.onImageUploadResume = () => processImageUploads(instance);
       globalThis.addEventListener("focus", instance.onImageUploadResume);
@@ -2404,11 +2358,36 @@ function init(args) {
     }
     registerImageInteraction(instance);
     registerHtmlPaste(instance, preservePastedTextStyles);
+    if (standardFormatting) {
+      editor.registerNodeTransform(lexical.TextNode, (node) => {
+        if (node.getStyle()) node.setStyle("");
+      });
+      editor.registerNodeTransform(lexical.ParagraphNode, (node) => {
+        if (node.getTextStyle()) node.setTextStyle("");
+      });
+      if (lexicalTable?.TableCellNode) {
+        editor.registerNodeTransform(lexicalTable.TableCellNode, (node) => {
+          if (node.getBackgroundColor()) node.setBackgroundColor(null);
+        });
+      }
+    }
     if (allowImages) {
       registerImagePaste(instance);
       registerImageDrop(instance);
     }
     registerTrainingWordControls(instance);
+    editor.registerCommand(lexical.PASTE_COMMAND, (event) => {
+      if (event.clipboardData?.getData("text/html")) return false;
+      const text = event.clipboardData?.getData("text/plain")?.trim();
+      if (!text || !/^(https?:\/\/|mailto:)[^\s]+$/i.test(text)) return false;
+      const selection = lexical.$getSelection();
+      if (!lexical.$isRangeSelection(selection)) return false;
+      event.preventDefault();
+      const link = lexicalLink.$createLinkNode(text);
+      link.append(lexical.$createTextNode(text));
+      selection.insertNodes([link]);
+      return true;
+    }, lexical.COMMAND_PRIORITY_LOW);
 
     // Register undo/redo state listeners
     const { CAN_UNDO_COMMAND, CAN_REDO_COMMAND, COMMAND_PRIORITY_LOW } =
@@ -2436,12 +2415,7 @@ function init(args) {
 
     // Add selection change listener to emit state updates
     editor.registerUpdateListener(({ editorState, tags }) => {
-      const state = getSelectionState(editor);
-      // Add undo/redo state from tracked values
-      state.can_undo = instance.canUndo;
-      state.can_redo = instance.canRedo;
-      state.selected_image = !!instance.selectedImageKey;
-      emit("stateChanged", { handle, json: state });
+      emit("stateChanged", { handle, json: getEditorState(instance) });
 
       if (instance.managedImageUploads) {
         setTimeout(() => processImageUploads(instance), 0);
@@ -2496,6 +2470,23 @@ function executeCommand(args) {
   }
 
   const { editor } = instance;
+  if (command === "setReadOnly") {
+    const readOnly = Boolean(params.readOnly);
+    if (readOnly) {
+      instance.onImageResizePointerCancel?.();
+      setSelectedImage(instance, null);
+    }
+    editor.setEditable(!readOnly);
+    instance.container.contentEditable = String(!readOnly);
+    // Inline media has its own DOM controls as well as Lexical commands.
+    instance.container.inert = readOnly;
+    // Custom toolbar widgets (such as comboboxes) are not native form controls.
+    const controls = params.controlsContainerId &&
+      document.getElementById(params.controlsContainerId);
+    if (controls) controls.inert = readOnly;
+    return true;
+  }
+  if (!editor.isEditable()) return false;
   const {
     FORMAT_TEXT_COMMAND,
     FORMAT_ELEMENT_COMMAND,
@@ -2539,6 +2530,13 @@ function executeCommand(args) {
 
     case "formatAlignment": {
       const { alignment } = params;
+      if (instance?.selectedImageKey) {
+        return executeCommand({
+          handle,
+          command: "alignSelectedImage",
+          align: alignment === "justify" ? "center" : alignment,
+        });
+      }
       editor.dispatchCommand(FORMAT_ELEMENT_COMMAND, alignment);
       break;
     }
@@ -2758,6 +2756,108 @@ function executeCommand(args) {
       });
       break;
 
+    case "prepareLocalImage": {
+      const job = instance.imageUploads.get(instance.imageUploadActive);
+      const supplied = params.media;
+      const id = supplied ? crypto.randomUUID() : job?.id;
+      return (async () => {
+        try {
+          const file = supplied
+            ? new File(
+              [Uint8Array.from(atob(supplied.content), (c) => c.charCodeAt(0))],
+              supplied.name,
+              { type: supplied.contentType },
+            )
+            : job?.file;
+          if (
+            !file || !file.size || file.size > commentImageLimit ||
+            !/^image\/(png|jpeg|gif|webp)$/.test(file.type)
+          ) {
+            throw new Error("Use a PNG, JPEG, GIF, or WebP image under 10 MB.");
+          }
+          const signature = Array.from(
+            new Uint8Array(await file.slice(0, 12).arrayBuffer()),
+            (byte) => byte.toString(16).padStart(2, "0"),
+          ).join("");
+          const signatures = {
+            "image/png": /^89504e470d0a1a0a/,
+            "image/jpeg": /^ffd8ff/,
+            "image/gif": /^474946383[79]61/,
+            "image/webp": /^52494646........57454250/,
+          };
+          if (!signatures[file.type].test(signature)) {
+            throw new Error("The file is not a supported image.");
+          }
+          const content = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result.split(",")[1]);
+            reader.onerror = () =>
+              reject(new Error("The image could not be read. Please retry."));
+            reader.readAsDataURL(file);
+          });
+          const src = URL.createObjectURL(file);
+          (instance.localMediaUrls ??= new Set()).add(src);
+          return { id, src, content, contentType: file.type, name: file.name };
+        } catch (error) {
+          return {
+            id,
+            error: error.message ||
+              "The image could not be read. Please retry.",
+          };
+        }
+      })();
+    }
+
+    case "prepareVideo": {
+      instance.videoInsertionSelection = editor.getEditorState().read(() =>
+        $getSelection()?.clone()
+      );
+      const source = videoSource(params.url);
+      if (source && !source.iframe) {
+        return captureVideoThumbnail(source.url).then((thumbnailData) => ({
+          ...source,
+          thumbnailData,
+        }));
+      }
+      return source || {};
+    }
+
+    case "insertVideo": {
+      const source = videoSource(params.url);
+      if (!source) {
+        emit("error", {
+          handle,
+          json: {
+            message: "Use a YouTube, Vimeo, or HTTPS .mp4/.webm video URL.",
+          },
+        });
+        break;
+      }
+      editor.focus(() =>
+        editor.update(() => {
+          const saved = instance.videoInsertionSelection;
+          if (
+            $isRangeSelection(saved) &&
+            lexical.$getNodeByKey(saved.anchor.key) &&
+            lexical.$getNodeByKey(saved.focus.key)
+          ) {
+            lexical.$setSelection(saved.clone());
+          }
+          instance.videoInsertionSelection = null;
+          let selection = $getSelection();
+          if (!$isRangeSelection(selection)) {
+            $getRoot().selectEnd();
+            selection = $getSelection();
+          }
+          selection.insertNodes([
+            new VideoNode(source.url, params.thumbnail),
+            $createParagraphNode(),
+          ]);
+        })
+      );
+      break;
+    }
+
     case "insertLink": {
       const { url, title } = params;
       console.log("Inserting link:", url, title);
@@ -2955,20 +3055,11 @@ function executeCommand(args) {
 
     case "alignSelectedImage": {
       const align = params.align || "center";
-      let nextKey = null;
       editor.update(() => {
         const node = getSelectedImageNode(instance);
         if (!node) return;
-        const replacement = $createImageNode({
-          ...node.getImageData(),
-          align,
-        });
-        node.replace(replacement);
-        nextKey = replacement.getKey();
-      });
-      if (nextKey) {
-        instance.selectedImageKey = nextKey;
-      }
+        node.setAlign(align);
+      }, { tag: "history-push" });
       setTimeout(() => updateSelectedImageDom(instance), 0);
       break;
     }
@@ -2982,7 +3073,7 @@ function executeCommand(args) {
         paragraph.select();
         instance.selectedImageKey = null;
       });
-      emit("stateChanged", { handle, json: { selected_image: false } });
+      emit("stateChanged", { handle, json: getEditorState(instance) });
       break;
 
     case "insertMention": {
@@ -3106,6 +3197,7 @@ function cleanup(args) {
 
   const instance = editors.get(handle);
   if (instance) {
+    instance.documentResizeObserver?.disconnect();
     instance.imageUploadAbort?.abort();
     globalThis.removeEventListener("focus", instance.onImageUploadResume);
     document.removeEventListener(
@@ -3116,6 +3208,7 @@ function cleanup(args) {
       clearTimeout(job.retryTimer);
       if (job.preview?.startsWith("blob:")) URL.revokeObjectURL(job.preview);
     }
+    for (const url of instance.localMediaUrls || []) URL.revokeObjectURL(url);
     instance.imageChooser?.remove();
     if (instance.onImageClick && instance.container) {
       instance.container.removeEventListener(
@@ -3293,6 +3386,7 @@ function initReadOnly(args) {
         lexicalList.ListItemNode,
         lexicalLink.LinkNode,
         lexicalLink.AutoLinkNode,
+        VideoNode,
         ...(ImageNode ? [ImageNode] : []),
         ...(MentionNode ? [MentionNode] : []),
       ],
@@ -3376,6 +3470,7 @@ function generateHtml(args) {
         lexicalList.ListItemNode,
         lexicalLink.LinkNode,
         lexicalLink.AutoLinkNode,
+        VideoNode,
         ...(MentionNode ? [MentionNode] : []),
       ],
       onError: (error) => {

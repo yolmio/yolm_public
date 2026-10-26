@@ -9,12 +9,13 @@ import { WiseStatLineChart } from "components/wise_stat_line_chart";
 import { LineChart } from "vis/line_charts";
 import { BarChart } from "vis/bar_charts";
 import { userHasPermission } from "blocks/auth";
-import { ManualEntry, measurementFormats } from "blocks/manual_measurements";
+import { ManualEntry } from "blocks/manual_measurements";
 import { Data } from "std/data";
 import { Each, Route, Show, useICtx, usePhase, useUniqueId } from "std/ui";
 import { VisRootICtxKey } from "std/ictx";
 import { sql } from "std/sql_utils";
 import type { NumericExpr, Sql } from "std/sql_utils";
+import { formatValue } from "std/value_format";
 import { DashboardBlock } from "./index";
 import { system } from "std/system";
 import { resolveParameters } from "./parameters";
@@ -27,9 +28,10 @@ function ResultTable() {
       local
       procedure={(s) => {
         s.defScalar("result_page", 0);
+        // Columns keep the widget query's select order.
         s.defTable(
           "result_columns",
-          sql`select key from json.object_each(widget_result->0) order by key`,
+          sql`select key from json.object_each(widget_result->0)`,
         );
       }}
     >
@@ -52,7 +54,18 @@ function ResultTable() {
               <tr>
                 <Each table="result_columns" recordName="column">
                   <td className="p-2 border-b border-divider">
-                    {sql`result_row.value->>column.key`}
+                    {sql`case
+                      when result_row.value->>column.key is null then '—'
+                      when widget.config->'columnFormats'->column.key->>'type'='text' then result_row.value->>column.key
+                      when json_typeof(result_row.value->column.key)='number'
+                        or widget.config->'columnFormats'->column.key->>'type' is not null
+                        or (widget.type!='table' and column.key in ('value','value2')) then ${
+                      formatValue(
+                        sql`try_cast(result_row.value->>column.key as double)`,
+                        sql`coalesce(widget.config->'columnFormats'->column.key, case when widget.type!='table' and column.key in ('value','value2') then widget.config->'format' else null::json end)`,
+                      )
+                    }
+                      else result_row.value->>column.key end`}
                   </td>
                 </Each>
               </tr>
@@ -84,7 +97,7 @@ function ResultTable() {
 }
 
 function formatWidgetValue(value: NumericExpr) {
-  return sql`case when ${value} is null then '—' when widget.config->>'format'='percentage' then format.decimal(${value} * 100,maximum_fraction_digits=>2) || '%' when widget.config->>'format'='currency' then '$' || format.decimal(${value},maximum_fraction_digits=>2) when widget.config->>'format'='number_thousands' then format.decimal(${value}/1000,maximum_fraction_digits=>2) || 'k' when widget.config->>'format'='duration' then fn.display_minutes_duration(cast(round(${value}) as bigint)) else format.decimal(${value},maximum_fraction_digits=>2) end`;
+  return formatValue(value, sql`widget.config->'format'`);
 }
 
 // Fixed value series with a new SVG subpath after each missing observation.
@@ -112,8 +125,49 @@ function WidgetLine() {
   );
 }
 
+function WiseWidgetChart(props: {
+  dual?: boolean;
+  expanded?: boolean;
+}) {
+  const inverse =
+    sql`coalesce(try_cast(widget.config->>'inverse' as bool),false)`;
+  return (
+    <div
+      sx={{ width: "100%", minWidth: 0 }}
+    >
+      <WiseStatLineChart
+        displaySize={props.expanded ? "expanded" : "widget"}
+        valueLabels={props.expanded ? "all" : "latest"}
+        title={sql`widget.title`}
+        ownerHeader={sql`coalesce(widget.config->>'ownerHeader',widget_owner)`}
+        ownerLabel={sql`widget.config->>'ownerLabel'`}
+        valueFormat={sql`widget.config->'format'`}
+        reverseAxis={inverse}
+        graphLow={sql`try_cast(widget.config->>'graphLow' as double)`}
+        graphDivision={sql`try_cast(widget.config->>'graphDivision' as double)`}
+        query={sql`select cast(x as date) as period_start_date,value from widget_points order by x`}
+        seriesLabel={sql`coalesce(widget.config->>'seriesLabel','Value')`}
+        series2={props.dual
+          ? {
+            query:
+              sql`select cast(x as date) as period_start_date,value2 as value from widget_points order by x`,
+            label: sql`widget.config->>'series2Label'`,
+            graphLow:
+              sql`try_cast(widget.config->>'series2GraphLow' as double)`,
+            graphDivision:
+              sql`try_cast(widget.config->>'series2GraphDivision' as double)`,
+            reverseAxis:
+              sql`coalesce(try_cast(widget.config->>'series2Inverse' as bool),false)`,
+          }
+          : undefined}
+      />
+    </div>
+  );
+}
+
 function WidgetChart(props: { expanded?: boolean } = {}) {
-  const query = sql`select x as label, value from widget_points order by x`;
+  const query =
+    sql`select x as label, value, value2 from widget_points order by x`;
   return (
     <>
       <Show when={sql`widget.type = 'number'`}>
@@ -126,36 +180,15 @@ function WidgetChart(props: { expanded?: boolean } = {}) {
       <Show when={sql`widget.type = 'table'`}>
         <ResultTable />
       </Show>
-      <Show when={sql`widget.type = 'wise'`}>
-        {measurementFormats.map((format) => (
-          <Show
-            when={sql`coalesce(widget.config->>'format','number') = ${
-              sql.lit(format)
-            }`}
-          >
-            {[false, true].map((inverse) => (
-              <Show
-                when={sql`coalesce(try_cast(widget.config->>'inverse' as bool),false) = ${inverse}`}
-              >
-                <div
-                  sx={props.expanded
-                    ? { maxWidth: "560px", mx: "auto" }
-                    : undefined}
-                >
-                  <WiseStatLineChart
-                    displaySize="widget"
-                    title={sql`widget.title`}
-                    ownerHeader={sql`widget_owner`}
-                    valueFormat={format}
-                    reverseAxis={inverse}
-                    graphLow={inverse ? undefined : sql`0`}
-                    query={sql`select cast(x as date) as period_start_date,value from widget_points order by x`}
-                  />
-                </div>
-              </Show>
-            ))}
-          </Show>
-        ))}
+      <Show
+        when={sql`widget.type = 'wise'`}
+      >
+        <Show when={sql`widget.config->>'series2Label' is null`}>
+          <WiseWidgetChart expanded={props.expanded} />
+        </Show>
+        <Show when={sql`widget.config->>'series2Label' is not null`}>
+          <WiseWidgetChart dual expanded={props.expanded} />
+        </Show>
       </Show>
       {([["small", 240], ["medium", 340], ["large", 460]] as const).map((
         [size, height],
@@ -172,7 +205,15 @@ function WidgetChart(props: { expanded?: boolean } = {}) {
             <LineChart.XAxis />
             <LineChart.YAxis />
             <WidgetLine />
-            <LineChart.Tooltip />
+            <LineChart.Tooltip
+              renderContent={({ xValue, yValues }) => (
+                <div>
+                  {xValue}
+                  {yValues.map((value) => <div>{formatWidgetValue(value)}
+                  </div>)}
+                </div>
+              )}
+            />
           </LineChart>
         </Show>
       ))}
@@ -191,7 +232,18 @@ function WidgetChart(props: { expanded?: boolean } = {}) {
             <BarChart.XAxis />
             <BarChart.YAxis />
             <BarChart.Bar columnName="value" fill="currentColor" />
-            <BarChart.Tooltip />
+            <BarChart.Tooltip
+              renderContent={(xAxis, yAxes, record) => (
+                <div>
+                  {sql`${record}.${sql.ref(xAxis)}`}
+                  {yAxes.map((axis) => (
+                    <div>
+                      {formatWidgetValue(sql`${record}.${sql.ref(axis)}`)}
+                    </div>
+                  ))}
+                </div>
+              )}
+            />
           </BarChart>
         </Show>
       ))}
@@ -289,7 +341,7 @@ export function DashboardWidget(
             );
             s.defTable(
               "widget_points",
-              sql`select value->>'x' as x, case when widget.config->>'missingValues' = 'zero' then coalesce(try_cast(value->>'value' as double),0) else try_cast(value->>'value' as double) end as value from json.array_each(widget_result)`,
+              sql`select value->>'x' as x, case when widget.config->>'missingValues' = 'zero' then coalesce(try_cast(value->>'value' as double),0) else try_cast(value->>'value' as double) end as value,try_cast(value->>'value2' as double) as value2 from json.array_each(widget_result)`,
             );
           }}
         >
@@ -332,7 +384,7 @@ export function DashboardWidget(
             onClose={(s) => s.setScalar("widget_expanded", false)}
             layout="center"
             sx={{
-              width: "min(720px, calc(100vw - 32px))",
+              width: "min(1200px, calc(100vw - 32px))",
               maxWidth: "calc(100vw - 32px)",
               maxHeight: "calc(100dvh - 32px)",
               overflow: "auto",

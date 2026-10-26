@@ -34,7 +34,7 @@ export class NotesListTableBlock extends TableBlock<NotesListTableBlockOpts> {
     this.#tableName = `${singularize(mainTable.name)}_notes`;
     system.db.table(this.#tableName, (table) => {
       table.fk(mainTable.name).notNull();
-      table.string("content", 2000).notNull();
+      table.string("content", 64_000).notNull();
       table.date("date").notNull();
       this.opts.populate?.(table);
     });

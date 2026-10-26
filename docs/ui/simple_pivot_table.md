@@ -16,17 +16,20 @@ related:
 
 # SimplePivotTable
 
-`SimplePivotTable` renders a self-contained, interactive pivot table. You declare which fields can be used as rows, columns, and aggregated values through a builder callback; the component renders dropdowns for the user to choose a row field, column field, value field, and aggregate function, then runs the query, shows row/column totals, and offers a CSV export.
-
-Use it for ad-hoc cross-tab analysis over your schema. For a fixed, non-pivoting tabular view use `DataTable` / `Table` instead.
+`SimplePivotTable` is a self-contained pivot table: users pick a row field,
+column field, value field, and aggregate; it shows row, column, and grand
+totals and exports CSV. Use `DataTable` or `Table` for fixed, non-pivoting
+views.
 
 ```tsx
 import { SimplePivotTable } from "components/simple_pivot_table";
 ```
 
-## Usage
+## Example
 
-The component manages its own state and data fetching, so you do not need to wrap it in a `Data` or `Form`. It is not self-routing, so place it inside your page/`Route` layout. Define fields with the `builder` callback. The component fills the height and width of its container, so give it a sized parent.
+It owns its state and query, so do not wrap it in `Data` or `Form`. It is not
+self-routing; place it in your page layout inside a sized parent, since it
+fills its container.
 
 ```tsx
 <SimplePivotTable
@@ -71,45 +74,42 @@ The component manages its own state and data fetching, so you do not need to wra
 
 ## Props
 
-| Prop | Type | Required | Description |
-|------|------|----------|-------------|
-| `builder` | `(b: PivotTableBuilder) => void` | Yes | Callback that declares the row/column and value fields. See the builder methods below. |
-| `layout` | `"horizontal" \| "vertical"` | No | Arrangement of the config controls relative to the results. Default `"horizontal"`. |
-| `hideConfigCard` | `boolean` | No | Hides the dropdown/config card so only the table renders. |
-| `cardSx` | `Style` | No | Extra styles merged onto the config card (which already has `p: 4`). |
-| `defaultAggregateFunction` | `string` | No | Initially selected aggregate. Default `"sum"`. Must match a value in `aggregateOptions`. |
-| `aggregateOptions` | `{ value: string; label: string }[]` | No | Options for the aggregate-function dropdown. Default `[{sum, Sum}, {avg, Average}, {min, Minimum}, {max, Maximum}]`. |
-| `excludeTables` | `string[]` | No | Tables to omit when automatically discovering foreign-key relationships. |
+- `layout`: `"horizontal"` (default) or `"vertical"` placement of the config
+  card relative to the results.
+- `hideConfigCard`: render only the results table.
+- `cardSx`: static styles merged onto the config card. There is no
+  `className`/`sx`; size the component through its parent.
+- `aggregateOptions` (default sum, avg, min, max) and
+  `defaultAggregateFunction` (default `"sum"`, must be one of the options).
+- `excludeTables`: tables skipped when discovering FK relationships.
 
-## Builder methods
+## Builder Methods
 
-The `builder` callback receives a `PivotTableBuilder`. Call its methods to register the fields the user can choose from. Each `field` / `virtualField` becomes an option in **both** the Row and Column dropdowns; each value/calculated/count field becomes an option in the Value dropdown.
+Each `field`/`virtualField` is offered in **both** the Row and Column
+dropdowns; each value, calculated, or count field in the Value dropdown.
 
-| Method | Arguments | Description |
-|--------|-----------|-------------|
-| `field` | `{ tableName: string; fieldName: string; label?: string; formatHeader?: (props: { value: Sql }) => Node }` | Adds a real schema field as a row/column option. Throws at generation time if the table or field does not exist. `label` defaults to the field's display name; `formatHeader` defaults to an `InlineFieldDisplay` of the field. |
-| `virtualField` | `{ name: string; expression: string; involvedFields: string[]; tables: string[]; label?: string }` | Adds a computed row/column option. `expression` is a raw SQL string; `involvedFields` lists the underlying field names used for grouping; `tables` lists the tables the expression touches. `label` defaults to a title-cased `name`. |
-| `valueField` | `{ tableName: string; fieldName: string; label?: string }` | Adds a real field as an aggregatable value option. `label` defaults to a title-cased `fieldName`. |
-| `calculatedValueField` | `{ name: string; expression: string; involvedFields: string[]; tables: string[]; label?: string }` | Adds a computed (raw SQL) aggregatable value option. `label` defaults to a title-cased `name`. |
-| `simpleCount` | `(tableName: string, label?: string)` | Convenience value field that counts rows of `tableName`. Positional arguments. `label` defaults to `"<Table> Count"`. |
-| `relatedCount` | `{ countTable: string; parentTable: string; throughField?: string }` | Convenience value field counting `countTable` rows related to `parentTable` via a foreign key. If `throughField` is omitted, the first FK from `countTable` to `parentTable` is used. Throws if either table or the FK is not found. |
+| Method | Arguments | Notes |
+|--------|-----------|-------|
+| `field` | `{ tableName, fieldName, label?, formatHeader? }` | Real field; throws at generation time if missing. Headers default to `InlineFieldDisplay`. |
+| `virtualField` | `{ name, expression, involvedFields, tables, label? }` | Computed row/column option. |
+| `valueField` | `{ tableName, fieldName, label? }` | Real aggregatable field. |
+| `calculatedValueField` | `{ name, expression, involvedFields, tables, label? }` | Computed aggregatable value. |
+| `simpleCount` | `(tableName, label?)` | Counts rows; label defaults to `"<Table> Count"`. |
+| `relatedCount` | `{ countTable, parentTable, throughField? }` | Counts related rows via an FK (first FK to `parentTable` when `throughField` is omitted). Label is always `"<CountTable> Count"`; use `calculatedValueField` for a custom one. |
+
+`expression`, `involvedFields`, and `tables` are plain strings, not `sql`
+templates: the component assembles a dynamic query from them. Use fully
+qualified `table.field` identifiers, list in `involvedFields` the raw columns
+the expression groups on, and list every table it touches in `tables`.
 
 ## Behavior
 
-- **Self-contained state and fetching.** The component defines its own `selected_row`, `selected_column`, `selected_value`, and `selected_aggregate` state and runs the pivot query via a dynamic query. You do not place it inside your own `Data`/`Form` context, and it is **not** self-routing — put it inside your page/`Route` layout.
-- **Automatic joins.** Table relationships are discovered from foreign keys across the whole schema, and intermediate join tables are filled in automatically. You do not declare joins.
-- **Initial selection.** The row defaults to the first registered row/column field, the column to the **second**, and the value to the first registered value field.
-- **Totals and export.** The results table renders per-row and per-column totals plus a grand total, and the config card includes an Export button that downloads the pivot as `pivot_table_export.csv`.
-
-## SQL-expression expectations
-
-`expression`, `involvedFields`, and `tables` are plain strings, not `sql` tagged templates. Reference columns with fully qualified `table.field` names (e.g. `"concat(employees.first_name, ' ', employees.last_name)"`). `involvedFields` should list the raw column names that the expression depends on so grouping works correctly.
-
-## Common Mistakes
-
-- **Defining fewer than two row/column fields, or no value field.** The initial column selection uses the *second* registered `field`/`virtualField`, so you must register at least two of them plus at least one value field; otherwise generation fails.
-- **Passing table presentation props such as `sx` or `className`.** Use `cardSx` to style the config card and size the component through its parent container.
-- **Expecting a custom label on `relatedCount`.** It always names the value option `"<CountTable> Count"`. Use `calculatedValueField` directly if you need a custom label.
-- **Treating `field`/`virtualField` as row-only or column-only.** Every such call is offered as both a row and a column option; there is no separate row vs. column list.
-- **Wrapping `expression` in `sql` templates.** Pass raw SQL strings with fully qualified identifiers; the component assembles the dynamic query itself.
-- **Setting `defaultAggregateFunction` to a value not present in `aggregateOptions`.** The dropdown will have no matching option.
+- State scalars `selected_row`, `selected_column`, `selected_value`, and
+  `selected_aggregate` are declared internally. Initial selection: the first
+  row/column field as row, the second (or the first, when only one exists) as
+  column, and the first value field.
+- At least one row/column field and one value field are required; otherwise
+  generation throws.
+- Joins are discovered from foreign keys across the schema, including
+  intermediate tables; you never declare joins.
+- Export downloads `pivot_table_export.csv`.

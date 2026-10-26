@@ -210,6 +210,7 @@ export class NativeDocumentReviewExtension implements DriveExtension {
         join db.native_document_file_versions review_content
           on review_content.file_version_id = review_version.id
         where review_version.id = ${props.fileVersionId}
+          and review_revision.id = ${props.controlledRevisionId}
           and review_item.id = ${props.fileItemId}
           and review_revision.status in (
             'in_review',
@@ -225,8 +226,8 @@ export class NativeDocumentReviewExtension implements DriveExtension {
       )
     }
           and ${
-      this.opts.control.canReadReviewEvidence(
-        sql`review_version.id`,
+      this.opts.control.canReadReviewEvidenceForRevision(
+        sql`review_revision.id`,
         sql`current_user`,
       )
     }
@@ -837,7 +838,7 @@ export function NativeDocumentReviewSurface(
       }}
     >
       <Data
-        watch={[props.fileVersionId]}
+        watch={[props.fileVersionId, props.controlledRevisionId]}
         procedure={(s) => {
           s.defRecord(
             "review_document",
@@ -861,6 +862,7 @@ export function NativeDocumentReviewSurface(
               join db.controlled_file_revisions revision
                 on revision.file_version_id = version.id
               where version.id = ${props.fileVersionId}
+                and revision.id = ${props.controlledRevisionId}
                 and item.id = ${props.fileItemId}
                 and revision.status in (
                   'in_review',
@@ -1037,6 +1039,9 @@ export function NativeDocumentReviewSurface(
               }}
             >
               <NativeDocumentPage
+                documents={props.review.opts.nativeDocuments}
+                fileVersionId={props.fileVersionId}
+                controlledRevisionId={props.controlledRevisionId}
                 contentId={contentContainerId}
                 pageId="native-document-review-page"
                 value={sql`review_document.rich_content`}

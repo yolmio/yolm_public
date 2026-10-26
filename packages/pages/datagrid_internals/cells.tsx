@@ -588,6 +588,31 @@ function TimestampNaiveCell(
   );
 }
 
+// Keep the instant and offset intact, including the second occurrence of a DST fold.
+function stringifiedTimestamptz(value: Sql) {
+  return sql`try_cast(${value} as timestamptz)`;
+}
+
+function setTimestampEditorValue(s: DomStatements, original: Sql) {
+  const timezone = sql`date.part(timezone, now())`;
+  const originalWallTime = sql`(${original} at time zone ${timezone})`;
+  s.defScalar("edited_wall_time", sql`try_cast(target_value as timestamp)`);
+  // Prefer the original occurrence of a repeated hour, but re-resolve the zone
+  // when the edit crosses a DST transition and that offset is no longer valid.
+  s.defScalar(
+    "preferred_instant",
+    sql`${original} + (edited_wall_time - ${originalWallTime})`,
+  );
+  s.setScalar(
+    "ui.value",
+    sql`case
+      when target_value = format.date(${originalWallTime}, '%Y-%m-%dT%H:%M') then ${original}
+      when preferred_instant at time zone ${timezone} = edited_wall_time then preferred_instant
+      else edited_wall_time at time zone ${timezone}
+    end`,
+  );
+}
+
 function TimestampTzCell(
   props: BaseFieldCellOpts & {
     field: TimestampTzField;
@@ -595,7 +620,7 @@ function TimestampTzCell(
 ) {
   const helper = useCellHelper();
   const timestampValue = props.stringified
-    ? sql`try_cast(${helper.value} as timestamptz)`
+    ? stringifiedTimestamptz(helper.value)
     : helper.value;
   const display = (
     <span sx={sharedStyles.ellipsisSpan}>
@@ -633,12 +658,12 @@ function TimestampTzCell(
       <State procedure={(s) => s.defScalar("value", timestampValue)}>
         <input
           sx={sharedStyles.cellInput}
-          value={sql`case when value is not null then format.date(value, '%Y-%m-%dT%H:%M') else '' end`}
+          value={sql`case when value is not null then format.date(value at time zone date.part(timezone, now()), '%Y-%m-%dT%H:%M') else '' end`}
           yolmFocusKey
           type="datetime-local"
           {...handlers}
           onInput={(s) => {
-            s.setScalar("ui.value", sql`try_cast(target_value as timestamptz)`);
+            setTimestampEditorValue(s, timestampValue);
           }}
         />
       </State>
@@ -653,7 +678,7 @@ function TimestampUtcCell(
 ) {
   const helper = useCellHelper();
   const timestampValue = props.stringified
-    ? sql`try_cast(${helper.value} as timestamptz)`
+    ? stringifiedTimestamptz(helper.value)
     : helper.value;
   const display = (
     <span sx={sharedStyles.ellipsisSpan}>
@@ -677,12 +702,12 @@ function TimestampUtcCell(
       <State procedure={(s) => s.defScalar("value", timestampValue)}>
         <input
           sx={sharedStyles.cellInput}
-          value={sql`case when value is not null then format.date(value, '%Y-%m-%dT%H:%M') else '' end`}
+          value={sql`case when value is not null then format.date(value at time zone date.part(timezone, now()), '%Y-%m-%dT%H:%M') else '' end`}
           yolmFocusKey
           type="datetime-local"
           {...handlers}
           onInput={(s) => {
-            s.setScalar("ui.value", sql`try_cast(target_value as timestamptz)`);
+            setTimestampEditorValue(s, timestampValue);
           }}
         />
       </State>

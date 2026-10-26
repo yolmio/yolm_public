@@ -1,55 +1,69 @@
 ---
 title: Search Dialogs
-description: How to add search functionality to your Yolm apps using Navbar search and multi-table search dialogs.
+description: Add Ctrl/Cmd+K record search to Yolm apps with Navbar or Sidebar search props, multi-table search dialogs, or a standalone GlobalSearchDialog.
 tags:
   - ui
   - search
   - navbar
   - components
+related:
+  - ui/navbar.md
+  - ui/sidebar.md
+  - database/search_config.md
 ---
 
 # Search Dialogs
 
-Add search functionality to your apps using the Navbar component's built-in search features.
+Search dialogs let users jump to records from anywhere in the app. They are
+opened by a search button or the **Ctrl/Cmd + K** shortcut.
 
-```typescript
+## Requirements
+
+Each searched table needs:
+
+1. A search configuration ([Search Configuration](../database/search_config.md)).
+2. A detail page URL (via `getHrefToRecord` or standard routing) so results can
+   link to records.
+3. A `recordDisplayName` when its display field is not the standard one.
+
+## Configuration
+
+Both entry points take the same configuration; pass exactly one (both throws
+at generation time).
+
+- `searchDialog: { table, displayValues? }` - one table. The button reads
+  `Find {table}…`.
+- `multiTableSearchDialog: { tables }` - several tables; each entry is
+  `{ name, icon, displayValues? }`, where `icon` (required) is a Material icon
+  shown next to results.
+
+`displayValues` adds context to each result. An entry is a field name or a
+`TableSearchDisplay` object `{ name, expr: (record) => Sql, type, label? }`
+whose `expr` builds the value from the record row.
+
+```tsx
 import { Navbar } from "components/navbar";
-```
 
-## Prerequisites
-
-Before enabling search in the UI:
-1. Ensure tables have search configuration (see [Search Configuration](../database/search_config.md))
-2. Tables need detail pages so users can navigate to search results
-3. Tables need `recordDisplayName` configured for non-standard display fields
-
-## Navbar Search
-
-The Navbar component provides built-in search functionality. The search button
-opens a search dialog that can also be opened with the Ctrl/Cmd + K keyboard
-shortcut.
-
-### Single Table Search
-
-For apps focused on a single main table:
-
-```typescript
 <Navbar
-  links={["/products", "/orders", "/customers"]}
-  searchDialog={{
-    table: "products",
+  links={["/contacts", "/matters", "/time-entries"]}
+  multiTableSearchDialog={{
+    tables: [
+      { name: "matters", icon: "Gavel", displayValues: ["type", "client_position"] },
+      { name: "contacts", icon: "Person", displayValues: ["type", "email"] },
+    ],
   }}
 />
 ```
 
-`searchDialog` takes `table` (required) and an optional `displayValues` array of
-extra fields to show in results (same form as the multi-table `displayValues`
-below).
+## Entry Points
 
-## GlobalSearchDialog
-
-Use `GlobalSearchDialog` directly when the app shell is not using `Navbar` or
-`Sidebar`, but still wants the same Ctrl/Cmd+K behavior.
+- [`Navbar`](./navbar.md#search-dialog): `searchDialog` or
+  `multiTableSearchDialog` props.
+- [`Sidebar`](./sidebar.md#search-and-settings):
+  `Sidebar.SearchTableButton` / `Sidebar.MultiTableSearchButton`.
+- `GlobalSearchDialog` from `components/global_search_dialog`, when the shell
+  uses neither but still wants Ctrl/Cmd+K. It also requires `openScalar`, the
+  name of a boolean scalar controlling the open state:
 
 ```tsx
 import { GlobalSearchDialog } from "components/global_search_dialog";
@@ -62,68 +76,4 @@ import { GlobalSearchDialog } from "components/global_search_dialog";
 </Data>
 ```
 
-Props:
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `openScalar` | `string` | Yes | Boolean scalar name controlling dialog open state. |
-| `searchDialog` | `{ table: string; displayValues?: (string \| TableSearchDisplay)[] }` | No | Single-table search. |
-| `multiTableSearchDialog` | `{ tables: MultiTableSearchDialogTable[] }` | No | Multi-table search. |
-
-Pass exactly one of `searchDialog` or `multiTableSearchDialog`.
-
-### Multi-Table Search Dialog
-
-For apps with multiple searchable tables, use `multiTableSearchDialog`:
-
-```typescript
-<Navbar
-  links={["/contacts", "/matters", "/time-entries", "/reports"]}
-  color="primary"
-  variant="solid"
-  multiTableSearchDialog={{
-    tables: [
-      {
-        name: "matters",
-        displayValues: ["type", "client_position"],
-        icon: "Gavel",
-      },
-      {
-        name: "contacts",
-        displayValues: ["type", "email"],
-        icon: "Person",
-      },
-    ],
-  }}
-/>
-```
-
-### Multi-Table Search Options
-
-Each table in the `tables` array accepts:
-
-| Property | Description |
-|----------|-------------|
-| `name` | Table name (required) |
-| `displayValues` | Optional additional fields to show in search results |
-| `icon` | Material icon name to display next to results (required) |
-
-Each `displayValues` entry is either a field name (string) or a custom display
-object `{ name, expr: (record) => Sql, type, label? }`, where `expr` builds the
-value from the record row.
-
-## Best Practices
-
-- For most user-facing apps, add full-text search to the Navbar for main tables
-- Prefer `multiTableSearchDialog` in systems with multiple tables users would want to search across
-- Use descriptive icons to help users distinguish between result types
-- Include relevant `displayValues` to give context in search results
-
-## Requirements
-
-For `multiTableSearchDialog` to work, each table must have:
-- A `recordDisplayName` configured
-- A detail page URL (via `getHrefToRecord` or standard routing)
-
-See [Search Configuration](../database/search_config.md) for setting up table
-search configs.
+Prefer `multiTableSearchDialog` when users search across several main tables.

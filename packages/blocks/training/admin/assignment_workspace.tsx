@@ -7,20 +7,25 @@ import { FormControl } from "components/form_control";
 import { FormLabel } from "components/form_label";
 import { IconButton } from "components/icon_button";
 import { Input } from "components/input";
+import { MaterialIcon } from "components/material_icon";
 import { Select } from "components/select";
 import { Textarea } from "components/textarea";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
 import { type Sql, sql } from "std/sql_utils";
-import type { StateStatements } from "std/statements";
+import type { HelperProcField, StateStatements } from "std/statements";
+import { system } from "std/system";
 import { Each, type Node, Show } from "std/ui";
 import type { TrainingBlock } from "../index.tsx";
+import type { TrainingBlockOpts } from "../types.ts";
 import {
   activeVersionIdSql,
   assignableCourseItemCountSql,
+  assignmentLanguageSql,
   audienceMatchesEmployeeSql,
   employeeName,
   missingActiveVersionCountSql,
+  openTrainingAssignmentWhereSql,
   personLanguageSql,
   personPrimaryJobProfileSql,
   personTable,
@@ -131,37 +136,6 @@ export function AssignmentWorkspace(props: {
   const programOrCourse =
     sql`case when selected_course.is_program then 'program' else 'course' end`;
 
-  const groupMatchCondition = sql`(
-    ${uiGroupTarget} = 'all'
-    or (
-      ${uiGroupTarget} = 'audience'
-      and ${uiGroupAudienceId} != ''
-      and exists (
-        select 1
-        from db.training_audiences a
-        where a.id = ${uiGroupAudienceId}::bigint
-          and a.is_active
-          and ${audienceMatchesEmployeeSql(block.opts, sql`a`, sql`e`)}
-      )
-    )
-    ${
-    hasGroupAssignByJob
-      ? sql`or (
-      ${uiGroupTarget} = 'job'
-      and ${uiGroupJobProfile} != ''
-      and lower(${personPrimaryJobProfileSql(block.opts, sql`e`)}) =
-        lower(${uiGroupJobProfile})
-    )`
-      : sql``
-  }
-    or (
-      ${uiGroupTarget} = 'role'
-      and ${uiGroupPersonType} != ''
-      and lower(${personTypeSql(block.opts, sql`e`)}) =
-        lower(${uiGroupPersonType})
-    )
-  )`;
-
   const onceFormFields = isDoc
     ? (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
@@ -223,7 +197,13 @@ export function AssignmentWorkspace(props: {
                   from db.training_content_documents document
                   left join db.training_document_settings training_settings
                     on training_settings.document_id = document.id
-                  where document.id = ${targetId}`,
+                  where document.id = ${targetId}
+                    and ${
+              block.opts.content.canReadDocument(
+                sql`document.id`,
+                sql`current_user`,
+              )
+            }`,
           );
         } else {
           s.defRecord(
@@ -282,12 +262,15 @@ export function AssignmentWorkspace(props: {
             <Typography level="title-lg" startIcon="AssignmentInd">
               {isDoc
                 ? "Assign Document"
-                : sql`case when selected_course.is_program then 'Assign Training Program: ' else 'Assign Training Course: ' end || selected_course.name`}
+                : sql`'Assign ' || selected_course.name`}
             </Typography>
             <Typography level="body-sm" className="text-neutral-600">
               {isDoc
                 ? "Assign this document once, or create an ongoing rule that keeps the right people assigned automatically. Each task uses the person's language when an active version exists."
-                : "Assign people once, or create an ongoing assignment rule that keeps the right people assigned automatically."}
+                : sql`case when selected_course.is_program
+                    then 'Choose who receives this program and how they stay assigned.'
+                    else 'Choose who receives this course and how they stay assigned.'
+                  end`}
             </Typography>
           </div>
         </CardHeader>
@@ -302,47 +285,60 @@ export function AssignmentWorkspace(props: {
               {error}
             </Alert>
           </Show>
-          <div className="mb-4 rounded-md border border-primary-200 bg-primary-50 p-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div className="min-w-0">
-                <Typography level="title-sm" startIcon="Autorenew">
-                  Keep assigned automatically
-                </Typography>
-                <Typography level="body-sm" className="text-neutral-700 mt-1">
-                  {isDoc
-                    ? "Create an ongoing audience rule. The scheduled job keeps matching people assigned, including future hires, renewals, and new versions."
-                    : "Create an ongoing assignment rule. The scheduled job keeps matching people assigned, including future hires, renewals, and new versions."}
-                </Typography>
-              </div>
-              <Show
-                when={sql`${mode} = 'ongoing'`}
-                fallback={
-                  <Button
-                    size="sm"
-                    variant="outlined"
-                    startIcon="Autorenew"
-                    onClick={(s) => {
-                      s.setScalar(`${p}_mode`, sql.lit`ongoing`);
-                      s.setScalar(`${p}_error`, sql`null`);
-                    }}
-                  >
-                    Use automatic assignment
-                  </Button>
-                }
-              >
-                <Button
-                  size="sm"
-                  variant="soft"
-                  color="neutral"
-                  startIcon={isDoc ? "AssignmentInd" : "GroupAdd"}
+          <div className="mb-5 flex flex-col gap-2">
+            <Typography level="title-sm">
+              How should people be assigned?
+            </Typography>
+            <div
+              role="radiogroup"
+              aria-label="Assignment method"
+              className="grid grid-cols-1 gap-2 md:grid-cols-2"
+            >
+              {[
+                {
+                  value: "ongoing",
+                  icon: "Autorenew" as const,
+                  title: "Keep assigned automatically",
+                  body: isDoc
+                    ? "An ongoing audience rule. The scheduled job keeps matching people assigned, including future hires, renewals, and new versions."
+                    : "An ongoing assignment rule. The scheduled job keeps matching people assigned, including future hires, renewals, and new versions.",
+                },
+                {
+                  value: "once",
+                  icon: "GroupAdd" as const,
+                  title: "Assign once",
+                  body: "Choose people or a group and assign them right now.",
+                },
+              ].map((option) => (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={sql`case when ${mode} = ${
+                    sql.lit(option.value)
+                  } then 'true' else 'false' end`}
+                  className="flex items-start gap-3 rounded-md border border-divider bg-white p-3 text-left transition-colors hover:border-neutral-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-500"
+                  dynamicClassNames={[{
+                    condition: sql`${mode} = ${sql.lit(option.value)}`,
+                    classNames:
+                      "border-primary-500 bg-primary-50 hover:border-primary-500",
+                  }]}
                   onClick={(s) => {
-                    s.setScalar(`${p}_mode`, sql.lit`once`);
+                    s.setScalar(`${p}_mode`, sql.lit(option.value));
                     s.setScalar(`${p}_error`, sql`null`);
                   }}
                 >
-                  Assign once instead
-                </Button>
-              </Show>
+                  <MaterialIcon
+                    icon={option.icon}
+                    className="mt-0.5 text-primary-600"
+                  />
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <Typography level="title-sm">{option.title}</Typography>
+                    <Typography level="body-sm" className="text-neutral-600">
+                      {option.body}
+                    </Typography>
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
           <Show when={sql`${mode} = 'once'`}>
@@ -369,9 +365,6 @@ export function AssignmentWorkspace(props: {
                         s.setScalar(`${g}_job_profile`, sql.lit``);
                       }
                       s.setScalar(`${g}_person_type`, sql.lit``);
-                      if (!isDoc) {
-                        s.refetch();
-                      }
                     }}
                   >
                     <Select.Option value="audience">
@@ -393,9 +386,6 @@ export function AssignmentWorkspace(props: {
                     value={groupLanguage}
                     onInput={(s) => {
                       s.setScalar(`${g}_language`, sql`target_value`);
-                      if (!isDoc) {
-                        s.refetch();
-                      }
                     }}
                   >
                     <Select.Option value="">Employee language</Select.Option>
@@ -414,9 +404,6 @@ export function AssignmentWorkspace(props: {
                       value={groupAudienceId}
                       onInput={(s) => {
                         s.setScalar(`${g}_audience_id`, sql`target_value`);
-                        if (!isDoc) {
-                          s.refetch();
-                        }
                       }}
                     >
                       <Select.Option value="">Choose audience</Select.Option>
@@ -437,9 +424,6 @@ export function AssignmentWorkspace(props: {
                         value={groupJobProfile}
                         onInput={(s) => {
                           s.setScalar(`${g}_job_profile`, sql`target_value`);
-                          if (!isDoc) {
-                            s.refetch();
-                          }
                         }}
                       >
                         <Select.Option value="">Choose job</Select.Option>
@@ -460,9 +444,6 @@ export function AssignmentWorkspace(props: {
                       value={groupPersonType}
                       onInput={(s) => {
                         s.setScalar(`${g}_person_type`, sql`target_value`);
-                        if (!isDoc) {
-                          s.refetch();
-                        }
                       }}
                     >
                       <Select.Option value="">Choose role</Select.Option>
@@ -492,6 +473,15 @@ export function AssignmentWorkspace(props: {
                     s.tryServer({
                       body: (s) => {
                         block.assertCanAssignTraining(s);
+                        if (isDoc) {
+                          s.throwErrorUnless(
+                            block.opts.content.canReadDocument(
+                              targetId,
+                              sql`current_user`,
+                            ),
+                            sql.lit`You cannot assign this document.`,
+                          );
+                        }
                         s.if(
                           sql`${uiGroupTarget} = 'audience'
                           and ${uiGroupAudienceId} = ''`,
@@ -531,57 +521,24 @@ export function AssignmentWorkspace(props: {
                           },
                         );
                         if (isDoc) {
-                          s.defTable("group_assign_people", {
-                            fields: [
-                              { name: "id", type: "BigInt", notNull: true },
-                              {
-                                name: "name",
-                                type: { type: "String", maxLength: 400 },
+                          s.callStoredProcedure(
+                            "training_group_assign_document_people",
+                            {
+                              inputScalars: {
+                                p_target_id: targetId,
+                                p_group_target: uiGroupTarget,
+                                p_group_audience_id: uiGroupAudienceId,
+                                ...(hasGroupAssignByJob
+                                  ? { p_group_job_profile: uiGroupJobProfile }
+                                  : {}),
+                                p_group_person_type: uiGroupPersonType,
+                                p_group_language: uiGroupLanguage,
                               },
-                              {
-                                name: "language",
-                                type: { type: "String", maxLength: 30 },
+                              outputTables: {
+                                group_assign_people: "group_assign_people",
                               },
-                              { name: "active_version_id", type: "BigInt" },
-                            ],
-                          });
-                          s.modify(sql`
-                            insert into group_assign_people
-                              (id, name, language, active_version_id)
-                            select id, name, language, active_version_id
-                              from (
-                                select e.id,
-                                       ${
-                            employeeName(block.opts, sql`e`)
-                          } as name,
-                                       coalesce(nullif(${uiGroupLanguage}, ''), ${
-                            personLanguageSql(block.opts, sql`e`)
-                          }) as language,
-                                       ${
-                            activeVersionIdSql(
-                              targetId,
-                              sql`coalesce(nullif(${uiGroupLanguage}, ''), ${
-                                personLanguageSql(block.opts, sql`e`)
-                              })`,
-                              block.opts,
-                            )
-                          } as active_version_id
-                                from db.${sql.ref(personTable(block.opts))} e
-                                where ${groupMatchCondition}
-                              ) group_person_source
-                              where active_version_id is not null
-                                and not exists (
-                                  select 1
-                                  from db.training_employee_tasks t
-                                  join db.training_assignments a
-                                    on a.id = t.training_assignment_id
-                                  where a.person_id = group_person_source.id
-                                    and a.document_id = ${targetId}
-                                    and a.training_course_id is null
-                                    and t.status not in ('completed', 'waived')
-                                )
-                              order by name
-                          `);
+                            },
+                          );
                           s.if(
                             sql`not exists (select 1 from group_assign_people)`,
                             (s) => {
@@ -594,67 +551,24 @@ export function AssignmentWorkspace(props: {
                             },
                           );
                         } else {
-                          s.defTable("group_assign_people", {
-                            fields: [
-                              { name: "id", type: "BigInt", notNull: true },
-                              {
-                                name: "name",
-                                type: { type: "String", maxLength: 400 },
+                          s.callStoredProcedure(
+                            "training_group_assign_course_people",
+                            {
+                              inputScalars: {
+                                p_target_id: targetId,
+                                p_group_target: uiGroupTarget,
+                                p_group_audience_id: uiGroupAudienceId,
+                                ...(hasGroupAssignByJob
+                                  ? { p_group_job_profile: uiGroupJobProfile }
+                                  : {}),
+                                p_group_person_type: uiGroupPersonType,
+                                p_group_language: uiGroupLanguage,
                               },
-                              {
-                                name: "language",
-                                type: { type: "String", maxLength: 30 },
+                              outputTables: {
+                                group_assign_people: "group_assign_people",
                               },
-                              {
-                                name: "prior_course_assignments",
-                                type: "BigInt",
-                                notNull: true,
-                              },
-                              {
-                                name: "active_course_assignments",
-                                type: "BigInt",
-                                notNull: true,
-                              },
-                            ],
-                          });
-                          s.modify(sql`
-                            insert into group_assign_people
-                              (id, name, language, prior_course_assignments,
-                               active_course_assignments)
-                            select id, name, language,
-                                   prior_course_assignments,
-                                   active_course_assignments
-                              from (
-                                select e.id, ${
-                            employeeName(block.opts, sql`e`)
-                          } as name,
-                                  coalesce(nullif(${uiGroupLanguage}, ''), ${
-                            personLanguageSql(block.opts, sql`e`)
-                          }) as language,
-                                  (
-                                    select count(*)
-                                    from db.training_assignments a
-                                    where a.person_id = e.id
-                                      and a.training_course_id = ${targetId}
-                                  ) as prior_course_assignments,
-                                  (
-                                    select count(*)
-                                    from db.training_assignments a
-                                    where a.person_id = e.id
-                                      and a.training_course_id = ${targetId}
-                                      and exists (
-                                        select 1
-                                        from db.training_employee_tasks t
-                                        where t.training_assignment_id = a.id
-                                          and t.status not in ('completed', 'waived')
-                                      )
-                                  ) as active_course_assignments
-                                from db.${sql.ref(personTable(block.opts))} e
-                                where ${groupMatchCondition}
-                              ) group_person_source
-                              where active_course_assignments = 0
-                              order by name
-                          `);
+                            },
+                          );
                           s.if(
                             sql`not exists (select 1 from group_assign_people)`,
                             (s) => {
@@ -682,12 +596,63 @@ export function AssignmentWorkspace(props: {
                               s.return();
                             },
                           );
+                          s.defTable(
+                            "group_course_languages",
+                            sql`select distinct ${
+                              assignmentLanguageSql(block.opts, sql`language`)
+                            } as language from group_assign_people`,
+                          );
+                          s.defScalar("group_missing_course_versions", sql`0`);
+                          s.defScalar("group_course_task_count", sql`1`);
+                          s.defScalar(
+                            "group_language_count",
+                            sql`(select count(*) from group_course_languages)`,
+                          );
+                          s.defScalar("group_language_index", sql`0`);
+                          s.while(
+                            sql`group_language_index < group_language_count`,
+                            (s) => {
+                              s.defRecord(
+                                "group_language",
+                                sql`select language from group_course_languages order by language limit 1 offset group_language_index`,
+                              );
+                              s.callStoredProcedure(
+                                "training_course_missing_version_count",
+                                {
+                                  inputScalars: {
+                                    p_course_id: targetId,
+                                    p_language: sql`group_language.language`,
+                                  },
+                                  outputScalars: {
+                                    p_count: "language_missing_versions",
+                                  },
+                                },
+                              );
+                              s.callStoredProcedure(
+                                "training_course_assignable_item_count",
+                                {
+                                  inputScalars: {
+                                    p_course_id: targetId,
+                                    p_language: sql`group_language.language`,
+                                  },
+                                  outputScalars: {
+                                    p_count: "language_task_count",
+                                  },
+                                },
+                              );
+                              s.setScalar(
+                                "group_missing_course_versions",
+                                sql`greatest(group_missing_course_versions, language_missing_versions)`,
+                              );
+                              s.setScalar(
+                                "group_course_task_count",
+                                sql`least(group_course_task_count, language_task_count)`,
+                              );
+                              s.increment("group_language_index");
+                            },
+                          );
                           s.if(
-                            sql`exists (
-                            select 1
-                            from group_assign_people person
-                            where ${missingActiveVersionCountSql(targetId)} > 0
-                          )`,
+                            sql`group_missing_course_versions > 0`,
                             (s) => {
                               s.setScalar(
                                 uiError,
@@ -698,11 +663,7 @@ export function AssignmentWorkspace(props: {
                             },
                           );
                           s.if(
-                            sql`exists (
-                            select 1
-                            from group_assign_people person
-                            where ${assignableCourseItemCountSql(targetId)} = 0
-                          )`,
+                            sql`group_course_task_count = 0`,
                             (s) => {
                               s.setScalar(
                                 uiError,
@@ -720,8 +681,7 @@ export function AssignmentWorkspace(props: {
                         s.startTransaction();
                         // Index-driven loop instead of a table cursor: the
                         // loop body suspends into a stored procedure call,
-                        // which breaks resumable cursors (see
-                        // internal_docs/bugs/ui_server_cursor_loops_over_local_state_fail.md).
+                        // which breaks resumable cursors in this loop.
                         s.defScalar("group_assign_index", sql`0`);
                         s.while(
                           sql`group_assign_index < group_assignment_count`,
@@ -832,6 +792,15 @@ export function AssignmentWorkspace(props: {
                     s.tryServer({
                       body: (s) => {
                         block.assertCanAssignTraining(s);
+                        if (isDoc) {
+                          s.throwErrorUnless(
+                            block.opts.content.canReadDocument(
+                              targetId,
+                              sql`current_user`,
+                            ),
+                            sql.lit`You cannot assign this document.`,
+                          );
+                        }
                         s.if(sql`${uiPersonId} is null`, (s) => {
                           s.setScalar(
                             uiError,
@@ -871,14 +840,23 @@ export function AssignmentWorkspace(props: {
                               s.return();
                             },
                           );
+                          s.defScalar("employee_active_version_id", {
+                            type: "BigInt",
+                          });
+                          s.callStoredProcedure(
+                            "training_document_active_version_id",
+                            {
+                              inputScalars: {
+                                p_document_id: targetId,
+                                p_language: sql`employee.language`,
+                              },
+                              outputScalars: {
+                                p_version_id: "employee_active_version_id",
+                              },
+                            },
+                          );
                           s.if(
-                            sql`${
-                              activeVersionIdSql(
-                                targetId,
-                                sql`employee.language`,
-                                block.opts,
-                              )
-                            } is null`,
+                            sql`employee_active_version_id is null`,
                             (s) => {
                               s.setScalar(
                                 uiError,
@@ -936,12 +914,9 @@ export function AssignmentWorkspace(props: {
                                        from db.training_assignments a
                                        where a.person_id = e.id
                                          and a.training_course_id = ${targetId}
-                                         and exists (
-                                           select 1
-                                           from db.training_employee_tasks t
-                                           where t.training_assignment_id = a.id
-                                             and t.status not in ('completed', 'waived')
-                                         )
+                                         and ${
+                              openTrainingAssignmentWhereSql(sql`a`)
+                            }
                                      ) as active_course_assignments
                               from db.${sql.ref(personTable(block.opts))} e
                               where e.id = ${uiPersonId}`,
@@ -966,9 +941,20 @@ export function AssignmentWorkspace(props: {
                               s.return();
                             },
                           );
-                          s.defScalar(
-                            "missing_course_versions",
-                            missingActiveVersionCountSql(targetId),
+                          s.defScalar("missing_course_versions", {
+                            type: "BigInt",
+                          });
+                          s.callStoredProcedure(
+                            "training_course_missing_version_count",
+                            {
+                              inputScalars: {
+                                p_course_id: targetId,
+                                p_language: sql`employee.language`,
+                              },
+                              outputScalars: {
+                                p_count: "missing_course_versions",
+                              },
+                            },
                           );
                           s.if(sql`missing_course_versions > 0`, (s) => {
                             s.setScalar(
@@ -978,9 +964,18 @@ export function AssignmentWorkspace(props: {
                             );
                             s.return();
                           });
-                          s.defScalar(
-                            "course_task_count",
-                            assignableCourseItemCountSql(targetId),
+                          s.defScalar("course_task_count", {
+                            type: "BigInt",
+                          });
+                          s.callStoredProcedure(
+                            "training_course_assignable_item_count",
+                            {
+                              inputScalars: {
+                                p_course_id: targetId,
+                                p_language: sql`employee.language`,
+                              },
+                              outputScalars: { p_count: "course_task_count" },
+                            },
                           );
                           s.if(sql`course_task_count = 0`, (s) => {
                             s.setScalar(
@@ -1046,13 +1041,13 @@ export function AssignmentWorkspace(props: {
               <Typography level="title-md" startIcon="Autorenew">
                 {isDoc ? "New ongoing rule" : "New ongoing assignment rule"}
               </Typography>
-              <Typography level="body-sm" className="text-neutral-600">
-                {isDoc
-                  ? "Matching people are assigned immediately. Daily reconciliation adds future matches and handles renewals; publication applies new revisions immediately."
-                  : sql`'The scheduled job assigns this ' ||
-                    ${programOrCourse} ||
-                    ' to everyone matching the audience — including people who match later — and re-assigns on renewal or when a new version is published.'`}
-              </Typography>
+              {isDoc && (
+                <Typography level="body-sm" className="text-neutral-600">
+                  Matching people are assigned immediately. Daily reconciliation
+                  adds future matches and handles renewals; publication applies
+                  new revisions immediately.
+                </Typography>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
                 <FormControl>
                   <FormLabel>Audience</FormLabel>
@@ -1102,7 +1097,6 @@ export function AssignmentWorkspace(props: {
                     s.setScalar(`${p}_error`, sql`null`);
                     s.tryServer({
                       body: (s) => {
-                        block.assertCanAssignTraining(s);
                         s.if(
                           sql`exists (
                             select 1
@@ -1148,6 +1142,16 @@ export function AssignmentWorkspace(props: {
                           },
                         );
                         s.startTransaction();
+                        block.assertCanAssignTraining(s);
+                        if (isDoc) {
+                          s.throwErrorUnless(
+                            block.opts.content.canReadDocument(
+                              targetId,
+                              sql`current_user`,
+                            ),
+                            sql.lit`You cannot assign this document.`,
+                          );
+                        }
                         s.modify(sql`
                           insert into db.training_requirements
                             (name, description,
@@ -1275,8 +1279,17 @@ export function AssignmentWorkspace(props: {
                         s.setScalar(`${p}_error`, sql`null`);
                         s.tryServer({
                           body: (s) => {
-                            block.assertCanAssignTraining(s);
                             s.startTransaction();
+                            block.assertCanAssignTraining(s);
+                            if (isDoc) {
+                              s.throwErrorUnless(
+                                block.opts.content.canReadDocument(
+                                  targetId,
+                                  sql`current_user`,
+                                ),
+                                sql.lit`You cannot assign this document.`,
+                              );
+                            }
                             s.modify(sql`
                               update db.training_requirements
                               set is_active = false
@@ -1310,4 +1323,238 @@ export function AssignmentWorkspace(props: {
       </Card>
     </Data>
   );
+}
+
+function groupMatchConditionSql(opts: TrainingBlockOpts) {
+  const hasGroupAssignByJob =
+    opts.workforce.personPrimaryJobProfileId !== undefined;
+  return sql`(
+    p_group_target = 'all'
+    or (
+      p_group_target = 'audience'
+      and p_group_audience_id != ''
+      and exists (
+        select 1
+        from db.training_audiences a
+        where a.id = nullif(p_group_audience_id, '')::bigint
+          and a.is_active
+          and ${audienceMatchesEmployeeSql(opts, sql`a`, sql`e`)}
+      )
+    )
+    ${
+    hasGroupAssignByJob
+      ? sql`or (
+      p_group_target = 'job'
+      and p_group_job_profile != ''
+      and lower(${personPrimaryJobProfileSql(opts, sql`e`)}) =
+        lower(p_group_job_profile)
+    )`
+      : sql``
+  }
+    or (
+      p_group_target = 'role'
+      and p_group_person_type != ''
+      and lower(${personTypeSql(opts, sql`e`)}) =
+        lower(p_group_person_type)
+    )
+  )`;
+}
+
+/**
+ * The assignment workspace's matching and readiness queries. Every route
+ * that renders the workspace compiles its click handlers, so these stored
+ * procedures keep the queries out of every route.
+ */
+export function registerAssignmentWorkspaceStoredProcedures(
+  opts: TrainingBlockOpts,
+) {
+  const groupInputScalars: HelperProcField[] = [
+    { name: "p_target_id", type: "BigInt" },
+    { name: "p_group_target", type: "String" },
+    { name: "p_group_audience_id", type: "String" },
+    ...(opts.workforce.personPrimaryJobProfileId !== undefined
+      ? [{ name: "p_group_job_profile", type: "String" } as const]
+      : []),
+    { name: "p_group_person_type", type: "String" },
+    { name: "p_group_language", type: "String" },
+  ];
+  const groupMatchCondition = groupMatchConditionSql(opts);
+  system.storedProcedure({
+    name: "training_group_assign_document_people",
+    transaction: "caller",
+    inputScalars: groupInputScalars,
+    outputTables: [
+      {
+        name: "group_assign_people",
+        fields: [
+          { name: "id", type: "BigInt", notNull: true },
+          {
+            name: "name",
+            type: { type: "String", maxLength: 400 },
+          },
+          {
+            name: "language",
+            type: { type: "String", maxLength: 30 },
+          },
+          { name: "active_version_id", type: "BigInt" },
+        ],
+      },
+    ],
+    procedure: (s) => {
+      s.modify(sql`
+                            insert into group_assign_people
+                              (id, name, language, active_version_id)
+                            select id, name, language, active_version_id
+                              from (
+                                select e.id,
+                                       ${employeeName(opts, sql`e`)} as name,
+                                       coalesce(nullif(p_group_language, ''), ${
+        personLanguageSql(opts, sql`e`)
+      }) as language,
+                                       ${
+        activeVersionIdSql(
+          sql`p_target_id`,
+          sql`coalesce(nullif(p_group_language, ''), ${
+            personLanguageSql(opts, sql`e`)
+          })`,
+          opts,
+        )
+      } as active_version_id
+                                from db.${sql.ref(personTable(opts))} e
+                                where ${groupMatchCondition}
+                              ) group_person_source
+                              where active_version_id is not null
+                                and not exists (
+                                  select 1
+                                  from db.training_employee_tasks t
+                                  join db.training_assignments a
+                                    on a.id = t.training_assignment_id
+                                  where a.person_id = group_person_source.id
+                                    and a.document_id = p_target_id
+                                    and a.training_course_id is null
+                                    and t.status not in ('completed', 'waived')
+                                )
+                              order by name
+                          `);
+    },
+  });
+  system.storedProcedure({
+    name: "training_group_assign_course_people",
+    transaction: "caller",
+    inputScalars: groupInputScalars,
+    outputTables: [
+      {
+        name: "group_assign_people",
+        fields: [
+          { name: "id", type: "BigInt", notNull: true },
+          {
+            name: "name",
+            type: { type: "String", maxLength: 400 },
+          },
+          {
+            name: "language",
+            type: { type: "String", maxLength: 30 },
+          },
+          {
+            name: "prior_course_assignments",
+            type: "BigInt",
+            notNull: true,
+          },
+          {
+            name: "active_course_assignments",
+            type: "BigInt",
+            notNull: true,
+          },
+        ],
+      },
+    ],
+    procedure: (s) => {
+      s.modify(sql`
+                            insert into group_assign_people
+                              (id, name, language, prior_course_assignments,
+                               active_course_assignments)
+                            select id, name, language,
+                                   prior_course_assignments,
+                                   active_course_assignments
+                              from (
+                                select e.id, ${
+        employeeName(opts, sql`e`)
+      } as name,
+                                  coalesce(nullif(p_group_language, ''), ${
+        personLanguageSql(opts, sql`e`)
+      }) as language,
+                                  (
+                                    select count(*)
+                                    from db.training_assignments a
+                                    where a.person_id = e.id
+                                      and a.training_course_id = p_target_id
+                                  ) as prior_course_assignments,
+                                  (
+                                    select count(*)
+                                    from db.training_assignments a
+                                    where a.person_id = e.id
+                                      and a.training_course_id = p_target_id
+                                      and ${
+        openTrainingAssignmentWhereSql(sql`a`)
+      }
+                                  ) as active_course_assignments
+                                from db.${sql.ref(personTable(opts))} e
+                                where ${groupMatchCondition}
+                              ) group_person_source
+                              where active_course_assignments = 0
+                              order by name
+                          `);
+    },
+  });
+  system.storedProcedure({
+    name: "training_course_missing_version_count",
+    transaction: "caller",
+    inputScalars: [{ name: "p_course_id", type: "BigInt" }, {
+      name: "p_language",
+      type: "String",
+    }],
+    outputScalars: [{ name: "p_count", type: "BigInt" }],
+    procedure: (s) => {
+      s.setScalar(
+        "p_count",
+        missingActiveVersionCountSql(
+          sql`p_course_id`,
+          assignmentLanguageSql(opts, sql`p_language`),
+        ),
+      );
+    },
+  });
+  system.storedProcedure({
+    name: "training_course_assignable_item_count",
+    transaction: "caller",
+    inputScalars: [{ name: "p_course_id", type: "BigInt" }, {
+      name: "p_language",
+      type: "String",
+    }],
+    outputScalars: [{ name: "p_count", type: "BigInt" }],
+    procedure: (s) => {
+      s.setScalar(
+        "p_count",
+        assignableCourseItemCountSql(
+          sql`p_course_id`,
+          assignmentLanguageSql(opts, sql`p_language`),
+        ),
+      );
+    },
+  });
+  system.storedProcedure({
+    name: "training_document_active_version_id",
+    transaction: "caller",
+    inputScalars: [
+      { name: "p_document_id", type: "BigInt" },
+      { name: "p_language", type: "String" },
+    ],
+    outputScalars: [{ name: "p_version_id", type: "BigInt" }],
+    procedure: (s) => {
+      s.setScalar(
+        "p_version_id",
+        activeVersionIdSql(sql`p_document_id`, sql`p_language`, opts),
+      );
+    },
+  });
 }

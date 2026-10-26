@@ -37,38 +37,34 @@ import { Data } from "std/data";
 | Choose among multiple branches | `Switch` + `Match` | this page / exported types |
 | URL-based UI | `Routes`, `Route`, `AppRoutes` | [Routing](./routing.md) |
 | Global keyboard/mouse handlers | `EventHandlers` | [Event Handlers](./event_handlers.md) |
-| Local UI state | `State` or `Data local` | [Data](./data.md) |
+| Local UI state | `Data local` | [Data](./data.md#local-state) |
 | React-like subscriptions | `Listen` or `Effect` | exported `std/ui` types |
 | Cross-page node/state | `useGlobalNode` / `useGlobalState` | [Global nodes & states](./global_nodes_states.md) |
 | Permission-gated rendering | `Authorize` | exported `std/ui` types |
-| URL query state | `QueryParams` / `useQueryParams` | [Routing](./routing.md) |
+| URL query state | `Data` `queryParams` | [Routing](./routing.md#query-parameters) |
+| Return to a list with its filters | `backLink` on `Link`/`Button` | [Routing](./routing.md#returning-to-a-list) |
 | Dynamic or recursive trees | `DynamicNode`, `Recursive`, `Recurse`, `Mode` | exported `std/ui` types |
 
 ## Data
 
-`Data` creates in-memory UI state and/or fetches server data. Use `local` for
-client-only state; omit it when the procedure queries `db.*`.
+`Data` declares UI state and/or fetches server data for its descendants. Use
+`local` for client-only state; omit it when the procedure queries `db.*`. State
+is visible only inside the declaring `Data`; see
+[UI state scope](./overview.md#ui-state-scope).
 
 ```tsx
-<Data
-  watch={[sql`search_text`]}
-  debounce={{ wait: sql`300` }}
-  procedure={(s) => {
-    s.defScalar("search_text", sql.lit``);
-    s.defTable("items", sql`
-      select * from db.items
-      where name like '%' || search_text || '%'
-    `);
-  }}
->
+<Data procedure={(s) => {
+  s.defTable("items", sql`select id, name from db.items order by name`);
+}}>
   <Each table="items" recordName="item">
     <div>{sql`item.name`}</div>
   </Each>
 </Data>
 ```
 
-Use `statusScalar`, `hasDataScalar`, and `errorRecord` when the UI needs
-loading or error states.
+Use `watch`/`debounce` to re-run on ancestor state changes, and `statusScalar`,
+`hasDataScalar`, and `errorRecord` for loading or error UI. See
+[Data](./data.md).
 
 ## Each
 
@@ -142,23 +138,23 @@ procedures, read event values through SQL expressions such as `event.key`,
 
 ## State, Listen, and Effects
 
-Yolm provides `State`, `Listen`, and `Effect` primitives, but they are not
-React hooks. `State` defines page-local UI state, `Listen` reacts to a state
-change, and `Effect` runs a generated effect in the supported Yolm statement
-scope. Use `Data` for query-backed state and `Data local` for ordinary local
-state; use these lower-level primitives when a reusable component needs their
-specific lifecycle behavior.
+These are lower-level primitives, not React hooks:
 
-`Authorize` gates a subtree using the current permission context. `QueryParams`
-declares URL parameters in the page tree. `DynamicNode` chooses a node from a
-runtime node value, while `Recursive`, `Recurse`, and `Mode` support recursive
-or mode-dependent generated trees.
+- `State` is the node `Data` is built on. Solution code declares local state
+  with `Data local`; use `State` directly only in reusable primitives that need
+  its exact props.
+- `Listen` runs an event handler when a query's result changes.
+- `Effect` runs a generated effect in the supported Yolm statement scope.
+
+`Authorize` gates a subtree using the current permission context.
+`QueryParams` is the low-level URL-parameter node behind `Data` `queryParams`.
+`DynamicNode` chooses a node from a runtime node value, while `Recursive`,
+`Recurse`, and `Mode` support recursive or mode-dependent generated trees.
 
 ## Common Mistakes
 
-- Using React state/effect hooks or React `key` props; use the Yolm primitives
-  above when their state or effect behavior is required.
 - Filtering UI rows with TypeScript instead of SQL.
 - Putting persistent business state in `Data local`.
 - Re-querying manually when `watch` or `s.refetch()` is the intended path.
+- Reading state declared in a sibling subtree; declare it on a common ancestor.
 - Using routes for modal/local state or local state for URL-addressable pages.

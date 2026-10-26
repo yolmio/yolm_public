@@ -247,6 +247,7 @@ export function ContentDetailPage(props: ContentDetailPageProps) {
                 <div className="pt-8">
                   <Link
                     href={props.indexHref}
+                    backLink
                     className="inline-flex items-center gap-2 font-medium no-underline hover:underline"
                     sx={{ color: "var(--site-accent-strong)" }}
                   >
@@ -266,6 +267,7 @@ export function ContentDetailPage(props: ContentDetailPageProps) {
                 </Typography>
                 <Link
                   href={props.indexHref}
+                  backLink
                   className="inline-flex items-center gap-2 font-medium no-underline hover:underline"
                   sx={{ color: "var(--site-accent)" }}
                 >

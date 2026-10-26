@@ -50,23 +50,29 @@ the component explicitly documents that pattern.
 />
 ```
 
-Common options:
+Key options: `columns` (virtual columns, custom cells, FK virtuals), `bulk`
+and `selectable`, `viewButton`/`viewButtonUrl`, `quickSearch`,
+`additionalWhere` (fixed scope, also enforced on record URLs), and
+`recordPage` for an integrated detail route with previous/next navigation
+over the loaded rows. See [Datagrid](./datagrid.md) for details.
 
-- `table` for the database table.
-- `fields` / `ignoreFields` for table field configuration.
-- `columns` for virtual columns, custom cells, related counts, and FK virtuals.
-- `selectable`, `bulk`, `viewButton`, `viewButtonUrl` for workflows.
-- `recordPage` for integrated detail pages with previous/next navigation over
-  the grid rows loaded in the current session.
-- `recordPage.linkField` to make a displayed string or numeric field open the
-  integrated detail page instead of showing a separate View button column.
-- `recordPage.showExactResultCount` to opt into an up-front result
-  count. Without it, the label progressively reports `N of loaded+` and
-  becomes exact when navigation discovers the final page.
-- `additionalWhere` to scope the grid.
+### Schema opt-in (persistent schema change)
 
-Use `system.addDataGridTablesAndEnums([...])` in `core.tsx` when saved datagrid
-views should support named tables/enums.
+`DatagridPage` throws at generation time unless its `datagridName` (default:
+the table name) is registered in `core.tsx`, before globals lock:
+
+```tsx
+system.addDataGridTablesAndEnums(["customers", "orders"]);
+```
+
+This is a production schema change the system owner must opt into. The first
+call adds system tables `datagrid_views`, `datagrid_view_columns`, and
+`datagrid_view_filter_terms` (saved views, per-view column state, and filter
+terms), the `datagrid_name` enum with one value per registered grid, and the
+`dg_filter_op` enum with its filter helper functions. Later calls only add
+`datagrid_name` values. Previously deployed `datagrid_name` values are kept
+(following table renames). Classify it like any other schema change before
+deploying.
 
 ## DataTablePage
 
@@ -83,8 +89,8 @@ views should support named tables/enums.
 
 Use this for smaller admin tables where HTML table behavior is enough. Common
 options mirror [DataTable](./data_table.md): `columns`, `ignoreFields`,
-`searchable`, `filterable`, `sortable`, `pageSize`, `editable`, `selectable`,
-`actions`, `bulkActions`, `download`, `where`, and `viewButtonUrl`.
+`searchable`, `searchDebounceMs`, `filterable`, `sortable`, `pageSize`, `editable`, `selectable`,
+`actions`, `bulkActions`, `download`, `where`, `viewButton`, and `viewButtonUrl`.
 
 When `editable` or `selectable` is enabled and a detail page exists, a view
 button column is used for navigation instead of row click.
@@ -102,14 +108,9 @@ button column is used for navigation instead of row click.
 </RecordPage>
 ```
 
-`RecordPage` supplies:
-
-- a route like `/{table_base_url}/{record_id:id}`,
-- `ui.record_id`,
-- a `record` row available to children,
-- loading and not-found handling.
-
-Use `path` only when the default route is not acceptable.
+`RecordPage` supplies the route `/{table_base_url}/{record_id:id}`,
+`ui.record_id`, the `record` row, and loading/not-found handling. See
+[RecordPage](./record_page.md).
 
 ## Common Combination
 
@@ -150,7 +151,7 @@ result-set context:
 
 - Wrapping self-routing page primitives in manual `Route` components.
 - Using `current_record_id()` inside `RecordPage`; use `ui.record_id`.
-- Building custom CRUD before trying a page primitive.
-- Guessing field names instead of reading `core.tsx`.
+- Using `DatagridPage` without `system.addDataGridTablesAndEnums` for its
+  `datagridName`.
 - Putting dense workflow queues into CRUD pages when `WorkQueue` or custom
   `Data`/`Form` screens would fit better.

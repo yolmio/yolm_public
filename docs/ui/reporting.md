@@ -28,7 +28,9 @@ charts, and multi-report navigation.
 | Bar/line/pie visualization | `BarChart`, `LineChart`, `PieChart` |
 | URL-synced filters | `Data queryParams` |
 
-Use the exported TypeScript props for exact prop shapes.
+Exported TypeScript props are the exact contracts. Dashboard layout and
+loading states are in [Dashboards](./dashboards.md); chart query shapes are in
+[Charts](./charts.md).
 
 ## ReportsPage
 
@@ -58,8 +60,11 @@ import { Route } from "std/ui";
 </ReportsPage>
 ```
 
-`ReportsPage` creates its own outer route at `path`; child routes are relative
-report paths.
+`ReportsPage` creates its own outer route at `path` with a sidebar of links
+(a collapsible toggle on mobile); child `Route`s use the relative report
+paths, and unmatched paths (including `path` itself) redirect to
+`defaultPath`. `sections` may also be
+a flat `{ label, path }[]` list without headers.
 
 ## URL-Synced Filters
 
@@ -89,34 +94,9 @@ report paths.
 Use `default` in `queryParams`. Use `s.refetch()` after mutations that should
 refresh report data.
 
-## Dashboard Composition
-
-```tsx
-<div className="grid grid-cols-12 gap-4">
-  <StatRow
-    className="col-span-12"
-    stats={[
-      { title: "Revenue", value: sql`revenue_total`, formatValue: (v) => sql`format.currency(${v}, 'USD')` },
-      { title: "Orders", value: sql`order_count` },
-    ]}
-  />
-
-  <div className="col-span-12 lg:col-span-6">
-    <BarChart query={sql`select status::text as name, count(*) as count from db.orders group by status`}>
-      <BarChart.XAxis />
-      <BarChart.YAxis />
-      <BarChart.XAxisLabels columnName="name" />
-      <BarChart.Bar columnName="count" fill="#3b82f6" />
-      <BarChart.Tooltip />
-    </BarChart>
-  </div>
-</div>
-```
-
 ## Rules
 
 - Aggregate in SQL; keep UI components focused on display.
 - Use `Data queryParams` for filters users should bookmark or share.
-- Keep charts limited to data users can compare quickly.
-- Prefer `DataTable` for drill-down rows and `StatRow` for headline metrics.
-- Use one report route per distinct question rather than one giant dashboard.
+- Use `DataTable` for drill-down rows and `StatRow` for headline metrics.
+- Give each distinct question its own report route.

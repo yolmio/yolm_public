@@ -622,7 +622,11 @@ export function Select(props: SelectProps) {
           s.setScalar("popover_open", false);
         }
         : (s: DomStatements) => {
-          s.setScalar("popover_open", false);
+          // Closed selects still receive outside clicks. Avoid invalidating
+          // their UI state when there is nothing to dismiss.
+          s.if(sql`popover_open`, (s) => {
+            s.setScalar("popover_open", false);
+          });
         },
       yolmFocusKey: immediateFocus ? sql`0` : sql.null,
     },

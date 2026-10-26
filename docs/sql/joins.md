@@ -146,12 +146,20 @@ select *
 from orders o
 join order_items oi on o.id = oi.order_id and oi.quantity > 0;
 
--- Or with WHERE
+-- Or with where
 select *
 from orders o
 join order_items oi on o.id = oi.order_id
 where oi.quantity > 0;
 ```
+
+For inner joins (and the semi/anti joins planned from `exists` / `not exists`),
+extra `on` conditions next to an equality key run as residual checks inside a
+hash join. For `left`, `right`, and `full outer` joins, keep `on` to the
+equality key: a non-equi condition there makes the planner fall back to a
+correlated join. Prefilter the joined side in a subquery or CTE instead. An
+`on` clause with no equality key gets the same fallback. See
+[Query Authoring Notes](./query_planning.md#pitfall-non-equi-conditions-in-outer-join-on-clauses).
 
 ### USING clause
 
@@ -274,7 +282,7 @@ select
 from employees e
 left join employees m on e.manager_id = m.id;
 
--- Find duplicate entries
+-- Find duplicate entries (inner join: a.id < b.id is a hash-join residual)
 select a.*
 from records a
 join records b on a.email = b.email and a.id < b.id;

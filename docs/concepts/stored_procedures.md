@@ -14,8 +14,13 @@ A stored procedure is a server-side procedure declared with
 endpoints, scheduled jobs, and reactors. Use them to package focused runtime
 logic with typed inputs and outputs.
 
-For small one-off side effects, inline procedures or scheduled jobs are fine.
-Substantial behavior should use focused stored procedures even with one caller.
+Stored procedures are the default home for server logic. Each one compiles
+separately and in parallel, so compiling it is faster than re-expanding the same
+body inline at every call site; it can be tested directly; and reuse is
+explicit. Use one whenever logic is or may be reused, and for substantial
+behavior even with one caller. Keep only a true one-off small glue step inline.
+TypeScript procedure helpers expand inline at every call site: use them to build
+statements at generation time, not to share runtime logic.
 
 ## Keep procedures modular
 

@@ -27,7 +27,9 @@ twilio.sendSms(s, {
 
 ## Configuration
 
-`new Twilio(opts?)` accepts:
+`new Twilio(opts?)` accepts the following options. Each takes the value as a
+SQL expression (for example ``getStaticSecret(sql.lit`NAME`)``), not a secret
+name:
 
 | Option | Type | Default static secret |
 | --- | --- | --- |
@@ -42,7 +44,7 @@ twilio.sendSms(s, {
 | `to` | `Sql` | Yes | Destination phone number. |
 | `body` | `Sql` | Yes | SMS body. |
 | `from` | `Sql` | No | Sender number. Defaults to the configured `fromNumber`. |
-| `optIn` | `BooleanExpr` | No | External-service opt-in guard for environments that require it. |
+| `optIn` | `BooleanExpr` | No | See [External-Service Opt-In](./solution_services.md#external-service-opt-in). |
 
 The helper posts to Twilio's Messages API and throws a procedure error unless
 Twilio returns HTTP `201`.

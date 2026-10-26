@@ -15,12 +15,18 @@ state or a piece of UI that lives **above** the page tree so it can be
 shown from any page — a cross-page snackbar, a global confirmation
 dialog, or a state that survives navigation.
 
-`useGlobalNode(...)` and `useGlobalState(...)` register these once per
-app and return the statements needed to interact with them.
+`useGlobalNode(...)` and `useGlobalState(...)` from `std/system` register these
+once per app. Call them inside a component (they use the current app).
+
+```tsx
+import { useGlobalNode, useGlobalState } from "std/system";
+```
 
 ## Global states
 
-`useGlobalState` is the cross-page equivalent of a local [`Data` / `State`](./data.md) block:
+`useGlobalState` is the cross-page equivalent of a [`Data local`](./data.md#local-state)
+block. It takes the same props as `State` (procedure, watch, and so on) plus a
+`key`:
 
 ```typescript
 useGlobalState({
@@ -31,8 +37,9 @@ useGlobalState({
 });
 ```
 
-Calls are idempotent on `key`. The state is mounted once at the root of
-the app and is available to every page.
+Calls are idempotent on `key`. The state is mounted once at the root of the
+app, above every route, so by the [UI state scope](./overview.md#ui-state-scope)
+rule its scalars are readable and writable (from event handlers) on every page.
 
 ## Global nodes
 
@@ -46,7 +53,7 @@ const snackbar = useGlobalNode({
   autoHideDuration: 3000,
   node: ({ close }) => (
     <Snackbar
-      endDecorator={<button onClick={(s) => close(s)}>Dismiss</button>}
+      endDecorator={<Button variant="plain" onClick={(s) => close(s)}>Dismiss</Button>}
     >
       Saved successfully
     </Snackbar>
@@ -54,10 +61,7 @@ const snackbar = useGlobalNode({
 });
 
 // In a page-level event handler:
-button({
-  on: { click: (s) => s.statements(snackbar.open) },
-  children: "Save",
-});
+<Button onClick={(s) => s.statements(snackbar.open)}>Save</Button>
 ```
 
 The returned helpers are:
@@ -78,7 +82,8 @@ Each unique `key` produces an independent global node.
 - Use **global nodes** when the UI itself must live across pages
   (toasts, system-wide modals).
 
-For per-page transient state, prefer `ui.*` scalars and `State` blocks.
+For per-page transient state, use `Data local` on the nearest common ancestor
+of the UI that reads it.
 
 ## Related
 

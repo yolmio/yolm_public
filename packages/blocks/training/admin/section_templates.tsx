@@ -1,6 +1,6 @@
 import { Alert } from "components/alert";
 import { Button } from "components/button";
-import { Card, CardContent, CardHeader } from "components/card";
+import { Card, CardContent } from "components/card";
 import { Checkbox } from "components/checkbox";
 import { DataTable } from "components/data_table";
 import { FormControl } from "components/form_control";
@@ -15,11 +15,8 @@ import { Data } from "std/data";
 import { sql } from "std/sql_utils";
 import { Each, Show } from "std/ui";
 import type { TrainingBlock } from "../index.tsx";
-import {
-  adminCoursesHref,
-  adminSelectClass,
-  TrainingAdminFrame,
-} from "./shared";
+import { BackLink, PageShell } from "../shared";
+import { adminCoursesHref, adminSelectClass } from "./shared";
 
 export function TrainingAdminSectionTemplatesPage(
   props: { block: TrainingBlock },
@@ -43,8 +40,6 @@ export function TrainingAdminSectionTemplatesPage(
         s.defScalar("section_item_content", sql.lit``);
         s.defScalar("section_item_training_course_id", sql.lit``);
         s.defScalar("section_item_training_assessment_id", sql.lit``);
-        s.defScalar("section_item_external_title", sql.lit``);
-        s.defScalar("section_item_external_url", sql.lit``);
         s.defScalar("section_item_support_document_id", sql.lit``);
         s.defScalar("section_item_requires_essay", sql`false`);
         s.defScalar("section_item_essay_prompt", sql.lit``);
@@ -52,9 +47,15 @@ export function TrainingAdminSectionTemplatesPage(
         s.defScalar("new_section_description", sql.lit``);
         s.defTable(
           "section_document_options",
-          sql`select d.id, d.title
+          sql`select d.id, d.title || ' · ' || d.source_name as title
               from db.training_content_documents d
               where d.is_active
+                and ${
+            props.block.opts.content.canReadDocument(
+              sql`d.id`,
+              sql`current_user`,
+            )
+          }
                 and exists (
                   select 1
                   from db.training_content_language_variants active
@@ -90,39 +91,26 @@ export function TrainingAdminSectionTemplatesPage(
         );
       }}
     >
-      <TrainingAdminFrame>
+      <PageShell
+        back={
+          <BackLink
+            href={adminCoursesHref(props.block)}
+            label="Back to courses & programs"
+          />
+        }
+        title="Stored sections"
+        subtitle="Reusable section designs used when building course and program versions."
+        actions={
+          <Button
+            startIcon="Add"
+            onClick={(s) => s.setScalar("add_section_open", sql`true`)}
+          >
+            New section
+          </Button>
+        }
+      >
         <div className="flex flex-col gap-5">
-          <div>
-            <Button
-              component="a"
-              href={adminCoursesHref(props.block)}
-              variant="plain"
-              color="neutral"
-              startIcon="ArrowBack"
-            >
-              Back to courses & programs
-            </Button>
-          </div>
           <Card variant="outlined">
-            <CardHeader>
-              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-                <div>
-                  <Typography level="title-lg" startIcon="ViewAgenda">
-                    Stored Sections
-                  </Typography>
-                  <Typography level="body-sm" className="text-neutral-600">
-                    Reusable section designs used when building course and
-                    program versions.
-                  </Typography>
-                </div>
-                <IconButton
-                  icon="Add"
-                  aria-label="Add stored section"
-                  tooltip="Add stored section"
-                  onClick={(s) => s.setScalar("add_section_open", sql`true`)}
-                />
-              </div>
-            </CardHeader>
             <CardContent>
               <Show when={sql`section_template_error is not null`}>
                 <Alert color="danger" startIcon="Error" className="mb-4">
@@ -320,8 +308,6 @@ export function TrainingAdminSectionTemplatesPage(
                     "section_item_training_assessment_id",
                     sql.lit``,
                   );
-                  s.setScalar("section_item_external_title", sql.lit``);
-                  s.setScalar("section_item_external_url", sql.lit``);
                   s.setScalar("section_item_requires_essay", sql`false`);
                   s.setScalar("section_item_essay_prompt", sql.lit``);
                   s.setScalar("add_section_item_open", sql`true`);
@@ -399,14 +385,6 @@ export function TrainingAdminSectionTemplatesPage(
                   s.setScalar(
                     "section_item_training_assessment_id",
                     sql`coalesce(section_item.training_assessment_id::string, '')`,
-                  );
-                  s.setScalar(
-                    "section_item_external_title",
-                    sql`coalesce(section_item.external_title, '')`,
-                  );
-                  s.setScalar(
-                    "section_item_external_url",
-                    sql`coalesce(section_item.external_url, '')`,
                   );
                   s.setScalar(
                     "section_item_requires_essay",
@@ -530,8 +508,6 @@ export function TrainingAdminSectionTemplatesPage(
                       "section_item_training_assessment_id",
                       sql.lit``,
                     );
-                    s.setScalar("section_item_external_title", sql.lit``);
-                    s.setScalar("section_item_external_url", sql.lit``);
                     s.if(sql`target_value = 'signature'`, (s) => {
                       s.setScalar(
                         "section_item_support_document_id",
@@ -543,15 +519,18 @@ export function TrainingAdminSectionTemplatesPage(
                   <Select.Option value="other_checklist">
                     Nested course
                   </Select.Option>
-                  <Select.Option value="external_link">
-                    External link
-                  </Select.Option>
                   <Select.Option value="essay">Essay</Select.Option>
                   <Select.Option value="signature">Signature</Select.Option>
                   <Select.Option value="practical">Practical</Select.Option>
                   <Select.Option value="assessment">Assessment</Select.Option>
                 </Select>
               </FormControl>
+              <Show when={sql`section_item_type = 'external_link'`}>
+                <Alert color="warning">
+                  External links are no longer supported. Choose a step type and
+                  attach a file from Company files before saving.
+                </Alert>
+              </Show>
               <FormControl>
                 <FormLabel>Item text</FormLabel>
                 <Input
@@ -602,22 +581,6 @@ export function TrainingAdminSectionTemplatesPage(
                       </Select.Option>
                     </Each>
                   </Select>
-                </FormControl>
-              </Show>
-              <Show when={sql`section_item_type = 'external_link'`}>
-                <FormControl>
-                  <FormLabel>Link URL</FormLabel>
-                  <Input
-                    bindScalar="section_item_external_url"
-                    placeholder="https://..."
-                  />
-                </FormControl>
-                <FormControl>
-                  <FormLabel>Link title</FormLabel>
-                  <Input
-                    bindScalar="section_item_external_title"
-                    placeholder="Shown to the trainee"
-                  />
                 </FormControl>
               </Show>
               <Show when={sql`section_item_type = 'essay'`}>
@@ -688,10 +651,7 @@ export function TrainingAdminSectionTemplatesPage(
                           section_item_type = 'assessment'
                           and nullif(section_item_training_assessment_id, '') is null
                         )
-                        or (
-                          section_item_type = 'external_link'
-                          and nullif(trim(section_item_external_url), '') is null
-                        )`,
+                        or section_item_type = 'external_link'`,
                       (s) => {
                         s.setScalar(
                           "section_template_error",
@@ -704,6 +664,11 @@ export function TrainingAdminSectionTemplatesPage(
                     s.tryServer({
                       body: (s) => {
                         s.startTransaction();
+                        s.throwErrorIf(
+                          sql`section_item_type = 'external_link'`,
+                          sql
+                            .lit`External links are no longer supported. Attach a Company file instead.`,
+                        );
                         s.if(
                           sql`section_item_mode = 'edit'`,
                           (s) => {
@@ -721,16 +686,8 @@ export function TrainingAdminSectionTemplatesPage(
                                     then section_item_training_assessment_id::bigint
                                     else null
                                   end,
-                                  external_url = case
-                                    when section_item_type = 'external_link'
-                                    then trim(section_item_external_url)
-                                    else null
-                                  end,
-                                  external_title = case
-                                    when section_item_type = 'external_link'
-                                    then trim(section_item_external_title)
-                                    else null
-                                  end,
+                                  external_url = null,
+                                  external_title = null,
                                   requires_essay = section_item_requires_essay,
                                   essay_prompt = case
                                     when section_item_type = 'essay'
@@ -749,7 +706,6 @@ export function TrainingAdminSectionTemplatesPage(
                                 (training_course_section_template_id, content,
                                  sort_order, type,
                                  training_course_id, training_assessment_id,
-                                 external_url, external_title,
                                  requires_essay, essay_prompt)
                               values
                                 (section_item_template_id::bigint,
@@ -769,16 +725,6 @@ export function TrainingAdminSectionTemplatesPage(
                                  case
                                    when section_item_type = 'assessment'
                                    then section_item_training_assessment_id::bigint
-                                   else null
-                                 end,
-                                 case
-                                   when section_item_type = 'external_link'
-                                   then trim(section_item_external_url)
-                                   else null
-                                 end,
-                                 case
-                                   when section_item_type = 'external_link'
-                                   then trim(section_item_external_title)
                                    else null
                                  end,
                                  section_item_requires_essay,
@@ -829,6 +775,12 @@ export function TrainingAdminSectionTemplatesPage(
                                      title
                               from db.training_content_documents
                               where id = section_item_support_document_id::bigint
+                                and ${
+                              props.block.opts.content.canReadDocument(
+                                sql`section_item_support_document_id::bigint`,
+                                sql`current_user`,
+                              )
+                            }
                                 and not exists (
                                   select 1
                                   from db.training_course_section_template_item_documents existing
@@ -857,8 +809,6 @@ export function TrainingAdminSectionTemplatesPage(
                           "section_item_training_assessment_id",
                           sql.lit``,
                         );
-                        s.setScalar("section_item_external_title", sql.lit``);
-                        s.setScalar("section_item_external_url", sql.lit``);
                         s.setScalar(
                           "section_item_support_document_id",
                           sql.lit``,
@@ -882,7 +832,7 @@ export function TrainingAdminSectionTemplatesPage(
             </div>
           </ModalDialog>
         </div>
-      </TrainingAdminFrame>
+      </PageShell>
     </Data>
   );
 }

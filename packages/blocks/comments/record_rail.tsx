@@ -36,16 +36,14 @@ export function CommentRecordRail(props: {
             <Tabs.Tab
               value="details"
               className="h-11 text-sm"
-              onClick={(s) =>
-                s.setQueryParam("discussion", sql.lit`details`, sql`true`)}
+              onClick={(s) => s.setQueryParam("discussion", sql.lit`details`)}
             >
               {props.detailsTitle ?? "Details"}
             </Tabs.Tab>
             <Tabs.Tab
               value="comments"
               className="h-11 text-sm"
-              onClick={(s) =>
-                s.setQueryParam("discussion", sql.lit`comments`, sql`true`)}
+              onClick={(s) => s.setQueryParam("discussion", sql.lit`comments`)}
             >
               Comments
             </Tabs.Tab>

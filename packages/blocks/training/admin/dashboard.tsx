@@ -17,12 +17,8 @@ import {
   trainingFeatureEnabled,
   trainingPermissions,
 } from "../helpers";
-import { EmptyState } from "../shared";
-import {
-  adminEmployeeHref,
-  adminPeopleHref,
-  TrainingAdminFrame,
-} from "./shared";
+import { EmptyState, PageShell } from "../shared";
+import { adminEmployeeHref, adminPeopleHref } from "./shared";
 
 function KpiCard(props: {
   href: string;
@@ -126,6 +122,11 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
           "attention_people",
           sql`select e.id,
                 ${employeeName(block.opts, sql`e`)} as name,
+                (select count(*) from db.training_assignments a
+                  where a.person_id = e.id and a.training_course_id is not null
+                    and a.status = 'in_progress'
+                    and not exists (select 1 from db.training_employee_tasks t
+                      where t.training_assignment_id = a.id and t.status in ('assigned', 'in_progress'))) as pending_submission,
                 person_status.open_task_count as open_tasks,
                 person_status.overdue_task_count as overdue_tasks,
                 person_status.pending_validation_count as pending_validation
@@ -135,6 +136,11 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
               where dashboard_can_view_people
                 and (
                   person_status.open_task_count > 0
+                  or (select count(*) from db.training_assignments a
+                  where a.person_id = e.id and a.training_course_id is not null
+                    and a.status = 'in_progress'
+                    and not exists (select 1 from db.training_employee_tasks t
+                      where t.training_assignment_id = a.id and t.status in ('assigned', 'in_progress'))) > 0
                   or person_status.pending_validation_count > 0
                 )
               order by overdue_tasks desc, open_tasks desc, name
@@ -142,24 +148,19 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
         );
       }}
     >
-      <TrainingAdminFrame>
-        <div className="flex flex-col gap-1">
-          <Typography level="h3" className="tracking-normal">
-            Training Overview
-          </Typography>
-          <Typography level="body-md" className="text-neutral-600">
-            {sql`case
-              when dashboard_can_view_people
-                then 'Completion, overdue work, and validation across all people. Click a number to drill in.'
-              else 'Use the navigation to manage the training content available to you.'
-            end`}
-          </Typography>
-        </div>
+      <PageShell
+        title="Training overview"
+        subtitle={sql`case
+          when dashboard_can_view_people
+            then 'Completion, overdue work, and validation across all people. Select a number to see who it covers.'
+          else 'Use the navigation to manage the training content available to you.'
+        end`}
+      >
         <Show when={sql`dashboard_can_view_people`}>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             <KpiCard
               href={adminPeopleHref(props.block)}
-              icon="Insights"
+              icon="TrendingUp"
               label="Completion rate"
               value={sql`(dashboard_stats.completed_tasks * 100 /
               greatest(dashboard_stats.completed_tasks + dashboard_stats.open_tasks, 1))::string || '%'`}
@@ -174,7 +175,7 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
             />
             <KpiCard
               href={adminPeopleHref(props.block)}
-              icon="Schedule"
+              icon="Event"
               label="Due in 30 days"
               value={sql`dashboard_stats.due_soon_tasks::string`}
               tone="bg-amber-50 text-amber-700"
@@ -260,11 +261,11 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
               </div>
             </Show>
           </div>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div>
             <Card variant="outlined">
               <CardHeader>
                 <div className="flex items-center justify-between gap-3 w-full">
-                  <Typography level="title-lg" startIcon="PersonSearch">
+                  <Typography level="title-lg" startIcon="Group">
                     Needs attention
                   </Typography>
                   <Button
@@ -290,11 +291,11 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
                     />
                   }
                 >
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col -mx-2">
                     <Each table="attention_people" recordName="person">
                       <a
                         href={adminEmployeeHref(props.block, sql`person.id`)}
-                        className="flex items-center justify-between gap-3 p-3 border border-divider rounded-md bg-white hover:bg-neutral-50 hover:border-neutral-300 transition-colors"
+                        className="flex items-center justify-between gap-3 px-2 py-2.5 rounded-md border-b border-divider last:border-b-0 hover:bg-neutral-50 transition-colors"
                       >
                         <Typography level="title-sm" className="min-w-0">
                           {sql`person.name`}
@@ -315,6 +316,11 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
                             color="primary"
                             label={sql`person.pending_validation::string || ' to validate'`}
                           />
+                          <AttentionCountChip
+                            when={sql`person.pending_submission > 0`}
+                            color="warning"
+                            label={sql`person.pending_submission::string || ' to submit'`}
+                          />
                           <MaterialIcon
                             icon="ChevronRight"
                             className="text-neutral-400"
@@ -328,7 +334,7 @@ export function TrainingAdminDashboardPage(props: { block: TrainingBlock }) {
             </Card>
           </div>
         </Show>
-      </TrainingAdminFrame>
+      </PageShell>
     </Data>
   );
 }

@@ -1,3 +1,11 @@
+import {
+  translationApprovedSql,
+  translationReviewLockedSql,
+} from "../translation_reviews";
+import {
+  TrainingLanguageControls,
+  TrainingLanguageSwitch,
+} from "./language_controls";
 import { Alert } from "components/alert";
 import { Button } from "components/button";
 import { Card, CardContent, CardHeader } from "components/card";
@@ -19,14 +27,14 @@ import type { UiServerStatements } from "std/statements";
 import { Each, Show } from "std/ui";
 import { assessmentVersionPublishIssuesSql } from "../assessment_helpers";
 import {
-  currentEmployeeId,
+  activeAssessmentVersionSql,
   employeeName,
   formatDateTimeSql,
   trainingPermissions,
   versionStatusChip,
 } from "../helpers";
 import type { TrainingBlock } from "../index.tsx";
-import { EmptyState } from "../shared";
+import { BackLink, EmptyState } from "../shared";
 import {
   assessmentExecutionModeLabelSql,
   assessmentKindChip,
@@ -43,21 +51,18 @@ function draftAssessmentVersionSql(assessmentId: Sql) {
     select v.id
     from db.training_assessment_versions v
     where v.training_assessment_id = ${assessmentId}
-      and v.status = 'draft'
+      and v.status = 'draft' and v.language = ui.editor_language
     order by v.id desc
     limit 1
   )`;
 }
 
 function publishedAssessmentVersionSql(assessmentId: Sql) {
-  return sql`(
-    select v.id
-    from db.training_assessments assessment
-    join db.training_assessment_versions v
-      on v.id = assessment.current_training_assessment_version_id
-    where assessment.id = ${assessmentId}
-      and v.status = 'published'
-  )`;
+  return activeAssessmentVersionSql(
+    assessmentId,
+    sql`ui.editor_language`,
+    true,
+  );
 }
 
 function editorAssessmentVersionSql(assessmentId: Sql) {
@@ -78,8 +83,12 @@ function ensureAssessmentDraftVersion(
   s: UiServerStatements,
   args: { block: TrainingBlock; assessmentId: Sql },
 ) {
-  s.callStoredProcedure("training_ensure_assessment_draft", {
-    inputScalars: { p_assessment_id: args.assessmentId },
+  s.callStoredProcedure("training_ensure_assessment_draft_language", {
+    inputScalars: {
+      p_assessment_id: args.assessmentId,
+      p_language: sql`ui.editor_language`,
+      p_source_version: sql`null`,
+    },
     outputScalars: {
       draft_assessment_version_id: "draft_assessment_version_id",
     },
@@ -165,98 +174,111 @@ export function TrainingAdminAssessmentPage(
   const permissions = trainingPermissions;
   return (
     <Data
-      local
-      procedure={(s) => {
-        s.defScalar("assessment_edit_error", {
-          type: { type: "String", maxLength: 1000 },
-        });
-        s.defScalar("assessment_settings_open", sql`false`);
-        s.defScalar("settings_name", sql.lit``);
-        s.defScalar("settings_description", sql.lit``);
-        s.defScalar("settings_kind", sql.lit`test`);
-        s.defScalar("settings_execution_mode", sql.lit`employee_attempt`);
-        s.defScalar("settings_is_active", sql`true`);
-        s.defScalar("policy_open", sql`false`);
-        s.defScalar("policy_passing_score_percent", sql.lit`100`);
-        s.defScalar("policy_max_attempts", sql.lit``);
-        s.defScalar("policy_cooldown_minutes", sql.lit``);
-        s.defScalar("policy_allow_retake_after_pass", sql`false`);
-        s.defScalar("policy_score_adjustment_allowed", sql`false`);
-        s.defScalar("policy_outcome_override_allowed", sql`false`);
-        s.defScalar("policy_show_correct_answers", sql`false`);
-        s.defScalar("policy_show_failed_attempts", sql`true`);
-        s.defScalar("metadata_modal_open", sql`false`);
-        s.defScalar("metadata_mode", sql.lit`add`);
-        s.defScalar("metadata_id", sql.lit``);
-        s.defScalar("metadata_name", sql.lit``);
-        s.defScalar("metadata_label", sql.lit``);
-        s.defScalar("metadata_type", sql.lit`text`);
-        s.defScalar("metadata_required", sql`false`);
-        s.defScalar("metadata_help_text", sql.lit``);
-        s.defScalar("add_assessment_section_name", sql.lit``);
-        s.defScalar("add_assessment_section_description", sql.lit``);
-        s.defScalar("item_modal_open", sql`false`);
-        s.defScalar("item_mode", sql.lit`add`);
-        s.defScalar("item_id", sql.lit``);
-        s.defScalar("item_section_id", sql.lit``);
-        s.defScalar("item_type", sql.lit`multiple_choice`);
-        s.defScalar("item_prompt", sql.lit``);
-        s.defScalar("item_help_text", sql.lit``);
-        s.defScalar("item_points", sql.lit`1`);
-        s.defScalar("item_include_in_score", sql`true`);
-        s.defScalar("item_is_required", sql`true`);
-        s.defScalar("item_requires_review", sql`false`);
-        s.defScalar("item_selection_mode", sql.lit`single`);
-        s.defScalar("item_scoring_mode", sql.lit`all_or_nothing`);
-        s.defScalar("item_shuffle_choices", sql`false`);
-        s.defScalar("item_explanation", sql.lit``);
-        s.defScalar("item_remediation_text", sql.lit``);
-        s.defScalar("item_practical_result_required", sql`true`);
-        s.defScalar("item_fail_result_fails_attempt", sql`false`);
-        s.defScalar("item_not_observed_fails_attempt", sql`false`);
-        s.defScalar("item_not_applicable_allowed", sql`false`);
-        s.defScalar("item_reviewer_signature_required", sql`false`);
-        s.defTable("metadata_choice_drafts", {
-          fields: [
-            { name: "id", type: "BigInt", notNull: true },
-            {
-              name: "label",
-              type: { type: "String", maxLength: 255 },
-              notNull: true,
-            },
-            {
-              name: "value",
-              type: { type: "String", maxLength: 255 },
-              notNull: true,
-            },
-          ],
-        });
-        s.defScalar("metadata_choice_label", sql.lit``);
-        s.defScalar("metadata_choice_value", sql.lit``);
-        s.defTable("item_choice_drafts", {
-          fields: [
-            { name: "id", type: "BigInt", notNull: true },
-            {
-              name: "content",
-              type: { type: "String", maxLength: 1000 },
-              notNull: true,
-            },
-            { name: "is_correct", type: "Bool", notNull: true },
-          ],
-        });
-        s.defScalar("choice_content", sql.lit``);
-        s.defScalar(
-          "can_publish_assessments",
-          currentUserHasPermission(sql.lit(permissions.publishAssessments)),
-        );
+      queryParams={{
+        content_language: {
+          default: sql.lit(props.block.opts.content.opts.defaultLanguage),
+          type: "String",
+        },
       }}
     >
-      <TrainingAdminFrame>
-        <AssessmentEditorWorkspace
-          block={props.block}
-          assessmentId={sql`assessment_id`}
-        />
-      </TrainingAdminFrame>
+      <Data
+        local
+        watch={[sql`content_language`]}
+        hoistKey={sql`content_language`}
+        procedure={(s) => {
+          s.defScalar("editor_language", sql`content_language`);
+          s.defScalar("language_details_open", false);
+          s.defScalar("assessment_edit_error", {
+            type: { type: "String", maxLength: 1000 },
+          });
+          s.defScalar("assessment_settings_open", sql`false`);
+          s.defScalar("settings_name", sql.lit``);
+          s.defScalar("settings_description", sql.lit``);
+          s.defScalar("settings_kind", sql.lit`test`);
+          s.defScalar("settings_execution_mode", sql.lit`employee_attempt`);
+          s.defScalar("settings_is_active", sql`true`);
+          s.defScalar("policy_open", sql`false`);
+          s.defScalar("policy_passing_score_percent", sql.lit`100`);
+          s.defScalar("policy_max_attempts", sql.lit``);
+          s.defScalar("policy_cooldown_minutes", sql.lit``);
+          s.defScalar("policy_allow_retake_after_pass", sql`false`);
+          s.defScalar("policy_score_adjustment_allowed", sql`false`);
+          s.defScalar("policy_outcome_override_allowed", sql`false`);
+          s.defScalar("policy_show_correct_answers", sql`false`);
+          s.defScalar("policy_show_failed_attempts", sql`true`);
+          s.defScalar("metadata_modal_open", sql`false`);
+          s.defScalar("metadata_mode", sql.lit`add`);
+          s.defScalar("metadata_id", sql.lit``);
+          s.defScalar("metadata_name", sql.lit``);
+          s.defScalar("metadata_label", sql.lit``);
+          s.defScalar("metadata_type", sql.lit`text`);
+          s.defScalar("metadata_required", sql`false`);
+          s.defScalar("metadata_help_text", sql.lit``);
+          s.defScalar("add_assessment_section_name", sql.lit``);
+          s.defScalar("add_assessment_section_description", sql.lit``);
+          s.defScalar("item_modal_open", sql`false`);
+          s.defScalar("item_mode", sql.lit`add`);
+          s.defScalar("item_id", sql.lit``);
+          s.defScalar("item_section_id", sql.lit``);
+          s.defScalar("item_type", sql.lit`multiple_choice`);
+          s.defScalar("item_prompt", sql.lit``);
+          s.defScalar("item_help_text", sql.lit``);
+          s.defScalar("item_points", sql.lit`1`);
+          s.defScalar("item_include_in_score", sql`true`);
+          s.defScalar("item_is_required", sql`true`);
+          s.defScalar("item_requires_review", sql`false`);
+          s.defScalar("item_selection_mode", sql.lit`single`);
+          s.defScalar("item_scoring_mode", sql.lit`all_or_nothing`);
+          s.defScalar("item_shuffle_choices", sql`false`);
+          s.defScalar("item_explanation", sql.lit``);
+          s.defScalar("item_remediation_text", sql.lit``);
+          s.defScalar("item_practical_result_required", sql`true`);
+          s.defScalar("item_fail_result_fails_attempt", sql`false`);
+          s.defScalar("item_not_observed_fails_attempt", sql`false`);
+          s.defScalar("item_not_applicable_allowed", sql`false`);
+          s.defScalar("item_reviewer_signature_required", sql`false`);
+          s.defTable("metadata_choice_drafts", {
+            fields: [
+              { name: "id", type: "BigInt", notNull: true },
+              {
+                name: "label",
+                type: { type: "String", maxLength: 255 },
+                notNull: true,
+              },
+              {
+                name: "value",
+                type: { type: "String", maxLength: 255 },
+                notNull: true,
+              },
+            ],
+          });
+          s.defScalar("metadata_choice_label", sql.lit``);
+          s.defScalar("metadata_choice_value", sql.lit``);
+          s.defTable("item_choice_drafts", {
+            fields: [
+              { name: "id", type: "BigInt", notNull: true },
+              {
+                name: "content",
+                type: { type: "String", maxLength: 1000 },
+                notNull: true,
+              },
+              { name: "is_correct", type: "Bool", notNull: true },
+            ],
+          });
+          s.defScalar("choice_content", sql.lit``);
+          s.defScalar(
+            "can_publish_assessments",
+            currentUserHasPermission(sql.lit(permissions.publishAssessments)),
+          );
+        }}
+      >
+        <TrainingAdminFrame>
+          <AssessmentEditorWorkspace
+            block={props.block}
+            assessmentId={sql`assessment_id`}
+          />
+        </TrainingAdminFrame>
+      </Data>
     </Data>
   );
 }
@@ -265,27 +287,30 @@ function AssessmentEditorWorkspace(
   props: { block: TrainingBlock; assessmentId: Sql },
 ) {
   const assessmentId = props.assessmentId;
-  const opts = props.block.opts;
   return (
     <div className="flex flex-col gap-5">
-      <div>
-        <Button
-          component="a"
-          href={adminAssessmentsHref(props.block)}
-          variant="plain"
-          color="neutral"
-          startIcon="ArrowBack"
-        >
-          Back to assessments
-        </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="-ml-2">
+          <BackLink
+            href={adminAssessmentsHref(props.block)}
+            label="Back to assessments"
+          />
+        </div>
+        <TrainingLanguageSwitch block={props.block} />
       </div>
       <Data
         hoistKey={sql`assessment_id`}
-        watch={[sql`assessment_id`]}
+        watch={[sql`assessment_id`, sql`ui.editor_language`]}
         procedure={(s) => {
           s.defRecord(
             "selected_assessment",
-            sql`select assessment.id, assessment.name, assessment.description,
+            sql`select assessment.id, coalesce((select localized_name from db.training_assessment_versions where id = ${
+              editorAssessmentVersionSql(assessmentId)
+            }), assessment.name) as name, case when (select localized_name from db.training_assessment_versions where id = ${
+              editorAssessmentVersionSql(assessmentId)
+            }) is null then assessment.description else (select localized_description from db.training_assessment_versions where id = ${
+              editorAssessmentVersionSql(assessmentId)
+            }) end as description,
                        assessment.kind, assessment.execution_mode,
                        assessment.is_active,
                        ${
@@ -294,6 +319,9 @@ function AssessmentEditorWorkspace(
                        ${
               publishedAssessmentVersionSql(assessmentId)
             } as published_version_id,
+                       ${
+              activeAssessmentVersionSql(assessmentId, sql`ui.editor_language`)
+            } as available_published_version_id,
                        ${
               editorAssessmentVersionSql(assessmentId)
             } as editor_version_id
@@ -310,6 +338,20 @@ function AssessmentEditorWorkspace(
                        v.show_failed_attempts_to_employee
                 from db.training_assessment_versions v
                 where v.id = selected_assessment.editor_version_id`,
+          );
+          s.defScalar(
+            "translation_edit_locked",
+            translationReviewLockedSql(
+              "assessment",
+              sql`selected_assessment.editor_version_id`,
+            ),
+          );
+          s.defScalar(
+            "translation_is_approved",
+            translationApprovedSql(
+              "assessment",
+              sql`selected_assessment.draft_version_id`,
+            ),
           );
           s.defTable(
             "assessment_sections",
@@ -414,12 +456,24 @@ function AssessmentEditorWorkspace(
       >
         <Show when={sql`selected_assessment.id is null`}>
           <EmptyState
-            icon="Quiz"
+            icon="Grading"
             title="Assessment not found"
             body="The assessment may have been removed."
           />
         </Show>
         <Show when={sql`selected_assessment.id is not null`}>
+          <TrainingLanguageControls
+            block={props.block}
+            kind="assessment"
+            recordId={assessmentId}
+            versionId={sql`selected_assessment.editor_version_id`}
+          />
+        </Show>
+        <Show
+          when={sql`selected_assessment.id is not null and (selected_assessment.editor_version_id is not null or ui.editor_language = ${
+            sql.lit(props.block.opts.content.opts.defaultLanguage)
+          })`}
+        >
           <Show when={sql`assessment_edit_error is not null`}>
             <Alert color="danger" startIcon="Error">
               {sql`assessment_edit_error`}
@@ -430,9 +484,20 @@ function AssessmentEditorWorkspace(
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Typography level="title-lg" startIcon="Quiz">
+                    <Typography level="h4" className="text-balance">
                       {sql`selected_assessment.name`}
                     </Typography>
+                    <IconButton
+                      icon="Edit"
+                      size="sm"
+                      variant="plain"
+                      color="neutral"
+                      disabled={sql`translation_edit_locked`}
+                      aria-label="Edit title and description"
+                      tooltip="Edit title and description"
+                      onClick={(s) =>
+                        s.setScalar("language_details_open", sql`true`)}
+                    />
                     {assessmentKindChip(sql`selected_assessment.kind`)}
                     <Chip size="sm" variant="soft" color="neutral">
                       {assessmentExecutionModeLabelSql(
@@ -455,6 +520,7 @@ function AssessmentEditorWorkspace(
                   <Button
                     variant="outlined"
                     color="neutral"
+                    disabled={sql`translation_edit_locked`}
                     startIcon="Tune"
                     onClick={(s) => {
                       s.setScalar(
@@ -485,6 +551,7 @@ function AssessmentEditorWorkspace(
                   <Button
                     variant="outlined"
                     color="neutral"
+                    disabled={sql`translation_edit_locked`}
                     startIcon="Rule"
                     onClick={(s) => {
                       s.setScalar(
@@ -529,6 +596,9 @@ function AssessmentEditorWorkspace(
                       and selected_assessment.draft_version_id is not null`}
                   >
                     <Button
+                      disabled={sql`ui.editor_language != ${
+                        sql.lit(props.block.opts.content.opts.defaultLanguage)
+                      } and not translation_is_approved`}
                       startIcon="Publish"
                       onClick={(s) => {
                         s.setScalar("assessment_edit_error", sql`null`);
@@ -545,82 +615,24 @@ function AssessmentEditorWorkspace(
                         );
                         s.tryServer({
                           body: (s) => {
-                            s.throwErrorUnless(
-                              currentUserHasPermission(
-                                sql.lit(
-                                  trainingPermissions
-                                    .publishAssessments,
-                                ),
-                              ),
-                              sql
-                                .lit`You do not have permission to publish assessments.`,
-                            );
-                            s.defScalar(
-                              "publish_version_id",
-                              sql`selected_assessment.draft_version_id`,
-                            );
-                            s.defScalar(
-                              "publish_version_label",
-                              sql`'Rev ' || ((
-                                select count(*)
-                                from db.training_assessment_versions v
-                                where v.training_assessment_id =
-                                  selected_assessment.id
-                                  and v.status != 'draft'
-                              ) + 1)::string`,
-                            );
                             s.startTransaction();
-                            s.setScalar(
-                              "publish_version_id",
-                              draftAssessmentVersionSql(
-                                sql`selected_assessment.id`,
-                              ),
+                            s.callStoredProcedure(
+                              "training_publish_assessment_draft_language",
+                              {
+                                inputScalars: {
+                                  p_assessment_id: sql`selected_assessment.id`,
+                                  p_language: sql`ui.editor_language`,
+                                },
+                              },
                             );
-                            s.throwErrorIf(
-                              sql`publish_version_id is null`,
-                              sql
-                                .lit`The draft assessment version no longer exists.`,
-                            );
-                            s.throwErrorIf(
-                              sql`exists (${
-                                assessmentVersionPublishIssuesSql(
-                                  sql`publish_version_id`,
-                                )
-                              })`,
-                              sql
-                                .lit`Resolve the assessment publication blockers before publishing.`,
-                            );
-                            s.modify(sql`
-                              update db.training_assessment_versions
-                              set status = 'archived',
-                                  archived_at = coalesce(archived_at, now())
-                              where training_assessment_id =
-                                selected_assessment.id
-                                and status = 'published'
-                            `);
-                            s.modify(sql`
-                              update db.training_assessment_versions
-                              set status = 'published',
-                                  version_label = publish_version_label,
-                                  published_by_id = ${currentEmployeeId(opts)},
-                                  published_at = now()
-                              where id = publish_version_id
-                                and status = 'draft'
-                            `);
-                            s.modify(sql`
-                              update db.training_assessments
-                              set current_training_assessment_version_id =
-                                    publish_version_id
-                              where id = selected_assessment.id
-                            `);
                             s.commitTransaction();
                             s.refetch();
                           },
+                          errorName: "publish_failure",
                           catch: (s) => {
                             s.setScalar(
                               "assessment_edit_error",
-                              sql
-                                .lit`The assessment version could not be published.`,
+                              sql`coalesce(publish_failure.message, 'The assessment version could not be published.')`,
                             );
                           },
                         });
@@ -630,75 +642,42 @@ function AssessmentEditorWorkspace(
                     </Button>
                   </Show>
                   <Show
-                    when={sql`selected_assessment.draft_version_id is not null
-                      and selected_assessment.published_version_id is not null`}
+                    when={sql`selected_assessment.draft_version_id is not null`}
                   >
                     <Button
                       variant="outlined"
                       color="danger"
+                      disabled={sql`translation_edit_locked`}
                       startIcon="Delete"
                       onClick={(s) => {
                         s.setScalar("assessment_edit_error", sql`null`);
                         s.tryServer({
                           body: (s) => {
                             s.startTransaction();
-                            s.modify(sql`
-                              delete from db.training_assessment_metadata_field_choices
-                              where training_assessment_metadata_field_id in (
-                                select field.id
-                                from db.training_assessment_metadata_fields field
-                                where field.training_assessment_version_id =
-                                  selected_assessment.draft_version_id
-                              )
-                            `);
-                            s.modify(sql`
-                              delete from db.training_assessment_metadata_fields
-                              where training_assessment_version_id =
-                                selected_assessment.draft_version_id
-                            `);
-                            s.modify(sql`
-                              delete from db.training_assessment_item_choices
-                              where training_assessment_item_id in (
-                                select item.id
-                                from db.training_assessment_items item
-                                join db.training_assessment_sections section
-                                  on section.id = item.training_assessment_section_id
-                                where section.training_assessment_version_id =
-                                  selected_assessment.draft_version_id
-                              )
-                            `);
-                            s.modify(sql`
-                              delete from db.training_assessment_items
-                              where training_assessment_section_id in (
-                                select section.id
-                                from db.training_assessment_sections section
-                                where section.training_assessment_version_id =
-                                  selected_assessment.draft_version_id
-                              )
-                            `);
-                            s.modify(sql`
-                              delete from db.training_assessment_sections
-                              where training_assessment_version_id =
-                                selected_assessment.draft_version_id
-                            `);
-                            s.modify(sql`
-                              delete from db.training_assessment_versions
-                              where id = selected_assessment.draft_version_id
-                                and status = 'draft'
-                            `);
+                            s.callStoredProcedure(
+                              "training_discard_assessment_draft",
+                              {
+                                inputScalars: {
+                                  p_assessment_id: sql`selected_assessment.id`,
+                                  p_version_id:
+                                    sql`selected_assessment.draft_version_id`,
+                                  p_language: sql`ui.editor_language`,
+                                },
+                              },
+                            );
                             s.commitTransaction();
                             s.refetch();
                           },
                           catch: (s) => {
                             s.setScalar(
                               "assessment_edit_error",
-                              sql.lit`The draft could not be discarded.`,
+                              sql.lit`The changes could not be discarded.`,
                             );
                           },
                         });
                       }}
                     >
-                      Discard draft
+                      Discard changes
                     </Button>
                   </Show>
                 </div>
@@ -709,8 +688,19 @@ function AssessmentEditorWorkspace(
                 when={sql`selected_assessment.published_version_id is null`}
               >
                 <Alert color="warning" startIcon="Info" className="mb-3">
-                  This assessment has no published version yet. Courses cannot
-                  be assigned with it until you publish.
+                  <Show
+                    when={sql`selected_assessment.available_published_version_id is not null`}
+                  >
+                    This language has no published translation yet. Learners use
+                    the published default-language assessment until you publish
+                    it.
+                  </Show>
+                  <Show
+                    when={sql`selected_assessment.available_published_version_id is null`}
+                  >
+                    This assessment has no published version yet. Courses cannot
+                    be assigned with it until you publish.
+                  </Show>
                 </Alert>
               </Show>
               <Show
@@ -733,15 +723,19 @@ function AssessmentEditorWorkspace(
                 </Alert>
               </Show>
               <Typography level="body-sm" className="text-neutral-600">
-                {sql`'Editing ' || editor_version.version_label ||
+                {sql`'Editing version ' || editor_version.version_label ||
                   case when editor_version.status = 'draft'
-                    then ' (draft — published attempts keep their pinned version)'
-                    else ' (published — the first edit creates a new draft)'
+                    then ' (draft). Attempts already in progress keep the version they started on.'
+                    else ' (published). Your first edit starts a new draft.'
                   end`}
               </Typography>
             </CardContent>
           </Card>
-          <Card variant="outlined">
+          <Card
+            component="fieldset"
+            disabled={sql`translation_edit_locked`}
+            variant="outlined"
+          >
             <CardHeader>
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
                 <Typography level="title-md" startIcon="FactCheck">
@@ -819,12 +813,18 @@ function AssessmentEditorWorkspace(
                           "metadata_id",
                           sql`metadata_field.id::string`,
                         );
-                        s.setScalar("metadata_name", sql`metadata_field.name`);
+                        s.setScalar(
+                          "metadata_name",
+                          sql`metadata_field.name`,
+                        );
                         s.setScalar(
                           "metadata_label",
                           sql`metadata_field.label`,
                         );
-                        s.setScalar("metadata_type", sql`metadata_field.type`);
+                        s.setScalar(
+                          "metadata_type",
+                          sql`metadata_field.type`,
+                        );
                         s.setScalar(
                           "metadata_required",
                           sql`metadata_field.required`,
@@ -896,7 +896,11 @@ function AssessmentEditorWorkspace(
               </Each>
             </CardContent>
           </Card>
-          <Card variant="outlined">
+          <Card
+            component="fieldset"
+            disabled={sql`translation_edit_locked`}
+            variant="outlined"
+          >
             <CardHeader>
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
                 <Typography level="title-md" startIcon="ViewAgenda">
@@ -1428,7 +1432,7 @@ function AssessmentAttemptsCard(props: { block: TrainingBlock }) {
   );
 }
 
-function AssessmentSettingsModal(_props: { block: TrainingBlock }) {
+function AssessmentSettingsModal(props: { block: TrainingBlock }) {
   return (
     <ModalDialog bindScalar="assessment_settings_open" maxWidth="lg">
       <div className="flex items-start justify-between gap-3 mb-4">
@@ -1512,12 +1516,16 @@ function AssessmentSettingsModal(_props: { block: TrainingBlock }) {
               s.tryServer({
                 body: (s) => {
                   s.startTransaction();
+                  ensureAssessmentDraftVersion(s, {
+                    block: props.block,
+                    assessmentId: sql`selected_assessment.id`,
+                  });
+                  s.modify(
+                    sql`update db.training_assessment_versions set localized_name = trim(ui.settings_name), localized_description = nullif(trim(ui.settings_description),'') where id = draft_assessment_version_id`,
+                  );
                   s.modify(sql`
                     update db.training_assessments
-                    set name = trim(ui.settings_name),
-                        description =
-                          nullif(trim(ui.settings_description), ''),
-                        kind = ui.settings_kind,
+                    set kind = ui.settings_kind,
                         execution_mode = ui.settings_execution_mode,
                         is_active = ui.settings_is_active,
                         archived_at = case

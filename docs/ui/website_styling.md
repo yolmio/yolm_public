@@ -7,6 +7,9 @@ tags:
   - websites
   - tailwind
   - design-system
+related:
+  - ui/styling.md
+  - ui/theming.md
 ---
 
 # Website Styling in Yolm
@@ -63,8 +66,7 @@ accordion/grid/hero patterns.
 - Use `sx` for component APIs, complex local composition, and responsive rules
   where classes become harder to read.
 - Use `dynamicClassNames` for SQL-driven class switching. Use `style` only for
-  APIs that specifically require it or a runtime expression that cannot be
-  cleanly represented as a class.
+  a runtime value that cannot be cleanly represented as a class.
 - Keep contrast high. Body text should use the main body token, not a faint or
   decorative token.
 - If a section grows many styling props, split it into clearer component
@@ -97,19 +99,11 @@ class in the app theme layer first.
 
 ## Yolm Gotchas
 
-- Yolm TSX is generation-time TypeScript that emits YOM. It is not React
-  running in the browser.
-- Do not rely on React runtime patterns such as hooks for styling state,
-  client-side object mutation, or JavaScript event logic.
-- Runtime dynamic style must be expressed with Yolm primitives, typically
-  `dynamicClassNames`, SQL expressions in `sx`/`style`, and event handlers that
-  receive statement builder `s`.
-- Keep transient UI state in `ui`/local `Data` state, not module-level
-  JavaScript variables.
-- Import reusable website components through their documented aliases instead of
-  coupling reusable code to a specific system.
-- Run Forge validation and, when dynamic UI/runtime expressions are touched,
-  include the runtime validation path before exercising the preview.
+General Yolm styling rules apply (see [Styling](./styling.md)): runtime styling
+uses `dynamicClassNames` or SQL values in `style`, never SQL in `sx` or
+`className`, and transient UI state lives in `Data` state, not module-level
+JavaScript variables. When dynamic UI or runtime expressions change, include
+the runtime validation path before exercising the preview.
 
 ## Lessons From Site Migrations
 

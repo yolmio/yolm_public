@@ -17,17 +17,26 @@ APIs.
 
 ```ts
 import { AzureAD } from "services/microsoft/auth";
+import { sql } from "std/sql_utils";
 
 const outlook = new AzureAD();
 
 outlook.events.listAllEvents(s, {
-  calendarId: sql`'primary'`,
+  calendarId: sql`outlook_calendar_id`, // Graph calendar id, e.g. from listCalendars
+  saveToTable: "outlook_events",
   managedOauthCredentialId: sql`(select credential_id from db.user_outlook_accounts where sys_user_id = current_user)`,
   onReauthRequired: (s) => {
     // Mark the credential as needing re-auth
   },
 });
 ```
+
+`calendarId` is a Microsoft Graph calendar id; requests go to
+`/me/calendars/{calendarId}/...`. Graph has no `primary` alias (that is a
+Google Calendar convention), so read ids, including the default calendar
+(`is_default_calendar`), with `outlook.calendars.listCalendars`. On a non-200
+response, `listAllEvents` writes a row to `scheduling_integration_errors`
+(from the scheduling block) before throwing.
 
 Namespaces:
 
@@ -69,8 +78,7 @@ Pass OAuth token options to each Microsoft client call:
 - `managedOauthCredentialId` selects the row in `managed_oauth_credentials`
   for the Outlook account being used.
 - `onReauthRequired` handles expired or revoked Microsoft refresh tokens.
-- `optIn` is needed outside production when external service calls are
-  opt-in.
+- `optIn`: see [External-Service Opt-In](./solution_services.md#external-service-opt-in).
 
 ## Prerequisites
 
@@ -80,5 +88,5 @@ Pass OAuth token options to each Microsoft client call:
 
 ## Related
 
-- [OAuth credentials block](../blocks/oauth_credentials.md)
+- Managed OAuth credentials are stored server-side.
 - [Service integrations](../concepts/service_integrations.md)

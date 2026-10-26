@@ -1,7 +1,7 @@
 ---
 title: Forge issues guide
-description: Investigating and managing issues, comments, and issue attachments in Forge.
-tags: [ai, forge, issues, attachments]
+description: Use to read, triage, or manage Forge issues, comments, and attachments, including #123 references in a request.
+tags: [ai, forge, skill, issues]
 ---
 
 # Forge issues guide

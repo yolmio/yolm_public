@@ -308,6 +308,8 @@ interface TabBaseProps extends ListItemButtonProps {
 
 interface TabPanelBaseProps extends ComponentOpts<Size> {
   value: TabValue;
+  /** Mount immediately and preserve panel state while inactive. Default false. */
+  keepMounted?: boolean;
   component?: ElementType;
 }
 
@@ -604,7 +606,8 @@ Tabs.Tab = TabsTab;
 /**
  * The body shown when its `value` matches the active tab. Only the
  * matching panel is rendered (it is gated behind `Show`), so each panel's
- * contents are mounted lazily. Must be a child of {@link Tabs}.
+ * contents are mounted lazily. Set `keepMounted` to preserve internal state
+ * while inactive. Must be a child of {@link Tabs}.
  *
  * @category UI Component
  */
@@ -612,20 +615,24 @@ export const TabsPanel: OverridableComponent<{
   defaultComponent: "div";
   props: TabPanelBaseProps;
 }> = (props: TabPanelBaseProps & JSX.IntrinsicElements["div"]) => {
-  const { component = "div", value, ...other } = props;
+  const { component = "div", value, keepMounted = false, ...other } = props;
   const ctx = useICtx(TabsICtxKey);
   const ownerState = { size: ctx.size, color: ctx.color, variant: ctx.variant };
   const valueExpr = getTabValueExpr(value);
 
   const [Root, rootProps] = singleElementComponent({
     component,
-    sx: getTabPanelStyles(ownerState),
+    sx: {
+      ...getTabPanelStyles(ownerState),
+      "&[hidden]": { display: "none" },
+    },
     externalProps: {
       role: "tabpanel",
       hidden: sql`${ctx.selectedTab} != ${valueExpr}`,
       ...other,
     },
   });
+  if (keepMounted) return <Root {...rootProps} />;
   return (
     <Show when={sql`${ctx.selectedTab} = ${valueExpr}`}>
       <Root {...rootProps} />

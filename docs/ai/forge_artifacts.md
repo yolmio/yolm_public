@@ -1,7 +1,7 @@
 ---
 title: Forge artifacts skill
-description: Reading uploads and displaying generated artifacts.
-tags: [ai, forge, artifacts, images]
+description: Use to read user uploads, images, or PDFs, or to create and display generated artifacts and documents in Forge.
+tags: [ai, forge, skill, artifacts, images]
 ---
 
 # Forge artifacts skill

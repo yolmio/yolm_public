@@ -1,7 +1,11 @@
+import { prepareSparkUndo, undoSparkTransactions } from "./action_undo";
 import { type Sql, sql } from "std/sql_utils";
 import { system } from "std/system";
 import type { ServerStatementsBase } from "std/statements";
-import type { RegisterReactorsOpts } from "./agent";
+import {
+  type RegisterReactorsOpts,
+  sparkInterruptedExecutionStart,
+} from "./agent";
 import { sparkSessionActionAllowed } from "./action_permissions";
 
 export type SparkUndoOptions = Pick<
@@ -38,6 +42,7 @@ export function sparkBulkUndo<T extends ServerStatementsBase<any>>(
   s.callStoredProcedure(
     input.execute ? "spark_undo_selection" : "spark_preview_undo",
     {
+      prewarm: "never",
       inputScalars: {
         undo_session_id: input.session,
         undo_user_id: input.user,
@@ -84,7 +89,24 @@ function performSparkBulkUndo<T extends ServerStatementsBase<any>>(
   opts: SparkUndoOptions,
   input: SparkUndoInput,
 ) {
-  if (input.execute) s.startTransaction();
+  if (input.execute) {
+    // The selected receipts of this owner's session that are still executed.
+    prepareSparkUndo(
+      s,
+      sql`select log.transaction_id as tx_id
+      from db.spark_action_log log
+      join db.spark_conversations conversation
+        on conversation.id = log.spark_conversation_id
+      where conversation.id = ${input.session}
+        and conversation.sys_user_id = ${input.user}
+        and log.status = 'executed' and log.transaction_id is not null
+        and exists(select 1 from json.array_each(${input.selection}) chosen
+          where try_cast(chosen.value->>'receiptId' as bigint) = log.id
+            and try_cast(chosen.value->>'transactionId' as bigint)
+              = log.transaction_id)`,
+    );
+    s.startTransaction();
+  }
   s.if(
     sql`not exists(select 1 from db.spark_conversations where id = ${input.session}
     and sys_user_id = ${input.user} and status = 'active')`,
@@ -93,10 +115,19 @@ function performSparkBulkUndo<T extends ServerStatementsBase<any>>(
         sql.lit`Only the owner of an active session can undo its changes.`,
       ),
   );
+  // Other running work in the session blocks Undo; the caller's own execution
+  // does not. An external execution cut off by a server restart stays
+  // 'executing', so one whose latest execution started before the
+  // interruption window no longer counts.
   s.if(
-    sql`exists(select 1 from db.spark_agents where spark_conversation_id = ${input.session}
-    and (id is distinct from ${input.executingAgent ?? sql`null::bigint`})
-    and status in ('awaiting_plan', 'awaiting_execute', 'executing', 'failed_retrying_plan'))`,
+    sql`exists(select 1 from db.spark_agents agent where agent.spark_conversation_id = ${input.session}
+    and (agent.id is distinct from ${input.executingAgent ?? sql`null::bigint`})
+    and (coalesce(agent.execution_mode, 'native') != 'external'
+      or coalesce((select max(event.created_at) from db.spark_agent_events event
+        where event.spark_agent_id = agent.id
+          and event.type in ('execute_script_success', 'execute_script_error'))
+        >= ${sparkInterruptedExecutionStart}, true))
+    and agent.status in ('awaiting_plan', 'awaiting_execute', 'executing', 'failed_retrying_plan'))`,
     (s) =>
       s.throwError(
         sql
@@ -173,7 +204,11 @@ function performSparkBulkUndo<T extends ServerStatementsBase<any>>(
         ),
     );
     // One engine operation rechecks conflicts and reverses the whole selected set.
-    s.undoTransactions(sql`select distinct tx_id from undo_selected`);
+    undoSparkTransactions(
+      s,
+      sql`select distinct tx_id from undo_selected`,
+      sql`select action_name, result_json from undo_selected`,
+    );
     s.modify(sql`update db.spark_action_log set status = 'undone',
       transaction_id = chosen.tx_id, result_json = chosen.result_json
       from undo_selected chosen where spark_action_log.id = chosen.id`);

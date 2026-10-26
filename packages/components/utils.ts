@@ -1,5 +1,5 @@
 import { sql } from "../std/sql_utils";
-import type { BooleanExpr } from "../std/sql_utils";
+import type { BooleanExpr, Sql } from "../std/sql_utils";
 import { BasicStatements, DomStatements } from "std/statements";
 import type { DomStatementsOrFn } from "std/statements";
 import type { Style } from "std/style_types";
@@ -433,6 +433,36 @@ function isStatementInstance(
   handler: NonNullable<AnyEventHandler>,
 ): handler is BasicStatements | DomStatements {
   return handler instanceof BasicStatements || handler instanceof DomStatements;
+}
+
+/**
+ * Props for an `href`-capable component that may act as a back link.
+ */
+export interface BackLinkOpts {
+  /**
+   * Return to the most recent earlier history entry for `href`'s path,
+   * restoring that page's query string (filters, search, paging) and scroll.
+   * Without such an entry it is a plain link to `href`. Use it on links that
+   * return to a parent or list page.
+   */
+  backLink?: boolean;
+}
+
+/**
+ * Anchor attributes that make a link to `href` a back link; see
+ * {@link BackLinkOpts}.
+ */
+export function backLinkAttrs(
+  href: Sql | string | undefined,
+  backLink: boolean | undefined,
+): { "data-yolm-back"?: Sql | string } {
+  if (!backLink) {
+    return {};
+  }
+  if (href === undefined) {
+    throw new Error("backLink requires href");
+  }
+  return { "data-yolm-back": href };
 }
 
 /**

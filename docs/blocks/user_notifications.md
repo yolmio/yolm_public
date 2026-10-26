@@ -14,14 +14,12 @@ related:
 # UserNotificationsBlock
 
 `UserNotificationsBlock` stores one durable notification occurrence per
-recipient, shows individual occurrences by default, and can project the
-same server state to email and Web Push. Web Push is fully managed: solution
-code does not import the browser module, register a service worker, manage VAPID
-keys, or send to devices directly.
+recipient and projects it to optional email and fully managed Web Push (no
+service worker, VAPID keys, or device sends in solution code).
 
 ## Configure the block
 
-Define the identity adapter and every source in `core.tsx`, then set `push: true`:
+Define the identity adapter and every source in `core.tsx`:
 
 ```tsx
 import { RecordNotificationDestination, UserNotificationsBlock } from "blocks/user_notifications";
@@ -68,29 +66,40 @@ system.addBlock(
 );
 ```
 
-`push: true` adds subscription and push-outbox tables, a bounded fanout job, a
-delivery reactor, and the per-device settings UI. The platform supplies the
-public VAPID key and keeps private keys outside the tenant system. Notifications
-published before push is enabled remain Inbox-only, avoiding a historical
-fanout when an existing system first adopts the feature.
+Full option types are `UserNotificationsBlockOpts`,
+`UserNotificationSourceConfig`, and `UserNotificationEmailConfig` in
+`packages/blocks/user_notifications/user_notifications_block.ts`. Non-obvious
+options:
 
-Block-level `email` adds preferences and a shared email outbox. Each source can
-set its email delivery policy:
+| Option | Contract |
+|---|---|
+| `sources[].key` | System-wide namespaced key, unique, at most 100 characters. At least one source is required. |
+| `sources[].canUserAccess` | Checked at publish, in the Inbox, and again before opening or delivering. |
+| `sources[].destination` | Omit for informational, non-clickable notifications. |
+| `sources[].email.delivery` | `preference` (default) follows the recipient's digest/immediate/off setting; `immediate` sends each occurrence separately but honors off; `disabled` keeps the source Inbox-only. |
+| `email` | Requires `identity.email`. `domain` is the app hosting the authenticated handoff. |
+| `email.publicOrigin` | SQL expression returning an absolute origin for email links; whitespace and trailing slashes are removed, and null or blank falls back to the mapped `email.domain`. |
+| `push` | Adds subscriptions, a push outbox, a bounded fanout job, a delivery reactor, and per-device settings. |
 
-- `preference` (or no source override) follows the recipient's digest,
-  immediate, or off preference.
-- `immediate` prepares a separate email for each occurrence while still
-  honoring an explicit off preference.
-- `disabled` keeps that source Inbox-only even when other sources use email.
+Enabling `email` or `push` on a deployed system adds new tables, enums, and
+nullable `email_eligible_at` / `push_eligible_at` columns on
+`user_notifications`, which is normally a compatible deploy; confirm with the
+deploy plan's schema changes. Existing rows keep null eligibility, so
+historical Inbox activity is not fanned out.
 
-Enabling block-level email in a deployed system adds schema and requires a
-transform. Existing notification rows should retain a null
-`email_eligible_at`, so historical Inbox activity is not fanned out.
+## Owned tables
+
+- `user_notifications`: one row per occurrence per recipient.
+- `user_notification_preferences` (with `email`): per-user email mode.
+- `user_notification_email_outbox` (with `email`): shared email outbox.
+- `user_notification_push_subscriptions` (with `push`): one row per browser
+  installation and user.
+- `user_notification_push_outbox` (with `push`): one delivery per notification
+  and subscription.
 
 ## Publish
 
-Application procedures publish a logical recipient notification. They never
-address browsers:
+Procedures publish to logical recipients, never browsers:
 
 ```ts
 const notifications = system.block(UserNotificationsBlock);
@@ -109,18 +118,51 @@ approvals.publish(s, {
 });
 ```
 
-The block validates active recipients and source access before insert. The
-database later creates one delivery row for every active subscription belonging
-to that recipient. Multiple devices do not multiply Inbox rows or unread
-counts.
+`recipientsQuery` returns one `recipient_user_id` per recipient; inactive or
+unauthorized recipients are skipped. Multiple devices do not multiply Inbox rows
+or unread counts. `target` owns `href` and `payload`; supplying either alongside it
+is a generation-time error.
 
-## Choose the notification-host app
+## Destinations
 
-In a multi-app system, choose one app as the notification host. Browser push is
-enabled from that app once per browser profile; it can deliver notifications
-published by every source in the system. Mount one push provider inside the
-app's authentication provider, then mount the Inbox, settings, and click
-handoff pages in that app:
+`RecordNotificationDestination` (from `blocks/user_notifications`) is declared
+once and used three ways: `.destination()` on the source, `.at(id)` when
+publishing, and optionally `<dest.RecordPage recordWhere={...}>` for a standard
+record page on the configured table and path. Custom pages need no
+notification-specific code; record-level access remains the destination page's
+responsibility.
+
+- `path` is relative with exactly one `{id}`. Choose `domain` (resolves local
+  dev ports) or `resolveHref(path)` (runtime app choice), not both. Neither is
+  persisted: the target stores its key and ID and resolves the route when opened.
+- For multiple record kinds per source, use
+  `recordNotificationDestinations([approvals, orders])`. Keys must be unique
+  system-wide record identities, not recipient or event IDs.
+- Record destinations accept only explicit target payloads. Bare URLs are not
+  parsed; unknown or malformed targets show unavailable and are not
+  acknowledged.
+
+Specialized destinations (such as comments and training) implement the
+lower-level contract:
+
+```tsx
+destination: {
+  href: (notification) => sql`'/approvals/' || ${notification}.record_key`,
+}
+```
+
+`href` receives the complete notification record, including payload. Use
+`notificationAppHref(domain, path)` for cross-app links; it respects local
+domain mappings. Optional `destination.routes()` ships destination pages through
+`<notifications.Routes />`. A stored `href` without a source `destination` never
+enables navigation. Destinations must be app-local paths or absolute HTTP(S)
+URLs without fragments; a source owned by another app origin must return an
+absolute URL.
+
+## Pages and the notification-host app
+
+Mount pages in one notification-host app. Browser push is enabled there once per
+browser profile and delivers notifications from every source:
 
 ```tsx
 <AuthBlock.DefaultEmailOtpAuth>
@@ -140,141 +182,43 @@ handoff pages in that app:
 </AuthBlock.DefaultEmailOtpAuth>
 ```
 
-The settings page offers “Enable on this device” and “Disable on this device.”
-Permission and service-worker registration occur only from the enable-button
-interaction. The provider inspects an existing registration without prompting,
-refreshes it only when it already belongs to the current user, and removes it on
-logout or account mismatch. Do not mount the provider independently on every app
-origin unless duplicate notifications from those origins are desired.
+- `PushProvider` goes inside the authentication provider. It inspects an
+  existing registration without prompting, refreshes it only for the current
+  user, and removes it on logout or account mismatch. Permission prompts happen
+  only from the settings page's "Enable on this device" button. Mounting it on
+  several app origins produces duplicate notifications (browsers expose no
+  cross-origin device identifier).
+- `NotificationOpenPage` is the handoff used by the Inbox, email, and push
+  clicks. It reads the row, verifies recipient and source access, resolves the
+  destination, marks only that occurrence read and clears its snooze, then
+  performs a full navigation with `Redirect` (replacing its history entry). On a
+  server failure it offers **Try again** and **Back to notifications**.
+- `notifications.SidebarItem` (from `system.block(UserNotificationsBlock)`)
+  shows an unread badge that refreshes after opening and polls for new activity.
+- Inbox filters, search, and pagination are query parameters, so Back restores
+  them.
 
-Push clicks first open the same-origin handoff page with the notification ID.
-That page reads the authoritative row, verifies the current recipient and source
-access, resolves the source-owned destination, and then performs a full browser
-navigation. This allows a notification hosted by one app to open another Yolm
-app without teaching the service worker about domains or application routes.
-The handoff marks only that authorized occurrence read before redirecting.
+Email never resolves a destination in the background: links go through the
+handoff on `email.domain` (or `publicOrigin`), and access is evaluated after the
+recipient authenticates. Custom source email bodies are fragments inside the
+shared layout, which keeps its Open link.
 
-For a source owned by another app origin, its destination must return an
-absolute HTTP(S) URL. Same-origin destinations may return relative routes.
-Email requires `email.domain`, the app hosting the authenticated handoff.
-Open links and preferences links are absolute and honor local domain mappings.
-For an app whose public origin is stored at runtime, supply `email.publicOrigin`
-as a SQL expression returning an absolute origin. Both links use that origin,
-with whitespace and trailing slashes removed; null or blank values fall back to
-the mapped `email.domain`.
-Email never resolves a destination as a background worker: app choice and
-access are evaluated after the recipient authenticates. Custom source email
-bodies are content fragments inside the shared layout, retaining its Open link.
+## Read and delivery semantics
 
-## Read semantics
+- Only opening an authorized occurrence through the handoff marks it read.
+  Displaying or dismissing an OS notification, direct record or comment
+  permalinks, and destination pages do not. Invalid or unauthorized
+  notifications stay unread; a destination that later fails to load stays read.
+  There is no record-wide automatic acknowledgment API.
+- A changed push endpoint replaces the installation's credentials; a platform
+  VAPID rotation is reconciled without another prompt.
+- HTTP 404/410 deletes the subscription; 429, provider 5xx, and network errors
+  retry with bounded backoff; other 4xx responses are terminal.
+- Read, snoozed, deleted, inaccessible, and disabled-user notifications are
+  skipped when the reactor rechecks state.
 
-For record notifications, declare a destination once. The package owns target
-encoding, cross-app links, and marking opened occurrences read:
+## Gotchas
 
-```tsx
-import { RecordNotificationDestination } from "blocks/user_notifications";
-
-const approvals = new RecordNotificationDestination({
-  key: "purchasing.approval",
-  table: "approvals",
-  path: "/approvals/{id}",
-  domain: "purchasing.example.com",
-});
-
-// On the source configuration:
-destination: approvals.destination()
-
-// In its publishing procedure:
-source.publish(s, {
-  recordKey: approvalId,
-  recipientsQuery,
-  title: sql.lit`Approval required`,
-  target: approvals.at(approvalId),
-});
-
-// Inside the authenticated app routes:
-<approvals.RecordPage recordWhere={approvalAccessCondition}>
-  <ApprovalDetails />
-</approvals.RecordPage>
-```
-
-`RecordPage` is an optional convenience for the configured table and path.
-Custom pages need no notification-specific code. Record-level access remains
-the destination page's responsibility.
-
-For a source with multiple record kinds, use
-`recordNotificationDestinations([approvals, orders])`. Keys must be system-wide
-record identities, not recipient or event IDs. `domain` resolves local dev
-ports automatically; `resolveHref(path)` is available instead when app choice
-depends on runtime business permissions. Neither is persisted in the target:
-the package stores its key and ID and resolves its current route when opening.
-
-Record destinations accept only explicit target payloads. Historical bare URLs
-are not parsed or migrated. Unknown/malformed targets show unavailable and do
-not acknowledge an occurrence. `target` owns `href` and `payload`; supplying
-either alongside it is a generation-time error.
-
-Packages with specialized destinations, such as comments and training, can
-implement the lower-level source-owned contract:
-
-```tsx
-destination: {
-  href: (notification) => sql`'/approvals/' || ${notification}.record_key`,
-}
-```
-
-The callbacks receive the **complete notification record** (including payload).
-Use `notificationAppHref(domain, path)` for cross-app links; it respects local
-development domain mappings. Optional `destination.routes()` lets a package
-ship its destination pages with `<notifications.Routes />`. The same instance
-also provides `<notifications.SidebarItem />` with an unread badge that refreshes
-after opening a notification and polls for new activity.
-
-Opening a valid, authorized notification marks only that occurrence read and
-clears its snooze before redirecting. The destination URL has no notification
-receipt parameter, and the handoff replaces its own history entry. Destination
-pages do not report arrival or update notification state. Direct record and
-comment permalinks do not mark notifications read. If the destination subsequently
-fails to load, the opened notification remains read. Invalid or unauthorized
-notifications stay unread.
-
-If the opener's server request fails, it offers **Try again** and **Back to
-notifications** instead of staying on the opening message.
-
-Inbox filters, search, and pagination use query parameters so Back restores
-them. Occurrence actions and unread counts use the same unit; there is no
-grouped-inbox compatibility mode.
-
-There is one navigation contract: a clickable source supplies `destination`.
-Without one, an occurrence is informational and has no Inbox link; a stored
-`href` alone never enables navigation or read-on-click. The handoff uses the
-built-in `Redirect` component, with no browser-module dependency. Destinations
-must be app-local paths or absolute HTTP(S) URLs without fragments; unsupported
-targets show unavailable without acknowledging the occurrence.
-
-Displaying or dismissing an OS notification does not mark it read. Opening its
-authenticated handoff does, just like opening it from the Inbox or email.
-Explicit Inbox read actions remain available. There is no record-wide automatic
-acknowledgment API.
-
-Before release, exercise the cross-app navigation regression in a Forge preview
-with the supported browser workflow. Confirm that the destination opens in the
-expected app, that unsupported targets remain unavailable, and that the
-occurrence is acknowledged only after the authenticated handoff.
-
-## Delivery lifecycle
-
-- A subscription belongs to one browser installation and current user.
-- A multi-app system normally registers subscriptions from one notification-host
-  app; browser security does not provide a reliable cross-origin physical-device
-  identifier.
-- A changed endpoint replaces the installation's stored delivery credentials.
-- A platform VAPID rotation is reconciled into a replacement subscription
-  without another permission prompt.
-- HTTP 404/410 deletes the subscription.
-- HTTP 429, provider 5xx, and network errors retry with bounded backoff.
-- Other provider 4xx responses are terminal for that delivery.
-- Read, snoozed, deleted, inaccessible, and disabled-user
-  notifications are skipped when the reactor rechecks authoritative state.
-
-Email remains independently optional through the existing `email` config.
+- Before release, exercise cross-app navigation in a Forge preview: the
+  destination opens in the expected app, unsupported targets stay unavailable,
+  and acknowledgment happens only after the authenticated handoff.

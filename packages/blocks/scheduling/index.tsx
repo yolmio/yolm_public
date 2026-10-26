@@ -505,6 +505,133 @@ export class SchedulingBlock implements Block {
     enqueueBackgroundTask(s, opts);
   }
 
+  devDefinedCreatesMeeting(event: DevDefinedEventType) {
+    return (this.opts.meetingIntegrations ?? []).some((integration) =>
+      integration.addToMeeting &&
+      system.block(integration.integration).integrationName.toLowerCase()
+          .replaceAll(" ", "_") === event.meetingLocation
+    );
+  }
+
+  devDefinedInitialStatus(event: DevDefinedEventType) {
+    const creating = this.devDefinedCreatesMeeting(event) ||
+      (event.meetingLocation === "google_meet" &&
+        this.opts.calendarIntegrations.some((integration) =>
+          integration.addToCalendar &&
+          integration.integration === GoogleCalendarIntegration
+        ));
+    return sql.lit(creating ? "creating" : "scheduled");
+  }
+
+  devDefinedBookingValues(
+    event: DevDefinedEventType,
+    userId: NumericExpr,
+    startTime: Sql,
+  ) {
+    return {
+      sys_user_id: userId,
+      start_time: startTime,
+      duration: event.duration,
+      buffer_before: event.bufferBefore,
+      buffer_after: event.bufferAfter,
+      status: this.devDefinedInitialStatus(event),
+      public_id: sql`random.uuid()`,
+    };
+  }
+
+  /** Queue one lifecycle transition atomically, using the appointment's current identity. */
+  enqueueDevDefinedAppointmentTasks<T extends IServerBaseStatements>(
+    s: T,
+    opts: {
+      eventType: DevDefinedEventType;
+      appointmentId: NumericExpr;
+      change: "booked" | "rescheduled" | "cancelled";
+      insideTransaction?: boolean;
+    },
+  ) {
+    const event = opts.eventType;
+    const name = `scheduling_${event.tableName}_${opts.change}_tasks`;
+    if (!system.storedProcedures.some((p) => p.name === name)) {
+      system.storedProcedure({
+        name,
+        transaction: "caller",
+        inputScalars: [{ name: "p_appointment_id", type: "BigInt" }],
+        procedure: (s) => {
+          s.defRecord(
+            "appointment",
+            sql`select id, public_id, sys_user_id from db.${
+              sql.ref(event.tableName)
+            } where id=p_appointment_id`,
+          );
+          s.returnIf(sql`appointment.id is null`);
+          const taskTypes = opts.change === "booked"
+            ? [
+              ...(this.opts.calendarIntegrations.length
+                ? ["calendar_add"]
+                : []),
+              ...(this.devDefinedCreatesMeeting(event)
+                ? ["meeting_create"]
+                : []),
+            ]
+            : opts.change === "rescheduled"
+            ? ["calendar_update", "meeting_update"]
+            : ["calendar_delete", "meeting_delete"];
+          for (const taskType of taskTypes) {
+            this.enqueueBackgroundTask(s, {
+              taskType,
+              appointmentTable: event.tableName,
+              appointmentId: sql`appointment.id`,
+              insideTransaction: true,
+            });
+          }
+          const notifications = event.notifications;
+          const emails = opts.change === "booked"
+            ? [
+              notifications?.confirmationEmail,
+              notifications?.hostConfirmationEmail,
+            ]
+            : opts.change === "rescheduled"
+            ? [
+              notifications?.inviteeRescheduleEmail,
+              notifications?.hostRescheduleEmail,
+            ]
+            : [
+              notifications?.cancellationEmail,
+              notifications?.hostCancellationEmail,
+            ];
+          const suffix = opts.change === "booked"
+            ? "confirmation"
+            : opts.change === "rescheduled"
+            ? "reschedule"
+            : "cancellation";
+          for (const [index, config] of emails.entries()) {
+            if (!config) continue;
+            this.enqueueBackgroundTask(s, {
+              taskType: "email_dev",
+              emailType: `${index ? "host" : "invitee"}_${suffix}_email`,
+              appointmentTable: event.tableName,
+              appointmentId: sql`appointment.id`,
+              ...(opts.change !== "cancelled"
+                ? {
+                  externalResourceId: sql`appointment.public_id::string`,
+                  ...(index
+                    ? { targetUserId: sql`appointment.sys_user_id` }
+                    : {}),
+                }
+                : {}),
+              insideTransaction: true,
+            });
+          }
+        },
+      });
+    }
+    if (!opts.insideTransaction) s.startTransaction();
+    s.callStoredProcedure(name, {
+      inputScalars: { p_appointment_id: opts.appointmentId },
+    });
+    if (!opts.insideTransaction) s.commitTransaction();
+  }
+
   /**
    * Removes queued work that can create or mutate external resources for an
    * appointment. The caller must already be inside the transaction that makes
@@ -547,19 +674,6 @@ export class SchedulingBlock implements Block {
     },
   ) {
     const tableName = opts.eventType.tableName;
-    const requiresMeetingCreation =
-      (opts.eventType.meetingLocation === "google_meet" &&
-        this.opts.calendarIntegrations.some(
-          (integration) =>
-            integration.integration === GoogleCalendarIntegration &&
-            integration.addToCalendar,
-        )) ||
-      (this.opts.meetingIntegrations ?? []).some((integration) => {
-        const meetingBlock = system.block(integration.integration);
-        return integration.addToMeeting &&
-          meetingBlock.integrationName.toLowerCase().replaceAll(" ", "_") ===
-            opts.eventType.meetingLocation;
-      });
     for (const integration of this.opts.calendarIntegrations) {
       const calendarBlock = system.block(integration.integration);
       s.if(
@@ -610,9 +724,7 @@ export class SchedulingBlock implements Block {
       sql`update db.${sql.ref(tableName)}
         set sys_user_id = ${opts.newUserId},
           reassign_reason = ${opts.reason},
-          status = ${
-        sql.lit(requiresMeetingCreation ? "creating" : "scheduled")
-      },
+          status = ${this.devDefinedInitialStatus(opts.eventType)},
           public_id = random.uuid()${
         opts.eventType.meetingLocation === "google_meet"
           ? sql`, google_conference_link = null`
@@ -2163,6 +2275,7 @@ export class SchedulingBlock implements Block {
   }
 
   private handleCalendarAdd<T extends IServerBaseStatements>(s: T) {
+    if (this.opts.calendarIntegrations.length === 0) return;
     for (const devType of this.opts.devDefinedEventTypes ?? []) {
       s.if(
         sql`task.appointment_table = ${sql.lit(devType.tableName)}`,
@@ -2495,6 +2608,7 @@ export class SchedulingBlock implements Block {
   }
 
   private handleCalendarUpdate<T extends IServerBaseStatements>(s: T) {
+    if (this.opts.calendarIntegrations.length === 0) return;
     for (const devType of this.opts.devDefinedEventTypes ?? []) {
       s.if(
         sql`task.appointment_table = ${sql.lit(devType.tableName)}`,
@@ -2753,6 +2867,7 @@ export class SchedulingBlock implements Block {
   }
 
   private handleCalendarDelete<T extends IServerBaseStatements>(s: T) {
+    if (this.opts.calendarIntegrations.length === 0) return;
     for (const integration of this.opts.calendarIntegrations) {
       const calendarBlock = system.block(integration.integration);
       s.if(

@@ -57,6 +57,7 @@ import type {
   GeneralServerStatementsOrFn,
   HelperProcField,
   IStatementsBase,
+  ProcedureToolRef,
   RankedSearchTable,
   StateStatementsOrFn,
   TestStatementsOrFn,
@@ -442,15 +443,19 @@ interface DecisionTable {
 /**
  * One stage of a {@link PipelineOpts | pipeline}.
  *
- * A stage reads rows from a Yolm database table (`source`) and runs
- * `process` for each row. Stages can depend on earlier stages and run
- * in parallel when `parallelize` is true.
+ * A stage reads rows from a Yolm database table or query (`source`) and runs
+ * either `process` for each row or `processBatch` for bounded sets of rows.
+ * Stages can depend on earlier stages and run in parallel when `parallelize`
+ * is true.
  *
  * See {@link https://docs.yolm.io/concepts/pipelines | Pipelines}.
  */
 export interface PipelineStageOpts {
-  /** Source table to read rows from, e.g. `"imports.users"`. */
-  source?: string;
+  /** A table name or a read-only query that produces the stage's batch rows. */
+  source?: string | { query: Sql } | { type: "Table"; table: string } | {
+    type: "Query";
+    query: Sql;
+  };
   /** Explicit stage name for setup/finalize-style stages that do not stream source rows. */
   name?: string;
   /** Names of stages that must finish before this one starts. */
@@ -461,6 +466,10 @@ export interface PipelineStageOpts {
   where?: BooleanExpr;
   /** Statements run for each row from `source`. */
   process?: GeneralServerStatementsOrFn;
+  /** Statements run once per bounded, read-only `batch` table of source rows. */
+  processBatch?: GeneralServerStatementsOrFn;
+  /** Query-output columns whose equal key tuples must be delivered in one batch. */
+  keepTogetherBy?: string[];
   /** Run the stage in parallel across rows (defaults to sequential). */
   parallelize?: boolean;
   /** Create a resumable dev database checkpoint after this stage completes. */
@@ -714,11 +723,9 @@ export interface StoredProcedureFieldSetOpts {
  * Stored procedures are server-side procedures callable from other
  * procedures, endpoints, or scheduled jobs.
  */
-export interface StoredProcedureOpts {
+interface StoredProcedureCommonOpts {
   /** Procedure name. Defaults to the caller file stem. */
   name?: string;
-  /** Transaction mode controlling how the procedure handles transactions. */
-  transaction?: yom.StoredProcedureTransactionMode;
   /** Scalar input parameters. */
   inputScalars?: HelperProcField[];
   /** Record input parameters. */
@@ -734,6 +741,40 @@ export interface StoredProcedureOpts {
   /** Procedure body. */
   procedure: GeneralServerStatementsOrFn;
 }
+
+/** An ordinary reusable stored procedure. */
+export interface OrdinaryStoredProcedureOpts extends StoredProcedureCommonOpts {
+  /** Transaction mode controlling how the procedure handles transactions. */
+  transaction?: yom.StoredProcedureTransactionMode;
+  invocationKind?: "ordinary";
+}
+
+/** A standalone entry that can be exposed through a checked JS tool binding. */
+export interface ToolEntryStoredProcedureOpts
+  extends StoredProcedureCommonOpts {
+  /** Stable catalog identity; tool entries never infer a name from a caller. */
+  name: string;
+  /** Native tools have a scalar-only invocation ABI. */
+  inputRecords?: never;
+  inputTables?: never;
+  outputRecords?: never;
+  outputTables?: never;
+  /** Tool entries own their transaction boundary and never inherit one. */
+  transaction: "standalone";
+  /** `toolEntryProcedure` sets the only valid invocation kind itself. */
+  invocationKind?: never;
+}
+
+export type StoredProcedureOpts =
+  | OrdinaryStoredProcedureOpts
+  | ToolEntryStoredProcedureOpts;
+
+/** Internal registration shape; only `toolEntryProcedure` may mint toolEntry. */
+type StoredProcedureRegistration = StoredProcedureCommonOpts & {
+  name?: string;
+  transaction?: yom.StoredProcedureTransactionMode;
+  invocationKind?: yom.StoredProcedureInvocationKind;
+};
 
 /**
  * Function passed to {@link System.addValidation} that inspects the fully
@@ -1844,7 +1885,7 @@ export class System {
    * and scheduled jobs. The procedure name defaults to the caller file
    * stem. See {@link StoredProcedureOpts}.
    */
-  storedProcedure(props: StoredProcedureOpts) {
+  private registerStoredProcedure(props: StoredProcedureRegistration) {
     const fileStem = getCallerFileStem();
     let name: string;
     if (props.name) {
@@ -1859,6 +1900,9 @@ export class System {
     this.storedProcedures.push({
       name,
       transaction: props.transaction ?? "caller",
+      ...(props.invocationKind === undefined
+        ? {}
+        : { invocationKind: props.invocationKind }),
       inputScalars: normalizeStoredProcedureScalarFields(props.inputScalars),
       inputRecords: normalizeStoredProcedureFieldSets(props.inputRecords),
       inputTables: normalizeStoredProcedureFieldSets(props.inputTables),
@@ -1867,6 +1911,25 @@ export class System {
       outputTables: normalizeStoredProcedureFieldSets(props.outputTables),
       procedure: GeneralServerStatements.normalizeToArray(props.procedure),
     });
+  }
+
+  storedProcedure(props: StoredProcedureOpts) {
+    this.registerStoredProcedure(props);
+  }
+
+  /**
+   * Register a standalone procedure as a JavaScript tool entry and return its
+   * opaque binding reference. The private reference brand prevents normal TS
+   * callers from registering an unrelated ordinary procedure as a tool.
+   */
+  toolEntryProcedure(props: ToolEntryStoredProcedureOpts): ProcedureToolRef {
+    if (!props.name) {
+      throw new Error(
+        "toolEntryProcedure requires an explicit stable procedure name.",
+      );
+    }
+    this.registerStoredProcedure({ ...props, invocationKind: "toolEntry" });
+    return { procedure: props.name } as ProcedureToolRef;
   }
 
   /**
@@ -3913,6 +3976,12 @@ export class App {
           return;
         }
         if (node.type === ShowSymbol) {
+          if (typeof node.props.when === "boolean") {
+            this.#gatherContextInfo(
+              node.props.when ? node.props.children : node.props.fallback,
+            );
+            return;
+          }
           this.#gatherContextInfo(node.props.children);
           this.#gatherContextInfo(node.props.fallback);
           return;
@@ -4630,6 +4699,11 @@ export class App {
           };
         }
         if (node.type === ShowSymbol) {
+          if (typeof node.props.when === "boolean") {
+            return this.renderNode(
+              node.props.when ? node.props.children : node.props.fallback,
+            );
+          }
           return {
             t: "If",
             condition: sql.toYOM(node.props.when)!,
@@ -4751,6 +4825,7 @@ export class App {
               type: fieldTypeFromHelper(p.type),
               default: p.default ? sql.toYOM(p.default) : undefined,
               allowNoRead: p.allowNoRead,
+              history: p.history,
             })),
             children: this.renderNode(node.props.children),
           };
@@ -7368,7 +7443,7 @@ export class TimestampNaiveField extends FieldBase {
     }
     if (this.max) {
       this.checks.push({
-        check: (field) => sql`${field} > ${this.max!}`,
+        check: (field) => sql`${field} < ${this.max!}`,
         errorMessage: () => sql.concat("Value must be less than ", this.max),
       });
     }
@@ -8242,8 +8317,10 @@ export class TableBuilder {
   }
 
   /**
-   * Configure the time-to-live for rows in this table — rows are eligible
-   * for pruning once `expr` (evaluated against `fieldName`) is in the past.
+   * Configure the time-to-live for rows in this table. `fieldName` is a
+   * not-null timestamp field; `expr` is a scalar cutoff that must not
+   * reference the row, such as `date.add(hour, -24, now())`. A row is pruned
+   * once its `fieldName` value is earlier than the cutoff.
    */
   ttl(opts: { fieldName: string; expr: AnyExpr }) {
     this.#ttl = {
@@ -9352,29 +9429,52 @@ function extractSimpleSqlStringLiteral(ex: AnyExpr): string | undefined {
 function normalizePipelineStage(
   stage: PipelineStageOpts | yom.PipelineStage,
 ): NormalizedPipelineStage {
-  if (Array.isArray((stage as yom.PipelineStage).process)) {
+  if (
+    Array.isArray((stage as yom.PipelineStage).process) ||
+    Array.isArray((stage as yom.PipelineStage).processBatch)
+  ) {
     const existing = stage as yom.PipelineStage;
     return {
-      source: existing.source,
+      source: normalizePipelineStageSource(existing.source),
       name: existing.name,
       dependencies: existing.dependencies ?? [],
       after: existing.after,
       where: existing.where,
       process: existing.process,
+      processBatch: existing.processBatch,
+      keepTogetherBy: existing.keepTogetherBy,
       parallelize: existing.parallelize ?? false,
       checkpointAfter: existing.checkpointAfter ?? false,
     };
   }
   const stageOpts = stage as PipelineStageOpts;
   return {
-    source: stageOpts.source,
+    source: normalizePipelineStageSource(stageOpts.source),
     name: stageOpts.name,
     dependencies: stageOpts.dependencies ?? [],
     after: stageOpts.after,
     where: stageOpts.where === true ? undefined : sql.toYOM(stageOpts.where),
-    process: GeneralServerStatements.normalizeToArray(stageOpts.process),
+    process: stageOpts.process === undefined
+      ? stageOpts.processBatch === undefined ? [] : undefined
+      : GeneralServerStatements.normalizeToArray(stageOpts.process),
+    processBatch: stageOpts.processBatch === undefined
+      ? undefined
+      : GeneralServerStatements.normalizeToArray(stageOpts.processBatch),
+    keepTogetherBy: stageOpts.keepTogetherBy,
     parallelize: stageOpts.parallelize ?? false,
     checkpointAfter: stageOpts.checkpointAfter ?? false,
+  };
+}
+
+function normalizePipelineStageSource(
+  source: PipelineStageOpts["source"] | yom.PipelineStage["source"],
+): yom.PipelineStageSource | undefined {
+  if (source === undefined) return undefined;
+  if (typeof source === "string") return { type: "Table", table: source };
+  if ("table" in source) return { type: "Table", table: source.table };
+  return {
+    type: "Query",
+    query: source.query instanceof Sql ? source.query.toYOM() : source.query,
   };
 }
 

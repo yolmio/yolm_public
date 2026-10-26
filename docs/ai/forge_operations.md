@@ -25,6 +25,34 @@ with the selected version; omit that scope for cross-version investigation.
 
 ## Choose the evidence
 
+For Studio/preview hangs, start with the separate ephemeral `studioLive` feed:
+
+```js
+text(await studioLive({ sessionId: 662, versionId: 1152, limit: 20 }));
+// Use a request ID returned above for bounded stage/operation detail:
+text(await studioLive({ requestId: "<observed-request-id>", limit: 1 }));
+```
+
+Omit filters for cross-version investigation. Filters are optional `sessionId`,
+`versionId` (nonnegative integers), `requestId`, `kind` (`studio`, `preview`,
+`forge`) and `limit` (1–100, default 50); no `target` or historical cursor.
+This process-wide read requires `view_studio`, not a resident preview. It exposes
+active work and bounded recent metadata, with oldest active work first, plus
+unfiltered shared queue owners. Session/version route hints can be unknown;
+unknown attribution never matches an ID filter. Enclosing execRead scope does
+not implicitly filter this feed: pass these filters explicitly.
+
+`data` uses native snake_case fields and millisecond Unix timestamps. Its lifetime,
+busy/omission/drop/eviction/truncation fields disclose incomplete evidence.
+`caller_finished` does not imply `work_finished`; follow active child operations.
+Retention is at most one hour, 1,024 ordinary plus 256 slow/failure records, and
+ends on restart. There is no persistence, debug-output capture, or historical
+fallback. Server completion does not prove browser response application; compare
+the browser's `X-Yolm-Request-Id` when debugging transport/decoding failures.
+The UI is `/studio/live`. It and this tool still require a working Studio executor;
+privileged operators can use the native service-control socket reader when it is
+wedged. Platform support must be deployed before the Studio app.
+
 | Evidence | Production | Preview |
 | --- | --- | --- |
 | `liveRequests` / `liveRequest` | Actual production-service ring | Resident runtime rings |
@@ -33,6 +61,7 @@ with the selected version; omit that scope for cross-version investigation.
 | `runtimeStatus` / `backgroundStatus` | Runtime/service inspection | Resident preview inspection |
 | `serviceUsage` | System accounting | Accounting attributed to preview source ID |
 | `versionLogs`, `versionRuns`, `versionRun` | Version-owned records, independent of residency | Same |
+| `productionPipelineRuns` | Durable pipeline invocation registry | `UNSUPPORTED` |
 | Edge reads | System-owned machines and their instances | Same machines; instances identify environment |
 
 Live observations are completed executions, not all in-flight requests. They are
@@ -132,12 +161,14 @@ window counts, dropped events/batches, and coverage before drawing conclusions.
 Raw windows include model/catalog identity, latency summaries, resource counters
 and bounded breakdown text (4,000 characters each; check `breakdownsTruncated`).
 
-Background `kind` accepts `reactor` or `scheduled_proc`; `name` is exact. Items carry
+Background `kind` accepts `reactor` or `scheduled_proc` (`planBackgroundAction` names the same kind `scheduled`); `name` is exact. Items carry
 underlying runtime `status` and preview lifetime identity. That status preserves the
 platform's field names and exposes scheduling/backoff/circuit/concurrency state;
 it is a snapshot, not a historical execution count. Preview status reports existing
 slots, loaded model identity, active requests and residency independently of the
-version's configured preview database.
+version's configured preview database. To pause, resume or run production
+background work, use `planBackgroundAction` in writable `exec`; it returns a link
+a person confirms (see [Forge deployment planning](forge_deploy.md)).
 
 ## Version records
 
@@ -146,6 +177,7 @@ text(await versionLogs({ versionId: 123, origin: "preview", type: "log_error", l
 text(await versionLogs({ versionId: 123, logId: 456 }));
 text(await versionRuns({ versionId: 123, type: "pipeline", limit: 10 }));
 text(await versionRun({ runId: 789 }));
+text(await versionRun({ runId: 789, waitSecs: 25 }));
 ```
 
 Log origins: `check`, `preview`, `pipeline`, `transform`, `test`.
@@ -155,10 +187,77 @@ limit; `logId` selects an exact record in that version. These records have no ex
 request/run/generation ID: time overlap alone is not proof of correlation.
 Runs accept `type: "pipeline" | "transform"`, `status` (`pending`, `compiling`, `loading_catalog`, `running_setup`,
 `running_stage`, `running_finalize`, `checkpoint`, `copy_passthrough`,
-`processing_blocks`, `constraint_checks`, `snapshotting`, `completed`, `failed`, `interrupted`), cursor and
+`processing_blocks`, `constraint_checks`, `snapshotting`, `completed`, `failed`, `interrupted`, `requires_review`), cursor and
 limit. Detail includes progress and pipeline stages/transform phases. These are
 pipeline/transform runs, distinct from runtime request executions. Asynchronous
-test runs are retrieved only through `getTestRun`.
+test runs are retrieved only through `getTestRun`. `invocationId` is set on runs
+that started a production pipeline; read them with `productionPipelineRuns`.
+
+### Waiting for a run
+
+`versionRun`, `productionPipelineRuns` with `invocationId` or `runId`, and
+`getTestRun` accept `waitSecs` (0–25, default 0). The read returns as soon as
+the item is terminal (`completed`, `failed`, `interrupted` or
+`requires_review`; a production invocation with `active: false`) or when the
+wait elapses. A non-terminal result adds `pollAfterSecs`; call the read again
+with `waitSecs` in a later request. List reads reject `waitSecs` with
+`INVALID_ARGUMENT`, as does a value outside 0–25. To wait between other reads,
+use `await sleep(ms)` (at most 30,000 ms). Never busy-loop on `Date.now()`: it
+consumes the exec CPU budget. Where the runtime cannot wait, the first read
+returns at once with `waitNote`.
+
+## Production pipeline invocations
+
+```js
+text(await productionPipelineRuns({ status: "requires_review", limit: 10 }));
+text(await productionPipelineRuns({ invocationId: "00000000-0000-0000-0000-000000000001" }));
+text(await productionPipelineRuns({ runId: 789, waitSecs: 25 }));
+```
+
+Inspect history with `productionPipelineRuns` before rerunning a production
+pipeline. Studio records every production pipeline run as it is admitted,
+progresses and finishes; this read and Production > Pipelines use only those
+records. `target` is optional and must be production; source is
+`studio_execution_runs`. Options: `invocationId`, `runId` (resolved through the
+run's `invocationId`), `name`, `status` (an execution run status such as
+`running_stage`, `completed`, `failed`, `interrupted` or `requires_review`),
+`limit` (1..50, default 10), `cursor`, and `waitSecs` (single invocation only;
+see Waiting for a run). `invocationId`/`runId` select one
+invocation and cannot be combined with list filters. Items are newest first;
+continue with `nextCursor`, which resumes strictly after the last returned run,
+including runs that started at the same instant.
+
+Items carry `status`, `active`, `startedAt`, `completedAt`, stages (with stage
+name, source, status and rows), bounded `error`, `requestedByUserId`, deployed
+`sourceVersionId`, final `rowsProcessed`, `runId`, an admission rejection's
+`rejectionCode` and `blockingInvocationId`, and a review's `resolution`,
+`resolutionNote`, `resolvedByUserId` and `resolvedAt`. A run rejected because
+another invocation awaits review is `failed` with `rejectionCode` and the
+blocking `blockingInvocationId`.
+
+`requires_review` means the platform cannot prove whether a run's effects on
+production data were applied. It is a terminal run status: no further progress
+is recorded. It blocks new production pipelines and transforms until resolved,
+and `planProductionPipeline` returns a blocker naming the run until then.
+Production > Pipelines lists such runs; each run's page
+(`/production/pipelines/runs/<runId>`) offers "Resolve review". In writable `exec`, a
+user with deploy permission can record the outcome:
+
+```js
+text(await resolveProductionPipelineReview({
+  invocationId: "00000000-0000-0000-0000-000000000001",
+  resolution: "no_effects",
+  note: "Verified no orders were written after the interrupted stage.",
+}));
+```
+
+`resolution` is `effects_applied` or `no_effects`; `note` is required (at most
+4 KiB). This changes production coordination state and releases the
+production pipeline/transform block. Never call it without the user's explicit
+approval of that specific resolution, after inspecting the invocation and the
+production data it may have changed. It neither undoes nor reruns any effect.
+Resolving moves the run to `completed` (`effects_applied`) or `failed`
+(`no_effects`) and records the resolution, note, resolver and time on it.
 
 ## Service accounting and Edge
 
@@ -190,7 +289,9 @@ message instead of returning incomplete JSON. Machines expose instances with pro
 state and loaded hashes. Edge requires `manage_edge` in addition to MCP access;
 explicit session scope restricts agent-owned operations. Listing and reading never
 queue probes. Connectivity checks, driver diagnostics, shell commands and controls
-remain in mutable `exec` with their existing grants.
+remain in mutable `exec` with their existing grants. `edgeCheckConnectivity`
+needs no grant or confirmation; access grants are planned with `planEdgeAccess`
+and confirmed by a person (see [Forge Edge commissioning](forge_edge.md)).
 
 ## Links without inspection
 
@@ -213,3 +314,12 @@ review. Existing session/version/artifact and actual preview-app links retain th
 contracts; see [Session history and review links](forge_session_history.md).
 
 For database/history SQL use [Investigation](forge_investigate.md).
+
+## MCP development database runs
+
+[Development database tools](./forge_databases.md) admit asynchronous pipeline
+and transform work. Wait with `versionRun({runId, waitSecs: 25})` after admission;
+`data.items[0].outputDatabaseId` identifies a transform or pipeline clone result.
+Pipeline error text includes the current stage index/name when available.
+`cancelRun({runId})` requests interruption for a run started by this user/session;
+it does not undo effects or immediately release work still draining.

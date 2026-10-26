@@ -11,6 +11,7 @@ related:
   - services/postmark.md
   - api/overview.md
   - blocks/solution_blocks.md
+  - sql/ai_decisions.md
 ---
 
 # Solution Service Integrations
@@ -38,6 +39,10 @@ For general service concepts, see [Service Integrations](../concepts/service_int
 | QuickBooks IIF | `services/quickbooks_iif` | Tab-delimited QuickBooks IIF header and row construction. See [QuickBooks IIF Helpers](./quickbooks_iif.md). |
 | AI providers | `services/open_ai`, `services/anthropic`, `services/gemini`, `services/groq`, `services/ai` | Direct model calls from server procedures; prefer an abstraction when users configure providers. See [AI Services](./ai.md). |
 
+For fixed-outcome classification, routing, and numeric scoring, use
+[AI decision SQL](../sql/ai_decisions.md) rather than a generation helper.
+These expressions do not require a TypeScript service import.
+
 ## Integration Blocks
 
 | Integration block | Import | Use when |
@@ -61,3 +66,16 @@ For general service concepts, see [Service Integrations](../concepts/service_int
 - Make sync jobs idempotent. Scheduled jobs that call external systems should
   be safe to retry.
 - For user-visible email/calendar/meeting integrations, prefer the block.
+- Make outbound calls outside database transactions; wrap the state updates
+  before and after the call in short transactions.
+
+## External-Service Opt-In
+
+Every service helper that makes an outbound call accepts `optIn?: BooleanExpr`
+and passes it to the underlying `s.request(...)`. In preview and local-dev
+runs, the runtime can put external services in opt-in mode, which gates
+requests that do not set `optIn`. Set `optIn: sql.true` (or a condition) on
+calls that must really fire outside production. See the `optIn` entry in the
+[Statements Reference](../procedures/statements_reference.md#request-option-types).
+
+AI decision SQL is an exception: expressions have no statement `optIn` flag.

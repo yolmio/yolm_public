@@ -20,8 +20,9 @@ import type { Sql } from "std/sql_utils";
 ```
 
 Use `s.request(...)` in Yolm tests to exercise HTTP endpoints, auth behavior,
-webhooks, and integration boundaries. Always assert both the HTTP response and
-the durable database side effects.
+webhooks, and integration boundaries. Assert what the endpoint owns: its
+response and the durable business changes it makes. Follow the
+[test policy](../ai/review.md#tests).
 
 ## Basic Request
 
@@ -30,6 +31,7 @@ s.request({
   uri: sql.lit`/api/orders`,
   method: "POST",
   headers: [
+    { name: sql.lit`Host`, value: sql.lit`myapp.example.com` },
     { name: sql.lit`Content-Type`, value: sql.lit`application/json` },
     { name: sql.lit`Authorization`, value: sql.lit`Bearer test-token` },
   ],
@@ -61,18 +63,32 @@ headers: [{ name: sql.lit`Host`, value: sql.lit`myapp.example.com` }],
 
 ## What To Test
 
+Cover these behaviors only when this endpoint owns them and no existing test
+already does. Shared mechanics, such as AuthBlock token and session
+validation or unknown-route 404s, are tested once in their package or the
+platform. The endpoint's own rejection branch, such as returning 401 when
+`auth_user_id` is null, belongs to the endpoint.
+
 | Endpoint behavior | Assert |
 | --- | --- |
-| Success path | 2xx status, response body, created/updated database rows |
-| Validation error | 400 status and stable error shape |
-| Missing auth | 401 status |
-| Wrong permission | 403 status |
-| Not found | 404 status |
+| Business rule on the success path | 2xx status and the business state the endpoint changes |
+| Validation the endpoint implements | 400 status and no business change |
+| Failure after a business write, before commit | expected error response, no partial business changes, exactly one durable failure record with the original error |
+| Authentication check the endpoint implements | 401 status and no business change |
+| Permission rule the endpoint implements | 403 status and no business change |
+| Endpoint-specific not found (e.g. unknown reference in the body) | the endpoint's documented status |
 | Duplicate/idempotent request | same durable result and expected status |
 | Webhook/signature failure | rejected status and no domain mutation |
-| Reactor side effects | call `s.flushReactors()` before final assertions |
+| Reactor side effects | call [`s.flushReactors()`](./test_statements.md#flushreactors) before final assertions |
 
 ## Reusable Helpers
+
+When a transactional endpoint's failure handling needs a test, a
+malformed-input case alone is insufficient: it may fail before a transaction
+starts. Exercise an error inside the transaction, including a failing called
+procedure when applicable, and extend the endpoint's existing test rather than
+adding a file per case. Catching an error does not roll back; see
+[transaction cleanup](../api/external_interfaces.md#transaction-cleanup-in-error-handlers).
 
 Keep helpers small and domain-specific.
 
@@ -80,23 +96,29 @@ Keep helpers small and domain-specific.
 import type { TestStatements } from "std/statements";
 import { sql } from "std/sql_utils";
 
-export function assertStatus(s: TestStatements, status: number) {
-  s.assertEqual(sql`response.status`, sql`${status}`);
-}
-
+// `name` prefixes the outputs so repeated calls in one block do not redeclare
+// the same bindings.
 export function postJson(
   s: TestStatements,
+  name: string,
   uri: string,
   body: Record<string, Sql>,
 ) {
   s.request({
     uri: sql.lit(uri),
     method: "POST",
-    headers: [{ name: sql.lit`Content-Type`, value: sql.lit`application/json` }],
+    headers: [
+      { name: sql.lit`Host`, value: sql.lit`myapp.example.com` },
+      { name: sql.lit`Content-Type`, value: sql.lit`application/json` },
+    ],
     json: body,
-    defReceiveJson: "response_body",
-    defResponseRecord: "response",
+    defReceiveJson: `${name}_body`,
+    defResponseRecord: name,
   });
+}
+
+export function assertStatus(s: TestStatements, name: string, status: number) {
+  s.assertEqual(sql`${sql.ref(name)}.status`, sql`${status}`);
 }
 ```
 
@@ -110,6 +132,7 @@ s.request({
   uri: sql.lit`/api/webhooks/provider`,
   method: "POST",
   headers: [
+    { name: sql.lit`Host`, value: sql.lit`myapp.example.com` },
     { name: sql.lit`Content-Type`, value: sql.lit`application/json` },
     { name: sql.lit`X-Webhook-Signature`, value: sql`valid_signature` },
   ],
@@ -135,18 +158,15 @@ endpoint expects, then include it as a header.
 ## Idempotency Test
 
 ```ts
-const body = {
-  external_id: sql.lit`EXT-123`,
-  idempotency_key: sql.lit`KEY-001`,
-};
+// The endpoint deduplicates on the partner's external_id.
+const body = { external_id: sql.lit`EXT-123` };
 
-postJson(s, "/api/orders", body);
-assertStatus(s, 201);
-s.defScalar("first_id", sql`response_body->>'id'`);
+postJson(s, "first", "/api/orders", body);
+assertStatus(s, "first", 201);
 
-postJson(s, "/api/orders", body);
-assertStatus(s, 200);
-s.assertEqual(sql`response_body->>'id'`, sql`first_id`);
+postJson(s, "retry", "/api/orders", body);
+assertStatus(s, "retry", 200);
+s.assertEqual(sql`retry_body->>'id'`, sql`first_body->>'id'`);
 ```
 
 ## Rules
@@ -158,8 +178,10 @@ s.assertEqual(sql`response_body->>'id'`, sql`first_id`);
   names seen in older tests are deprecated aliases of these.
 - Do not build JSON with string concatenation; use SQL JSON helpers or the
   `json` object form.
-- Assert persistent state, not only status codes.
-- Keep auth tests explicit: unauthenticated, authenticated without permission,
-  and authorized.
+- Assert the persistent business state the endpoint changes, not only status
+  codes.
+- For authentication and permission checks the endpoint implements, cover a
+  missing or invalid credential, a caller without permission, and an
+  authorized caller.
 - Use realistic payloads for integration tests, but keep each test focused on
   one behavior.

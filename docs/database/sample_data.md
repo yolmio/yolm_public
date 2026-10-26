@@ -18,11 +18,11 @@ when they don't, you can override them per-field or per-table.
 `FieldBuilder.sampleData(...)` accepts a `FieldSampleDataConfig`:
 
 ```typescript
-import * as YolmGenApi from "std/yolm_gen_api";
+import { fakerPersonFullName } from "std/yolm_gen_api";
 
 db.table("contacts", (t) => {
   t.string("name", 200).notNull().sampleData({
-    generator: () => sql.lit(YolmGenApi.fakerPersonFullName()),
+    generator: () => sql.lit(fakerPersonFullName()),
   });
   t.string("external_ref", 50).sampleData({
     nullProbability: 0.3,

@@ -18,3 +18,20 @@ export function sparkActionFailureResult(errorRecord: string) {
     else 'Action failed; no changes were committed.'
   end)::string`;
 }
+
+/**
+ * Rethrows a caught error for a reversible action. Messages from `throwError`
+ * statements and declared table checks are application-authored, so they
+ * stay visible; every other error keeps the generic rollback message.
+ */
+export function rethrowSparkActionError(
+  s: GeneralServerStatements,
+  errorRecord: string,
+) {
+  s.throwError(
+    sql`${sql.ref(errorRecord, "message")}`,
+    sql`case when cast(${sql.ref(errorRecord, "type")} as string)
+        in ('thrown_error', 'check_violation')
+      then ${sql.lit(validationTag)} end`,
+  );
+}

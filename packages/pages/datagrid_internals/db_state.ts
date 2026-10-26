@@ -483,24 +483,24 @@ function dgFilterOpAndFns() {
       [
         sql.lit`bool_eq`,
         sql`case
-          when input.value_1 = 'true' then input.expr || '=true'
-          else '(' || input.expr || ' is null or ' || input.expr || '=false)'
+          when input.value_1 = 'true' then '(' || input.expr || ')=true'
+          else '((' || input.expr || ') is null or (' || input.expr || ')=false)'
         end`,
       ],
       [
         sql.lit`bool_ne`,
         sql`case
-          when input.value_1 = 'true' then '(' || input.expr || ' is null or ' || input.expr || '=false)'
-          else input.expr || '=true'
+          when input.value_1 = 'true' then '((' || input.expr || ') is null or (' || input.expr || ')=false)'
+          else '(' || input.expr || ')=true'
         end`,
       ],
       [
         sql.lit`enum_like_bool_eq`,
         sql`case
           when coalesce(input.value_1, '') = '' then 'true'
-          when input.value_1 = 'true' then input.expr || '=true'
-          when input.value_1 = 'false' then input.expr || '=false'
-          else input.expr || ' is null'
+          when input.value_1 = 'true' then '(' || input.expr || ')=true'
+          when input.value_1 = 'false' then '(' || input.expr || ')=false'
+          else '(' || input.expr || ') is null'
         end`,
       ],
       [sql.anyColumnValue, sql.lit`true`],
@@ -524,12 +524,25 @@ function dgFilterOpAndFns() {
     ],
     returnType: { type: "Enum", enum: "dg_filter_op" },
   });
+  // The historical name is retained because string relations are its broad
+  // caller base. Scalar enum relations use the same correlated-exists shape,
+  // with enum empty meaning only SQL NULL / no related row (not blank text).
   system.rulesFunction({
     name: "encode_dg_relation_string_filter",
     parameters: [
       {
         name: "op",
         type: { type: "Enum", enum: "dg_filter_op" },
+        notNull: true,
+      },
+      {
+        name: "is_scalar",
+        type: "Bool",
+        notNull: true,
+      },
+      {
+        name: "is_string",
+        type: "Bool",
         notNull: true,
       },
       {
@@ -564,24 +577,43 @@ function dgFilterOpAndFns() {
             'str_contains',
             'str_not_contains',
             'str_matches',
-            'str_not_matches'
+            'str_not_matches',
+            'enum_eq',
+            'enum_ne'
           ) and coalesce(input.value_1, '') = '' then 'true'
           else
-            case when input.op in (
-              'str_ne',
-              'str_not_contains',
-              'str_not_matches',
-              'empty'
+            case when input.op = 'empty' or (
+              not input.is_scalar and input.is_string and input.op in (
+                'str_ne',
+                'str_not_contains',
+                'str_not_matches'
+              )
             ) then 'not ' else '' end ||
             'exists (select 1 from ' || input.from_expr ||
             ' where (' || input.where_expr || ') and (' ||
+            case when input.is_scalar and (
+              (input.is_string and input.op in (
+                'str_ne',
+                'str_not_contains',
+                'str_not_matches'
+              )) or (not input.is_string and input.op = 'enum_ne')
+            ) then input.value_expr || ' is not null) and (' else '' end ||
             fn.encode_dg_filter_op(
-              op => fn.positive_dg_relation_string_filter_op(input.op),
-              expr => input.value_expr,
+              op => case when input.is_scalar and (
+                (input.is_string and input.op in (
+                  'str_ne',
+                  'str_not_contains',
+                  'str_not_matches'
+                )) or (not input.is_string and input.op = 'enum_ne')
+              ) then input.op else fn.positive_dg_relation_string_filter_op(input.op) end,
+              expr => case when input.is_scalar and input.is_string and input.op in (
+                'str_contains',
+                'str_not_contains'
+              ) then '(' || input.value_expr || ' collate Binary)' else input.value_expr end,
               value_1 => input.value_1,
               value_2 => null,
               value_3 => null,
-              is_string => true
+              is_string => input.is_string
             ) || '))'
           end`,
       ],

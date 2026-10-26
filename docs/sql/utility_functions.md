@@ -1,6 +1,6 @@
 ---
 title: Utility Functions
-description: Utility SQL functions for formatting, phone numbers, JWTs, OTP/TOTP/HOTP, QR codes, rich text, markdown, ordering, and network access.
+description: Utility SQL functions for formatting, phone numbers, JWTs, OTP/TOTP/HOTP, QR codes, markdown, HTML email cleanup, ordering, and IP checks.
 tags:
   - sql
   - functions
@@ -66,7 +66,8 @@ select format.percent(0.5, maximum_fraction_digits => 0);
 
 ### format.date
 
-Formats a date with a format string. See [Date Functions](./date_functions.md) for format specifiers.
+Formats a date with a format string. See
+[Date Functions](./date_functions.md#format-specifiers) for format specifiers.
 
 ```sql
 select format.date(current_date, '%B %d, %Y');
@@ -78,11 +79,21 @@ select format.date(current_timestamp, '%Y-%m-%d %H:%M:%S');
 
 ### format.typescript
 
-Formats a TypeScript/TSX source code string using dprint.
+Formats a source code string using dprint's Deno preset until the output is
+stable. An optional file path selects the language by its extension (`ts`,
+`tsx`, `mts`, `cts`, `js`, `jsx`, `mjs`, or `cjs`), including declaration
+suffixes such as `.d.cts`. An omitted or NULL path, or an unrecognized
+extension, retains the original TSX behavior. Invalid source is returned
+unchanged; NULL source returns NULL. Nonempty formatted output ends in a
+newline. `// deno-fmt-ignore-file` preserves source text apart from removing
+a leading UTF-8 BOM.
 
 ```sql
 select format.typescript('const x={a:1,b:2}');
 -- 'const x = { a: 1, b: 2 };'
+
+select format.typescript('const f = <T>(x: T) => x', 'helpers.ts');
+-- 'const f = <T>(x: T) => x;'
 ```
 
 ## Phone Number Functions
@@ -219,7 +230,8 @@ where ip_in_cidr(client_ip, '10.0.0.0/8');  -- internal requests
 ## System Functions
 
 For `current_user`, `current_tx()`, `current_task()`, `system_id()`, and
-`info.system_id()`, see [Global Functions and Operators](./global_functions.md).
+`info.system_id()`, see
+[Global SQL Functions](./global_functions.md#system-functions).
 
 ## OTP Functions
 
@@ -423,10 +435,12 @@ values ('First Item', ordering.n_before(1, (select min(ordering) from items)));
 
 ## Null Handling and Type Checks
 
-For `coalesce`, `nullif`, `greatest`, `least`, and null-safe comparison
-operators, see [Global Functions and Operators](./global_functions.md).
+For `coalesce`, `nullif`, `greatest`, and `least`, see
+[Global SQL Functions](./global_functions.md#null-handling). For null-safe
+comparison operators (`is distinct from`, `is not distinct from`), see
+[SQL Expressions](./expressions.md#is-distinct-from).
 
 ## Record ID Functions
 
 For `next_record_id` and `last_record_id`, see
-[Global Functions and Operators](./global_functions.md).
+[Global SQL Functions](./global_functions.md#record-id-functions).

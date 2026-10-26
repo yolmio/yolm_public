@@ -1,3 +1,16 @@
+import {
+  CampaignDeliveryReport,
+  CampaignsPage,
+  DeliveryResultsPage,
+  SelectedRowsDialog,
+} from "./ui";
+export type {
+  MarketingCampaignAccess,
+  MarketingCampaignDeliveryResultsPageProps,
+  MarketingCampaignSelectedRows,
+  MarketingCampaignSelectedRowsDialogProps,
+  MarketingCampaignsPageProps,
+} from "./ui";
 import type {
   BulkEmailDeliveryBlock,
   BulkEmailDeliverySource,
@@ -8,15 +21,26 @@ import {
   renderEmailDeliveryTemplate,
 } from "blocks/email_delivery_template";
 import { generateAdvancedTemplateBody } from "blocks/email_templates/index";
+import { prepareEmailTestRecipients } from "blocks/email_test_recipients";
 import { storedScheduledProc } from "std/scheduled_utils";
 import { checkString, sql } from "std/sql_utils";
 import type { AnyExpr, Sql } from "std/sql_utils";
-import type { IServerBaseStatements } from "std/statements";
+import type {
+  EndpointStatementsOrFn,
+  IServerBaseStatements,
+} from "std/statements";
+import { getCapabilities } from "std/yolm_gen_api";
+import {
+  withHtmlUnsubscribeFooter,
+  withTextUnsubscribeFooter,
+} from "blocks/bulk_email_delivery";
 import type { Block, TableBuilder } from "std/system";
 import { system } from "std/system";
 
 const RESERVED_VARIABLE_NAMES = new Set(["email"]);
 const DUE_CAMPAIGNS_PER_RUN = 1;
+const CAMPAIGN_BATCH_SIZE = 500;
+const MAX_CAMPAIGN_RECIPIENTS = 10_000;
 
 /** Parse the minute-precision datetime-local form value in the system timezone. */
 export function marketingCampaignScheduleTime(value: Sql): Sql {
@@ -34,13 +58,28 @@ export interface MarketingEmailRecipientVariable {
   expr: (recipient: Sql, campaign: Sql) => AnyExpr;
 }
 
-export interface MarketingEmailCampaignSender {
+export type MarketingEmailCampaignSender = {
   fromAddress: string;
   replyTo?: string;
-}
+  resolve?: never;
+  variables?: never;
+  legacyVariables?: never;
+} | {
+  /** SQL JSON with from_address, reply_to, variables; optional error rejects the sender, is_fallback annotates previews. Null rejects the audience. */
+  resolve: (recipient: Sql, campaign: Sql) => Sql;
+  /** Template variables supplied by the resolved identity, frozen with the sender. */
+  variables?: Record<string, string>;
+  /** Fill missing sender variables in pre-resolver held snapshots at release. Existing values win. */
+  legacyVariables?: Record<string, string>;
+  fromAddress?: never;
+  replyTo?: never;
+};
 
 export interface MarketingEmailCampaignAudience {
   recipientTableName: string;
+  /** Contact label and correction route used in sender previews and validation. */
+  recipientLabel?: (recipient: Sql) => Sql;
+  recipientHref?: (recipient: Sql) => Sql;
   defineCampaignFields?: (table: TableBuilder) => void;
   /** Returns source_recipient_key and email. */
   recipientsQuery: (campaign: Sql) => Sql;
@@ -55,6 +94,8 @@ export interface MarketingEmailCampaignBlockOptions {
   senders: Record<string, MarketingEmailCampaignSender>;
   audience: MarketingEmailCampaignAudience;
   onRecipientEvent?: BulkEmailDeliverySourceConfig["onRecipientEvent"];
+  /** Isolated preview/test transport; never used in production. */
+  testEmailMockProcedure?: EndpointStatementsOrFn;
 }
 
 // Check rendered text, not Lexical JSON or its HTML wrapper. Image-only
@@ -91,14 +132,21 @@ export function isMarketingEmailTemplateReady(template: Sql) {
 }
 
 /**
- * Template-based marketing campaign drafts and scheduling over platform bulk
+ * Template-based marketing campaign scheduling over platform bulk
  * delivery. User-owned Gmail/Outlook mailboxes intentionally do not enter this
  * state machine; bounded CRM mail merge uses ConnectedAccountEmailDelivery.
  */
 export class MarketingEmailCampaignBlock implements Block {
+  static CampaignsPage = CampaignsPage;
+  static CampaignDeliveryReport = CampaignDeliveryReport;
+  static DeliveryResultsPage = DeliveryResultsPage;
+  static SelectedRowsDialog = SelectedRowsDialog;
   blockName = "MarketingEmailCampaignBlock";
   blockDisplayName = "Marketing Email Campaigns";
   description = "Template-based platform marketing campaign management";
+  externalServiceOptions = [
+    { optionKey: "send_test_emails", optionLabel: "Send campaign test emails" },
+  ];
   readonly deliverySource: BulkEmailDeliverySource;
   private scheduleSequence = 0;
 
@@ -110,11 +158,21 @@ export class MarketingEmailCampaignBlock implements Block {
       if (!/^[a-z][a-z0-9_]*$/.test(key) || key.length > 100) {
         throw new Error(`Invalid marketing campaign sender key: ${key}`);
       }
-      if (!sender.fromAddress || sender.fromAddress.length > 500) {
+      if (
+        !sender.resolve &&
+        (!sender.fromAddress || sender.fromAddress.length > 500)
+      ) {
         throw new Error(`Invalid marketing campaign sender address: ${key}`);
       }
       if (sender.replyTo && sender.replyTo.length > 500) {
         throw new Error(`Invalid marketing campaign reply-to address: ${key}`);
+      }
+      for (const name of Object.keys(sender.legacyVariables ?? {})) {
+        if (!Object.hasOwn(sender.variables ?? {}, name)) {
+          throw new Error(
+            `Undeclared legacy campaign sender variable: ${key}.${name}`,
+          );
+        }
       }
     }
     this.validateVariables();
@@ -125,12 +183,22 @@ export class MarketingEmailCampaignBlock implements Block {
         const campaignRecipient = sql.ref("eligibility_recipient");
         return sql`exists (
           select 1
-          from marketing_email_campaigns eligibility_campaign
+          from (
+            select id as campaign_id, delivery_id from marketing_email_campaigns
+              where delivery_id is not null
+            union all
+            select campaign.id as campaign_id, batch.delivery_id
+            from marketing_email_campaign_delivery_batches batch
+            join marketing_email_campaigns campaign
+              on campaign.delivery_id = batch.first_delivery_id
+          ) eligibility_delivery
+          join marketing_email_campaigns eligibility_campaign
+            on eligibility_campaign.id = eligibility_delivery.campaign_id
           join ${sql.ref(this.opts.audience.recipientTableName)}
             eligibility_recipient
             on eligibility_recipient.id =
               try_cast(${recipient}.source_recipient_key as bigint)
-          where eligibility_campaign.delivery_id = ${recipient}.delivery_id
+          where eligibility_delivery.delivery_id = ${recipient}.delivery_id
             and coalesce((${
           this.opts.audience.isRecipientEligible(campaignRecipient, campaign)
         }), false)
@@ -138,17 +206,101 @@ export class MarketingEmailCampaignBlock implements Block {
       },
       onSubmissionTerminal: (s, ctx) => {
         s.modify(sql`update marketing_email_campaigns
-          set status = case when ${ctx.succeeded}
-                then 'submitted'::enums.marketing_email_campaign_status
-                else 'failed'::enums.marketing_email_campaign_status end,
-              error = case when ${ctx.succeeded} then null else (
-                select error from bulk_email_deliveries
-                where id = ${ctx.deliveryId}
-              ) end
-          where id = try_cast(${ctx.sourceRecordKey} as bigint)
-            and delivery_id = ${ctx.deliveryId} and status = 'submitting'`);
+          set status = case when exists (select 1 from bulk_email_deliveries batch
+                where batch.id in (${
+          this.deliveryIdsQuery(sql`marketing_email_campaigns.delivery_id`)
+        }) and batch.status = 'failed')
+              then 'failed'::enums.marketing_email_campaign_status
+              else 'submitted'::enums.marketing_email_campaign_status end,
+            error = (select min(batch.error) from bulk_email_deliveries batch
+              where batch.id in (${
+          this.deliveryIdsQuery(sql`marketing_email_campaigns.delivery_id`)
+        }) and batch.status = 'failed')
+          where ${ctx.deliveryId} in (${
+          this.deliveryIdsQuery(sql`marketing_email_campaigns.delivery_id`)
+        })
+            and status = 'submitting'
+            and not exists(select 1 from bulk_email_deliveries batch
+              where batch.id in (${
+          this.deliveryIdsQuery(sql`marketing_email_campaigns.delivery_id`)
+        })
+                and batch.status in ('held', 'prepared', 'submitting'))`);
       },
-      onRecipientEvent: opts.onRecipientEvent,
+      onRecipientEvent: opts.onRecipientEvent
+        ? (s, ctx) =>
+          opts.onRecipientEvent!(s, {
+            ...ctx,
+            sourceRecordKey:
+              sql`(select campaign.id::string from marketing_email_campaigns campaign
+            where ${ctx.deliveryId} in (${
+                this.deliveryIdsQuery(sql`campaign.delivery_id`)
+              }))`,
+          })
+        : undefined,
+    });
+  }
+
+  /** The first delivery also fences scheduling; extra batches link to that snapshot. */
+  deliveryIdsQuery(firstDeliveryId: Sql) {
+    return sql`select ${firstDeliveryId} as id
+      union all select delivery_id as id from marketing_email_campaign_delivery_batches
+      where first_delivery_id = ${firstDeliveryId}`;
+  }
+
+  /** Scheduled/history labels use frozen delivery identities, never today's resolver. */
+  senderLabel(campaign: Sql, configuredLabel: Sql) {
+    return sql`case when ${campaign}.delivery_id is null then ${configuredLabel}
+      else coalesce((select string_agg(identity.label, ', ') from (
+        select distinct delivery.from_email ||
+        case when delivery.reply_to_email is not null and delivery.reply_to_email != delivery.from_email
+          then ' (Reply-To: ' || delivery.reply_to_email || ')' else '' end as label
+        from bulk_email_deliveries delivery where delivery.id in (${
+      this.deliveryIdsQuery(sql`${campaign}.delivery_id`)
+    }) order by label) identity), 'No delivery sender') end`;
+  }
+
+  /** Campaign totals across every provider batch, including legacy single deliveries. */
+  summaryQuery(campaignId?: Sql) {
+    const engagement = this.opts.delivery.opts.engagementTracking !== false;
+    return sql`select campaign.id, campaign.name, campaign.status, campaign.error,
+      count(distinct delivery.id) as batch_count, count(recipient.id) as recipient_count,
+      count(case when recipient.status = 'submitted' then 1 end) as submitted_count,
+      count(case when recipient.delivered_at is not null then 1 end) as delivered_count,
+      count(case when recipient.status = 'excluded' then 1 end) as excluded_count,
+      count(case when recipient.status = 'failed' then 1 end) as failed_count,
+      count(case when recipient.status = 'send_unknown' then 1 end) as send_unknown_count,
+      count(case when recipient.hard_bounced_at is not null then 1 end) as hard_bounced_count
+      ${
+      engagement
+        ? sql`, count(case when recipient.first_opened_at is not null then 1 end) as opened_count,
+        count(case when recipient.first_clicked_at is not null then 1 end) as clicked_count`
+        : sql``
+    }
+      from marketing_email_campaigns campaign
+      left join (
+        select id as campaign_id, delivery_id from marketing_email_campaigns where delivery_id is not null
+        union all
+        select owner.id as campaign_id, batch.delivery_id
+        from marketing_email_campaigns owner
+        join marketing_email_campaign_delivery_batches batch on batch.first_delivery_id = owner.delivery_id
+      ) campaign_delivery on campaign_delivery.campaign_id = campaign.id
+      left join bulk_email_deliveries delivery on delivery.id = campaign_delivery.delivery_id
+      left join bulk_email_delivery_recipients recipient on recipient.delivery_id = delivery.id
+      where ${campaignId ? sql`campaign.id = ${campaignId}` : sql`true`}
+      group by campaign.id, campaign.name, campaign.status, campaign.error`;
+  }
+
+  private discardDeliveries<T extends IServerBaseStatements>(
+    s: T,
+    firstDeliveryId: Sql,
+  ) {
+    const prefix = `campaign_discard_${this.scheduleSequence++}`;
+    s.defTable(prefix, this.deliveryIdsQuery(firstDeliveryId));
+    s.modify(
+      sql`delete from marketing_email_campaign_delivery_batches where first_delivery_id = ${firstDeliveryId}`,
+    );
+    s.forEachTable(prefix, `${prefix}_row`, (s) => {
+      this.deliverySource.discardHeld(s, sql`${sql.ref(`${prefix}_row`)}.id`);
     });
   }
 
@@ -158,6 +310,7 @@ export class MarketingEmailCampaignBlock implements Block {
       const [scope, variables] of [
         ["campaign", this.opts.audience.campaignVariables ?? {}],
         ["recipient", this.opts.audience.recipientVariables ?? {}],
+        ["sender", this.senderVariables()],
       ] as const
     ) {
       for (const name of Object.keys(variables)) {
@@ -194,18 +347,27 @@ export class MarketingEmailCampaignBlock implements Block {
     ) {
       variables[name] = `${variable.description} (recipient)`;
     }
+    for (const [name, variable] of Object.entries(this.senderVariables())) {
+      variables[name] = `${variable.description} (sender)`;
+    }
     return variables;
   }
 
   initialize() {
     system.enum_({
       name: "marketing_email_campaign_status",
-      values: ["draft", "scheduled", "submitting", "submitted", "failed"],
+      values: [
+        { name: "cancelled", renameFrom: "draft" },
+        "scheduled",
+        "submitting",
+        "submitted",
+        "failed",
+      ],
     });
     registerEmailDeliveryTemplateRenderer();
     system.db.table("marketing_email_campaigns", (table) => {
       table.description(
-        "An editable template-based campaign linked to one immutable platform bulk delivery.",
+        "A scheduled or terminal campaign linked to its frozen platform delivery batches.",
       );
       table.sampleData({ skipSampleData: true });
       table.string("name", 200).notNull();
@@ -214,9 +376,9 @@ export class MarketingEmailCampaignBlock implements Block {
       );
       table.string("sender_key", 100).notNull();
       table.enum("status", "marketing_email_campaign_status").notNull()
-        .default(sql.lit`draft`);
+        .default(sql.lit`scheduled`);
       table.string("error", 2000);
-      table.timestampTz("scheduled_at");
+      table.timestampTz("scheduled_at").default(sql`now()`);
       table.fk("delivery_id", "bulk_email_deliveries").unique().onDelete(
         "Restrict",
       );
@@ -231,6 +393,159 @@ export class MarketingEmailCampaignBlock implements Block {
           sql.lit`A campaign in a queued state requires a schedule time`,
       });
       table.skipAutoApi();
+    });
+    system.db.table("marketing_email_campaign_delivery_batches", (table) => {
+      table.description(
+        "Additional provider batches belonging to the campaign's original frozen delivery.",
+      );
+      table.fk("first_delivery_id", "bulk_email_deliveries").notNull().onDelete(
+        "Restrict",
+      );
+      table.fk("delivery_id", "bulk_email_deliveries").notNull().unique()
+        .onDelete("Restrict");
+      table.skipAutoApi();
+    });
+    system.storedProcedure({
+      name: "marketing_email_campaign_send_test",
+      transaction: "standalone",
+      inputScalars: [
+        { name: "p_campaign_id", type: "BigInt" },
+        { name: "p_template_id", type: "BigInt" },
+        { name: "p_sender_key", type: "String" },
+        { name: "p_test_to", type: "String" },
+        { name: "p_sample_key", type: "String" },
+      ],
+      inputTables: [{
+        name: "p_test_recipients",
+        fields: [
+          { name: "source_recipient_key", type: "String" },
+          { name: "email", type: "String" },
+        ],
+      }],
+      procedure: (s) => {
+        const testRecipients = prepareEmailTestRecipients(s, sql`p_test_to`);
+        s.defRecord(
+          "test_campaign",
+          sql`select coalesce(saved.id, 0) as id, ${
+            Object.keys(system.db.tables.marketing_email_campaigns.fields)
+              .filter((field) => field !== "id").map(
+                (field) => {
+                  const fallback = field === "email_template_id"
+                    ? sql`p_template_id`
+                    : field === "sender_key"
+                    ? sql`p_sender_key`
+                    : field === "name"
+                    ? sql.lit`Test email`
+                    : undefined;
+                  return fallback
+                    ? sql`coalesce(saved.${sql.ref(field)}, ${fallback}) as ${
+                      sql.ref(field)
+                    }`
+                    : sql`saved.${sql.ref(field)}`;
+                },
+              )
+          } from (select 1 as one) input
+          left join marketing_email_campaigns saved on saved.id = p_campaign_id`,
+        );
+        s.throwErrorIf(
+          sql`p_campaign_id is not null and not exists(select 1 from marketing_email_campaigns where id = p_campaign_id and status = 'scheduled')`,
+          sql.lit`Only scheduled campaigns can send a test.`,
+        );
+        s.throwErrorUnless(
+          sql`exists(select 1 from email_templates template
+          where template.id = test_campaign.email_template_id
+          and ${isMarketingEmailTemplateReady(sql`template`)})`,
+          sql
+            .lit`Save an active template with a subject and body before sending a test.`,
+        );
+        s.defRecord("test_sample", {
+          fields: [
+            ...[
+              "source_recipient_key",
+              "email",
+              "recipient_label",
+              "from_address",
+              "reply_to",
+              "sender_error",
+            ].map((name) => ({ name, type: "String" as const })),
+            { name: "sender_valid", type: "Bool" },
+            { name: "variables", type: "Json" },
+          ],
+        });
+        const sampleColumns =
+          sql`source_recipient_key, email, recipient_label, from_address, reply_to, sender_error, sender_valid, variables`;
+        s.if(sql`p_campaign_id is not null`, (s) => {
+          s.modify(sql`insert into test_sample select ${sampleColumns}
+            from (${
+            this.scheduledTestRecipientsQuery(sql`test_campaign`)
+          }) sample_recipient
+            where source_recipient_key = p_sample_key limit 1`);
+        }).else((s) => {
+          s.modify(sql`insert into test_sample select ${sampleColumns}
+            from (${
+            this.buildAudienceQuery(
+              sql`test_campaign`,
+              sql`select source_recipient_key, email from p_test_recipients`,
+            )
+          }) sample_recipient
+            where source_recipient_key = p_sample_key limit 1`);
+        });
+        s.throwErrorIf(
+          sql`test_sample.source_recipient_key is null`,
+          sql.lit`Choose an eligible sample contact for personalization.`,
+        );
+        s.throwErrorUnless(
+          this.validSender(sql`test_sample`),
+          sql`coalesce(test_sample.recipient_label, test_sample.email) || ': ' ||
+            coalesce(test_sample.sender_error, 'Sender unavailable or invalid. Review the contact owner.')`,
+        );
+        const content = this.renderCampaign(
+          s,
+          sql`test_campaign`,
+          "test_render",
+        );
+        s.defScalar(
+          "test_variables",
+          sql`test_sample.variables || json_build_object(
+          'email', test_sample.email, 'unsubscribe_url', '#', 'one_click_unsubscribe_url', '#')`,
+        );
+        s.sendEmail({
+          from: sql`test_sample.from_address`,
+          replyTo: sql`test_sample.reply_to`,
+          to: testRecipients,
+          subject: sql`'[TEST] ' || ${
+            renderEmailDeliveryTemplate(
+              content.subject,
+              sql`test_variables`,
+              false,
+            )
+          }`,
+          htmlBody: renderEmailDeliveryTemplate(
+            withHtmlUnsubscribeFooter(content.html),
+            sql`test_variables`,
+            true,
+          ),
+          textBody: renderEmailDeliveryTemplate(
+            withTextUnsubscribeFooter(content.text),
+            sql`test_variables`,
+            false,
+          ),
+          optIn: !!getCapabilities()?.blocks?.MarketingEmailCampaignBlock
+            ?.send_test_emails,
+          mockProcedure: this.opts.testEmailMockProcedure,
+          resultJsonScalar: "test_send_result",
+          errorJsonScalar: "test_send_error",
+        });
+        s.throwErrorIf(
+          sql`test_send_error is not null or test_send_result->'mockError' is not null`,
+          sql`coalesce(test_send_error->>'message', test_send_result->'mockError'->>'message', 'The test email could not be sent.')`,
+        );
+        s.throwErrorIf(
+          sql`test_send_result is null`,
+          sql
+            .lit`The email service did not confirm the test send. Check the destination inbox before retrying.`,
+        );
+      },
     });
     system.storedProcedure({
       name: "marketing_email_campaign_finalize_generation",
@@ -263,20 +578,53 @@ export class MarketingEmailCampaignBlock implements Block {
           returning id into claimed_campaign_id`);
         s.if(sql`claimed_campaign_id is not null`, (s) => {
           s.if(sql`p_release`, (s) => {
-            this.deliverySource.releaseHeld(s, {
-              deliveryId: sql`p_delivery_id`,
-              subjectTemplate: sql`p_subject`,
-              htmlTemplate: sql`p_html`,
-              textTemplate: sql`p_text`,
-              releasedDeliveryIdScalar: "released_delivery_id",
-            });
-            s.throwErrorIf(
-              sql`released_delivery_id is null`,
-              sql.lit`Campaign delivery is no longer held`,
+            for (const [key, sender] of Object.entries(this.opts.senders)) {
+              const legacy = sender.legacyVariables ?? {};
+              const names = Object.keys(legacy);
+              if (names.length === 0) continue;
+              s.if(
+                sql`(select sender_key from marketing_email_campaigns
+                where id = claimed_campaign_id) = ${sql.lit(key)}`,
+                (s) => {
+                  // Compatibility for held snapshots made before sender variables
+                  // existed. Never replace frozen values or change a released request.
+                  s.modify(sql`update bulk_email_delivery_recipients recipient
+                  set variables = ${
+                    sql.jsonBuildObject(legacy)
+                  } || recipient.variables
+                  where recipient.delivery_id in (${
+                    this.deliveryIdsQuery(sql`p_delivery_id`)
+                  })
+                    and exists (select 1 from bulk_email_deliveries delivery
+                      where delivery.id = recipient.delivery_id and delivery.status = 'held')
+                    and ${
+                    sql.or(...names.map((name) =>
+                      sql`json_typeof(recipient.variables->${
+                        sql.lit(name)
+                      }) is null`
+                    ))
+                  }`);
+                },
+              );
+            }
+            s.forEachQuery(
+              this.deliveryIdsQuery(sql`p_delivery_id`),
+              "release_batch",
+              (s) => {
+                this.deliverySource.releaseHeld(s, {
+                  deliveryId: sql`release_batch.id`,
+                  subjectTemplate: sql`p_subject`,
+                  htmlTemplate: sql`p_html`,
+                  textTemplate: sql`p_text`,
+                  releasedDeliveryIdScalar: "released_delivery_id",
+                });
+                s.throwErrorIf(
+                  sql`released_delivery_id is null`,
+                  sql.lit`Campaign delivery is no longer held`,
+                );
+              },
             );
-          }).else((s) =>
-            this.deliverySource.discardHeld(s, sql`p_delivery_id`)
-          );
+          }).else((s) => this.discardDeliveries(s, sql`p_delivery_id`));
         });
         s.commitTransaction();
       },
@@ -289,7 +637,7 @@ export class MarketingEmailCampaignBlock implements Block {
     system.addReactor({
       name: "marketing_email_campaign_ready",
       query: sql`select id from marketing_email_campaigns
-        where status = 'scheduled' and scheduled_at <= now()
+        where status = 'scheduled' and delivery_id is not null and scheduled_at <= now()
           and not exists (select 1 from bulk_email_deliveries
             where status = 'submitting' or (status = 'prepared'
               and (next_attempt_at is null or next_attempt_at <= now())))
@@ -307,7 +655,7 @@ export class MarketingEmailCampaignBlock implements Block {
     });
   }
 
-  /** Create and schedule a campaign in the caller's transaction. */
+  /** Create and schedule atomically in the caller's transaction. */
   createAndSchedule<T extends IServerBaseStatements>(s: T, opts: {
     name: AnyExpr;
     templateId: AnyExpr;
@@ -316,49 +664,18 @@ export class MarketingEmailCampaignBlock implements Block {
     recipientsQuery?: Sql;
     campaignIdScalar: string;
   }) {
-    if (
-      !system.storedProcedures.some((p) =>
-        p.name === "marketing_email_campaign_create_draft"
-      )
-    ) {
-      system.storedProcedure({
-        name: "marketing_email_campaign_create_draft",
-        transaction: "caller",
-        inputScalars: [
-          { name: "p_name", type: "String" },
-          { name: "p_template_id", type: "BigInt" },
-          { name: "p_sender_key", type: "String" },
-        ],
-        outputScalars: [{ name: "o_campaign_id", type: "BigInt" }],
-        procedure: (s) => {
-          s.throwErrorIf(
-            sql`trim(p_name) = '' or length(trim(p_name)) > 200`,
-            sql
-              .lit`Campaign name is required and must be at most 200 characters.`,
-          );
-          s.modify(sql`insert into marketing_email_campaigns (
-            name, email_template_id, sender_key, status
-          ) select trim(p_name), template.id, p_sender_key,
-              'draft'::enums.marketing_email_campaign_status
-            from email_templates template
-            where template.id = p_template_id and template.is_active
-            returning id into o_campaign_id`);
-          s.throwErrorIf(
-            sql`o_campaign_id is null`,
-            sql.lit`Select an active email template.`,
-          );
-        },
-      });
-    }
+    s.throwErrorUnless(
+      sql`nullif(trim(${opts.name}), '') is not null and length(trim(${opts.name})) <= 200`,
+      sql.lit`Campaign name is required and must be at most 200 characters.`,
+    );
     s.defScalar(opts.campaignIdScalar, { type: "BigInt" });
-    s.callStoredProcedure("marketing_email_campaign_create_draft", {
-      inputScalars: {
-        p_name: opts.name,
-        p_template_id: opts.templateId,
-        p_sender_key: opts.senderKey,
-      },
-      outputScalars: { o_campaign_id: opts.campaignIdScalar },
-    });
+    s.modify(
+      sql`insert into marketing_email_campaigns(name, email_template_id, sender_key, status, scheduled_at)
+      values (trim(${opts.name}), ${opts.templateId}, ${opts.senderKey}, 'scheduled', coalesce(${
+        opts.scheduledAt ?? sql`null::timestamptz`
+      }, now()))
+      returning id into ${sql.ref(opts.campaignIdScalar)}`,
+    );
     this.schedule(s, {
       campaignId: sql.ref(opts.campaignIdScalar),
       scheduledAt: opts.scheduledAt,
@@ -366,54 +683,7 @@ export class MarketingEmailCampaignBlock implements Block {
     });
   }
 
-  /** Copy a terminal campaign to a draft, rejecting uncertain/already-sent retries. */
-  copyToDraft<T extends IServerBaseStatements>(s: T, opts: {
-    campaignId: AnyExpr;
-    campaignIdScalar: string;
-  }) {
-    if (
-      !system.storedProcedures.some((p) =>
-        p.name === "marketing_email_campaign_copy_to_draft"
-      )
-    ) {
-      system.storedProcedure({
-        name: "marketing_email_campaign_copy_to_draft",
-        transaction: "caller",
-        inputScalars: [{ name: "p_campaign_id", type: "BigInt" }],
-        outputScalars: [{ name: "o_campaign_id", type: "BigInt" }],
-        procedure: (s) => {
-          s.throwErrorIf(
-            sql`exists (
-              select 1 from marketing_email_campaigns campaign
-              join bulk_email_delivery_recipients recipient on recipient.delivery_id = campaign.delivery_id
-              where campaign.id = p_campaign_id and campaign.status = 'failed'
-                and recipient.status in ('send_unknown', 'submitted')
-            )`,
-            sql
-              .lit`This failed campaign contains uncertain or already-sent recipients. Reconcile delivery results and prepare a new campaign only for recipients proven not sent.`,
-          );
-          s.modify(sql`insert into marketing_email_campaigns (
-            name, email_template_id, sender_key, status
-          ) select left(name, 193) || ' (copy)', email_template_id, sender_key,
-              'draft'::enums.marketing_email_campaign_status
-            from marketing_email_campaigns
-            where id = p_campaign_id and status in ('submitted', 'failed')
-            returning id into o_campaign_id`);
-          s.throwErrorIf(
-            sql`o_campaign_id is null`,
-            sql.lit`Only terminal campaigns can be copied to a draft.`,
-          );
-        },
-      });
-    }
-    s.defScalar(opts.campaignIdScalar, { type: "BigInt" });
-    s.callStoredProcedure("marketing_email_campaign_copy_to_draft", {
-      inputScalars: { p_campaign_id: opts.campaignId },
-      outputScalars: { o_campaign_id: opts.campaignIdScalar },
-    });
-  }
-
-  /** Schedule inside the caller's transaction with any related draft updates. */
+  /** Freeze a newly inserted campaign in the same transaction as its creation. */
   schedule<T extends IServerBaseStatements>(
     s: T,
     opts: {
@@ -430,7 +700,7 @@ export class MarketingEmailCampaignBlock implements Block {
     s.throwErrorIf(
       sql`not exists (select 1 from marketing_email_campaigns campaign
           join email_templates template on template.id = campaign.email_template_id
-          where campaign.id = ${opts.campaignId} and campaign.status = 'draft'
+          where campaign.id = ${opts.campaignId} and campaign.status = 'scheduled' and campaign.delivery_id is null
             and (${isMarketingEmailTemplateReady(sql`template`)}))`,
       sql.lit`Campaign requires an active template with a subject and body.`,
     );
@@ -445,67 +715,125 @@ export class MarketingEmailCampaignBlock implements Block {
     s.defRecord(
       campaign,
       sql`select * from marketing_email_campaigns
-          where id = ${opts.campaignId} and status = 'draft'`,
+          where id = ${opts.campaignId} and status = 'scheduled' and delivery_id is null`,
     );
-    this.deliverySource.createHeld(s, {
-      sourceRecordKey: sql`${sql.ref(campaign)}.id::text`,
-      from: this.senderFromExpr(sql`${sql.ref(campaign)}.sender_key`),
-      replyTo: this.senderReplyToExpr(sql`${sql.ref(campaign)}.sender_key`),
-      recipientsQuery: this.buildAudienceQuery(
-        sql.ref(campaign),
-        opts.recipientsQuery,
-      ),
-      deliveryIdScalar: deliveryId,
-    });
+    const audience = `${prefix}_audience`;
+    s.defTable(
+      audience,
+      sql`select source_recipient_key, email, variables, from_address, reply_to, sender_valid, sender_error, recipient_label,
+      row_number() over(partition by from_address, reply_to order by email, source_recipient_key) as recipient_number
+      from (${
+        this.buildAudienceQuery(sql.ref(campaign), opts.recipientsQuery)
+      }) recipient`,
+    );
+    s.throwErrorUnless(
+      sql`(select count(*) from ${
+        sql.ref(audience)
+      }) between 1 and ${MAX_CAMPAIGN_RECIPIENTS}`,
+      sql
+        .lit`A campaign requires between 1 and 10,000 unique eligible recipients.`,
+    );
+    s.throwErrorIf(
+      sql`exists (select 1 from ${sql.ref(audience)} recipient where not ${
+        this.validSender(sql`recipient`)
+      })`,
+      sql`'Cannot schedule: ' || (select count(*)::string from ${
+        sql.ref(audience)
+      } recipient
+        where not ${
+        this.validSender(sql`recipient`)
+      }) || ' contact(s) need sender corrections. ' ||
+        (select string_agg(problem, '; ') from (
+          select coalesce(recipient_label, email) || ' (' || email || '): ' ||
+            coalesce(sender_error, 'Sender unavailable or invalid. Review the contact owner.') as problem
+          from ${sql.ref(audience)} recipient where not ${
+        this.validSender(sql`recipient`)
+      }
+          order by email limit 5) problems) || ' Review the sender preview for correction links.'`,
+    );
+    s.defScalar(deliveryId, { type: "BigInt" });
+    s.forEachQuery(
+      sql`select from_address, reply_to, batch_index,
+        row_number() over(order by from_address, reply_to, batch_index) as batch_number
+      from (select from_address, reply_to,
+        floor((recipient_number - 1) / ${CAMPAIGN_BATCH_SIZE}.0)::bigint as batch_index
+        from ${sql.ref(audience)}) numbered
+      group by from_address, reply_to, batch_index
+      order by batch_number`,
+      `${prefix}_batch`,
+      (s) => {
+        const batch = sql.ref(`${prefix}_batch`);
+        this.deliverySource.createHeld(s, {
+          sourceRecordKey: sql`${
+            sql.ref(campaign)
+          }.id::string || case when ${batch}.batch_number = 1 then '' else ':batch:' || ${batch}.batch_number::string end`,
+          from: sql`${batch}.from_address`,
+          replyTo: sql`${batch}.reply_to`,
+          recipientsQuery:
+            sql`select source_recipient_key, email, variables from ${
+              sql.ref(audience)
+            }
+          where from_address = ${batch}.from_address
+            and (reply_to is not distinct from ${batch}.reply_to)
+            and recipient_number between ${batch}.batch_index * ${CAMPAIGN_BATCH_SIZE} + 1
+              and (${batch}.batch_index + 1) * ${CAMPAIGN_BATCH_SIZE}`,
+          deliveryIdScalar: `${prefix}_batch_delivery_id`,
+        });
+        s.if(
+          sql`${batch}.batch_number = 1`,
+          (s) =>
+            s.setScalar(deliveryId, sql.ref(`${prefix}_batch_delivery_id`)),
+        )
+          .else((s) =>
+            s.modify(
+              sql`insert into marketing_email_campaign_delivery_batches(first_delivery_id, delivery_id)
+          values (${sql.ref(deliveryId)}, ${
+                sql.ref(`${prefix}_batch_delivery_id`)
+              })`,
+            )
+          );
+      },
+    );
     s.defScalar(scheduledCampaignId, { type: "BigInt" });
     s.modify(sql`update marketing_email_campaigns
       set scheduled_at = coalesce(${
       opts.scheduledAt ?? sql`null::timestamptz`
     }, now()), status = 'scheduled', delivery_id = ${sql.ref(deliveryId)}
-      where id = ${opts.campaignId} and status = 'draft'
+      where id = ${opts.campaignId} and status = 'scheduled' and delivery_id is null
       returning id into ${sql.ref(scheduledCampaignId)}`);
     s.throwErrorIf(
       sql`${sql.ref(scheduledCampaignId)} is null`,
-      sql.lit`Campaign is no longer a draft`,
+      sql.lit`Campaign has already been scheduled or cancelled`,
     );
   }
 
-  /** Unschedule inside the caller's transaction so its held delivery is removed atomically. */
-  unschedule<T extends IServerBaseStatements>(s: T, campaignId: AnyExpr) {
-    const target = `marketing_campaign_unschedule_target_${this
+  /** Cancel only while every batch is held; retain the audience and sender history. */
+  cancel<T extends IServerBaseStatements>(s: T, campaignId: AnyExpr) {
+    const cancelledId = `marketing_campaign_cancelled_${this
       .scheduleSequence++}`;
-    const unscheduledCampaignId = `marketing_campaign_unscheduled_${this
-      .scheduleSequence++}`;
-    s.defRecord(
-      target,
-      sql`select campaign.id, campaign.delivery_id
-        from marketing_email_campaigns campaign
-        join bulk_email_deliveries delivery
-          on delivery.id = campaign.delivery_id
-        where campaign.id = ${campaignId}
-          and campaign.status = 'scheduled'
-          and delivery.status = 'held'
-          and delivery.source = 'marketing_campaign'`,
+    s.defScalar(cancelledId, { type: "BigInt" });
+    s.modify(
+      sql`update marketing_email_campaigns campaign set status = 'cancelled'
+      where campaign.id = ${campaignId} and campaign.status = 'scheduled'
+        and campaign.delivery_id is not null
+        and not exists (select 1 from bulk_email_deliveries delivery
+          where delivery.id in (${
+        this.deliveryIdsQuery(sql`campaign.delivery_id`)
+      })
+            and (delivery.status != 'held' or delivery.source != 'marketing_campaign'))
+      returning id into ${sql.ref(cancelledId)}`,
     );
-    s.defScalar(unscheduledCampaignId, { type: "BigInt" });
-    s.modify(sql`update marketing_email_campaigns
-      set status = 'draft', scheduled_at = null, delivery_id = null
-      where id = ${sql.ref(target)}.id and status = 'scheduled'
-      returning id into ${sql.ref(unscheduledCampaignId)}`);
     s.throwErrorIf(
-      sql`${sql.ref(unscheduledCampaignId)} is null`,
-      sql.lit`Campaign is no longer scheduled with a held delivery`,
-    );
-    this.deliverySource.discardHeld(
-      s,
-      sql`${sql.ref(target)}.delivery_id`,
+      sql`${sql.ref(cancelledId)} is null`,
+      sql
+        .lit`Only scheduled campaigns whose delivery has not started can be cancelled.`,
     );
   }
 
   private processDueCampaigns<T extends IServerBaseStatements>(s: T) {
     s.forEachQuery(
       sql`select id from marketing_email_campaigns
-          where status = 'scheduled' and scheduled_at <= now()
+          where status = 'scheduled' and delivery_id is not null and scheduled_at <= now()
             and not exists (
               select 1 from bulk_email_deliveries active_delivery
               where active_delivery.status = 'submitting'
@@ -579,7 +907,72 @@ export class MarketingEmailCampaignBlock implements Block {
     );
   }
 
-  private buildAudienceQuery(campaign: Sql, selectedRecipients?: Sql) {
+  /** Send template content to up to 10 comma-separated test addresses without creating a campaign. Authorize first; call outside a transaction.
+   * Uses a sample audience member for variables without changing campaign/delivery state.
+   */
+  sendTest<T extends IServerBaseStatements>(s: T, opts: {
+    campaignId?: AnyExpr;
+    templateId?: AnyExpr;
+    senderKey?: Sql;
+    to: AnyExpr;
+    sampleRecipientKey: AnyExpr;
+    /** Required for unsaved tests; authorized selected audience used to schedule. */
+    recipientsQuery?: Sql;
+  }) {
+    if (opts.campaignId === undefined && opts.recipientsQuery === undefined) {
+      throw new Error("Unsaved campaign tests require a selected audience.");
+    }
+    const recipients = `marketing_test_recipients_${this.scheduleSequence++}`;
+    s.defTable(recipients, {
+      fields: [
+        { name: "source_recipient_key", type: "String" },
+        { name: "email", type: "String" },
+      ],
+    });
+    if (opts.recipientsQuery) {
+      s.modify(
+        sql`insert into ${sql.ref(recipients)} (source_recipient_key, email)
+        select source_recipient_key, email from (${opts.recipientsQuery}) selected
+        where source_recipient_key = ${opts.sampleRecipientKey}`,
+      );
+    }
+    s.callStoredProcedure("marketing_email_campaign_send_test", {
+      inputScalars: {
+        p_campaign_id: opts.campaignId ?? sql`null`,
+        p_template_id: opts.templateId ?? sql`null`,
+        p_sender_key: opts.senderKey ?? sql`null`,
+        p_test_to: opts.to,
+        p_sample_key: opts.sampleRecipientKey,
+      },
+      inputTables: { p_test_recipients: recipients },
+    });
+  }
+
+  /** Frozen samples across every batch; shared by the scheduled test picker and sender. */
+  scheduledTestRecipientsQuery(campaign: Sql) {
+    const legacyVariables = sql.caseWhen({
+      operand: sql`${campaign}.sender_key`,
+      conditions: Object.entries(this.opts.senders).map(([key, sender]) => ({
+        condition: sql.lit(key),
+        expr: sql.jsonBuildObject(sender.legacyVariables ?? {}),
+      })),
+      default: sql`json_build_object()`,
+    });
+    return sql`select recipient.source_recipient_key, recipient.email,
+      recipient.email as recipient_label, null::string as recipient_href,
+      delivery.from_email as from_address, delivery.reply_to_email as reply_to,
+      null::string as sender_error, true as sender_valid,
+      ${legacyVariables} || recipient.variables as variables
+      from bulk_email_delivery_recipients recipient
+      join bulk_email_deliveries delivery on delivery.id = recipient.delivery_id
+      where recipient.delivery_id in (${
+      this.deliveryIdsQuery(sql`${campaign}.delivery_id`)
+    })
+        and ${campaign}.status = 'scheduled' and delivery.source = 'marketing_campaign'`;
+  }
+
+  /** Audience snapshot query shared by scheduling and Spark previews. */
+  buildAudienceQuery(campaign: Sql, selectedRecipients?: Sql) {
     const variables = Object.fromEntries(
       Object.entries(this.opts.audience.recipientVariables ?? {}).map(
         ([name, variable]) => [
@@ -588,40 +981,80 @@ export class MarketingEmailCampaignBlock implements Block {
         ],
       ),
     );
-    return sql`select cast(audience.source_recipient_key as string) as source_recipient_key,
+    return sql`select source_recipient_key, email, recipient_label, recipient_href,
+      variables || coalesce(sender->'variables', json_build_object()) as variables,
+      sender->>'from_address' as from_address, sender->>'reply_to' as reply_to,
+      sender->>'error' as sender_error,
+      coalesce(try_cast(sender->>'is_fallback' as boolean), false) as sender_is_fallback,
+      coalesce(json_typeof(sender) = 'object' and sender->>'error' is null
+        and json_typeof(sender->'variables') = 'object', false) as sender_valid
+      from (
+      select cast(audience.source_recipient_key as string) as source_recipient_key,
         lower(trim(audience.email)) as email,
-        ${sql.jsonBuildObject(variables)} as variables
+        ${
+      this.opts.audience.recipientLabel?.(sql`campaign_recipient`) ??
+        sql`lower(trim(audience.email))`
+    } as recipient_label,
+        ${
+      this.opts.audience.recipientHref?.(sql`campaign_recipient`) ??
+        sql`cast(null as string)`
+    } as recipient_href,
+        ${sql.jsonBuildObject(variables)} as variables,
+        ${this.senderExpr(sql`campaign_recipient`, campaign)} as sender,
+        row_number() over(partition by lower(trim(audience.email))
+          order by cast(audience.source_recipient_key as string)) as email_rank
       from (${
       selectedRecipients ?? this.opts.audience.recipientsQuery(campaign)
     }) audience
       join ${sql.ref(this.opts.audience.recipientTableName)} campaign_recipient
         on campaign_recipient.id = try_cast(audience.source_recipient_key as bigint)
-      where ${campaign}.id is not null`;
+      where ${campaign}.id is not null
+        and not exists (select 1 from bulk_email_suppressions suppression
+          where suppression.email = lower(trim(audience.email)))
+      ) ranked where email_rank = 1`;
   }
 
-  private senderFromExpr(senderKey: Sql) {
+  private senderVariables() {
+    const variables: Record<string, { description: string }> = {};
+    for (const sender of Object.values(this.opts.senders)) {
+      for (
+        const [name, description] of Object.entries(sender.variables ?? {})
+      ) {
+        variables[name] = { description };
+      }
+    }
+    return variables;
+  }
+
+  private senderExpr(recipient: Sql, campaign: Sql) {
     return sql.caseWhen({
-      operand: senderKey,
+      operand: sql`${campaign}.sender_key`,
       conditions: Object.entries(this.opts.senders).map(([key, sender]) => ({
         condition: sql.lit(key),
-        expr: sql.lit(sender.fromAddress),
+        expr: sender.resolve
+          ? sender.resolve(recipient, campaign)
+          : sql.jsonBuildObject({
+            from_address: sender.fromAddress,
+            reply_to: sender.replyTo ? sql.lit(sender.replyTo) : sql`null`,
+            variables: sql`json_build_object()`,
+          }),
       })),
       default: sql`null`,
     });
   }
 
-  private senderReplyToExpr(senderKey: Sql) {
-    return sql.caseWhen({
-      operand: senderKey,
-      conditions: Object.entries(this.opts.senders).map(([key, sender]) => ({
-        condition: sql.lit(key),
-        expr: sender.replyTo ? sql.lit(sender.replyTo) : sql`null`,
-      })),
-      default: sql`null`,
-    });
+  validSender(recipient: Sql) {
+    return sql`coalesce(${recipient}.sender_valid
+      and length(trim(${recipient}.from_address)) between 1 and 500
+      and not regex.is_match(${recipient}.from_address, ${sql.lit`[\r\n]`})
+      and (${recipient}.reply_to is null or (
+        length(trim(${recipient}.reply_to)) between 1 and 500
+        and not regex.is_match(${recipient}.reply_to, ${sql.lit`[\r\n]`})
+      )), false)`;
   }
 
-  private renderCampaign<T extends IServerBaseStatements>(
+  /** Render campaign content without scheduling or delivering it. */
+  renderCampaign<T extends IServerBaseStatements>(
     s: T,
     campaign: Sql,
     prefix: string,

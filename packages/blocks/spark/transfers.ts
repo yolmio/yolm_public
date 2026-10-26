@@ -1,8 +1,8 @@
-import { sql } from "std/sql_utils";
+import { type Sql, sql } from "std/sql_utils";
 import type { GeneralServerStatements } from "std/statements";
 
 /** Uses Drive's own endpoints so extension policy and normal file records remain authoritative. */
-export const sparkDriveTransferTools = [
+export const sparkDriveTransferTools = (origin: Sql) => [
   {
     name: "downloadDriveFile",
     statements: (s: GeneralServerStatements) => {
@@ -19,7 +19,7 @@ export const sparkDriveTransferTools = [
       );
       s.defScalar(
         "transfer_url",
-        sql`http.sign_request('GET', (http.request_info()->>'origin') || '/api/files/versions/' || transfer_version::string || '/content',
+        sql`http.sign_request('GET', ${origin} || '/api/files/versions/' || transfer_version::string || '/content',
         json_build_object('_user', current_user), now() + interval '30 minutes')`,
       );
       s.if(
@@ -76,7 +76,7 @@ export const sparkDriveTransferTools = [
       );
       s.defScalar(
         "transfer_url",
-        sql`http.sign_request('POST', (http.request_info()->>'origin') || case when transfer_item is not null
+        sql`http.sign_request('POST', ${origin} || case when transfer_item is not null
           then '/api/files/items/' || transfer_item::string || '/versions/upload'
           else '/api/files/spaces/' || transfer_space::string || '/items/upload' end,
         json_build_object('_user', current_user, 'parent_id', coalesce(transfer_parent::string, ''),

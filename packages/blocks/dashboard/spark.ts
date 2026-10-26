@@ -18,6 +18,8 @@ import {
   resolveParameters,
   validateBindings,
 } from "./parameters";
+import { validateFormats, validateFormatWrite } from "./format";
+import { normalizeValueFormat } from "std/value_format";
 import { executeWidget } from "./query";
 
 export function validateDashboardParameters<
@@ -65,6 +67,11 @@ export function prepareWidget<
     sql`(select dashboard_id from db.dashboard_sections where id=try_cast(${input}->>'sectionId' as bigint))`,
   );
   b.require(s, "edit", sql`prepared_widget_dashboard`);
+  validateFormatWrite(
+    s,
+    sql`${input}->'config'`,
+    sql`(select config from db.dashboard_widgets where id=try_cast(${input}->>'id' as bigint))`,
+  );
   executeWidget(s, b, {
     type: sql`${input}->>'type'`,
     query: sql`${input}->>'query'`,
@@ -89,6 +96,12 @@ export function saveWidget<
     where section.id = try_cast(${input}->>'sectionId' as bigint)`,
   );
   b.require(s, "edit", sql`widget_section.dashboard_id`);
+  validateFormatWrite(
+    s,
+    sql`${input}->'config'`,
+    sql`(select config from db.dashboard_widgets where id=try_cast(${input}->>'id' as bigint))`,
+  );
+  validateFormats(s, sql`coalesce(${input}->'config','{}'::json)`);
   validateBindings(
     s,
     sql`coalesce(${input}->'config','{}'::json)`,
@@ -146,7 +159,9 @@ export function copyDashboard<
         sql`insert into db.dashboard_sections(dashboard_id,name,sort_order) values(copied_dashboard_id,copy_section.name,copy_section.sort_order) returning id into copied_section_id`,
       );
       s.modify(
-        sql`insert into db.dashboard_widgets(section_id,title,type,query,config,width,sort_order) select copied_section_id,title,type,query,config,width,sort_order from db.dashboard_widgets where section_id=copy_section.id order by sort_order,id`,
+        sql`insert into db.dashboard_widgets(section_id,title,type,query,config,width,sort_order) select copied_section_id,title,type,query,case when config->'format' is null then config else config || json_build_object('format', ${
+          normalizeValueFormat(sql`config->'format'`)
+        }) end,width,sort_order from db.dashboard_widgets where section_id=copy_section.id order by sort_order,id`,
       );
     },
   );
@@ -219,6 +234,22 @@ export function dashboardCapability(b: DashboardBlock): SparkCapability {
                 sql`cast(function_input->>'dashboardId' as bigint)`,
               );
             });
+            s.if(sql`function_input->>'id' is not null`, (s) => {
+              s.defScalar(
+                "tested_widget_dashboard",
+                sql`(select section.dashboard_id from db.dashboard_widgets widget join db.dashboard_sections section on section.id=widget.section_id where widget.id=try_cast(function_input->>'id' as bigint))`,
+              );
+              b.require(s, "view", sql`tested_widget_dashboard`);
+              s.throwErrorIf(
+                sql`function_input->>'dashboardId' is not null and try_cast(function_input->>'dashboardId' as bigint) != tested_widget_dashboard`,
+                sql.lit`Use the widget's dashboard.`,
+              );
+            });
+            validateFormatWrite(
+              s,
+              sql`function_input->'config'`,
+              sql`(select config from db.dashboard_widgets where id=try_cast(function_input->>'id' as bigint))`,
+            );
             executeWidget(s, b, {
               type: sql`function_input->>'type'`,
               query: sql`function_input->>'query'`,
@@ -317,6 +348,7 @@ export function dashboardCapability(b: DashboardBlock): SparkCapability {
               sql`select value from json.array_each(coalesce(validate_section.value->'widgets','[]'::json))`,
               "validate_widget",
               (s) => {
+                validateFormatWrite(s, sql`validate_widget.value->'config'`);
                 executeWidget(s, b, {
                   type: sql`validate_widget.value->>'type'`,
                   query: sql`validate_widget.value->>'query'`,
@@ -535,7 +567,7 @@ export function dashboardCapability(b: DashboardBlock): SparkCapability {
       },
     }],
     doc:
-      `Dashboards store fixed widgets, never generated UI. Spark is the dashboard authoring interface. Dashboard links prefill an editable prompt with the saved dashboard ID and current filters. Use list to load the dashboard and check editing access. Use copy when a viewer wants a personal version. Use removeSection or removeDashboard for requested deletion. Use list, testWidget, then create or saveWidget. New dashboards are personal and owner-only. Only dashboard admins create or edit shared dashboards. Shared audience is a separate any-match list of capabilities; empty means admins only. Audience never grants data access. Saved SQL always uses all registered Spark data capabilities currently permitted to the viewer; no dashboard data selection is needed. Declare dashboard parameters and widget config.parameters separately. config.bindings maps a widget input name to a dashboard input name of the same type (and source for records). Only bound values are passed to that widget. Use current_context()->'parameters' for query values; date_range values contain start/end. Changing an input is not authorization. Defaults may be last_12_weeks (12 completed Monday–Sunday weeks, excluding the current week) for date_range or current for record sources supporting it. Optional missing values are null. Use lookupRecords for viewer-scoped choices. Registered sources: ${
+      `Dashboards store fixed widgets, never generated UI. Spark is the dashboard authoring interface. Dashboard links prefill an editable prompt with the saved dashboard ID and current filters. Use list to load the dashboard and check editing access. Use copy when a viewer wants a personal version. Use removeSection or removeDashboard for requested deletion. Use list, testWidget, then create or saveWidget. New dashboards are personal and owner-only. Only dashboard admins create or edit shared dashboards. Shared audience is a separate any-match list of capabilities; empty means admins only. Audience never grants data access. Saved SQL always uses all registered Spark data capabilities currently permitted to the viewer; no dashboard data selection is needed. Declare dashboard parameters and widget config.parameters separately. config.bindings maps a widget input name to a dashboard input name of the same type (and source for records). Only bound values are passed to that widget. Use current_context()->'parameters' for query values; date_range values contain start/end. Changing an input is not authorization. Defaults may be last_12_weeks (12 completed Monday–Sunday weeks, excluding the current week) for date_range or current for record sources supporting it. Optional missing values are null. Use lookupRecords for viewer-scoped choices. WISE queries may return an optional value2 column when config.series2Label is set; weekEnding defaults to sunday. Registered sources: ${
         JSON.stringify(
           (b.opts.recordSources ?? []).map((source) => ({
             name: source.name,
@@ -543,11 +575,13 @@ export function dashboardCapability(b: DashboardBlock): SparkCapability {
             supportsCurrent: !!source.currentValue,
           })),
         )
-      }. Never interpolate input into query text. Chart queries return x (date for line/wise, category for bar) and value (numeric/null), one row per x. Number returns one value row. Table allows arbitrary columns. Empty data is valid; more than 1,000 rows is rejected. Query only documented capability data. WISE requires Sunday week ends. Manual entry uses config.measurementId and the separate measurement permission. Return the created dashboard href so the user can open the fixed renderer. Do not generate saved UI source.
+      }. Never interpolate input into query text. Chart queries return x (date for line/wise, category for bar) and value (numeric/null), one row per x. Number returns one value row. Table allows arbitrary columns. Empty data is valid; more than 1,000 rows is rejected. Query only documented capability data. WISE dates must match config.weekEnding, which defaults to sunday. WISE axes have 10 divisions starting at config.graphLow, or at the data low when it is omitted; a config.graphDivision too small for the data grows by 1-2-5 multiples of itself. Manual entry uses config.measurementId and the separate measurement permission. Return the created dashboard href so the user can open the fixed renderer. Do not generate saved UI source. New format metadata must be objects. When editing an existing widget, an existing string format may be preserved exactly; never add or change a string. Counts use {type:'number',maximumFractionDigits:0}; dollars use {type:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}; durations use {type:'duration',inputUnit:'minutes'}. Table columnFormats keys match query aliases; text overrides preserve identifiers. Queries return numeric values, never display strings for numeric measures. testWidget can preserve an existing string when id identifies that saved widget; omit id for new widgets.
 \n\`\`\`ts
 interface DashboardParameter {name:string;label:string;type:'text'|'number'|'date'|'date_range'|'enum'|'record';default?:unknown;optional?:boolean;options?:string[];source?:string;}
-interface DashboardWidgetConfig { format?: 'number'|'number_thousands'|'currency'|'percentage'|'duration'; unit?: string; inverse?: boolean; height?: 'small'|'medium'|'large'; missingValues?: 'gap'|'zero'; measurementId?: number; parameters?: DashboardParameter[]; bindings?:Record<string,string>; }
-interface DashboardWidgetTestInput { dashboardId?:number; type:'wise'|'line'|'bar'|'number'|'table'|'manual_entry';query?:string;config?:DashboardWidgetConfig;parameters?:Record<string,unknown>;dashboardParameters?:DashboardParameter[];dashboardValues?:Record<string,unknown>; }
+
+interface DashboardValueFormat { type:'number'|'number_thousands'|'currency'|'percentage'|'duration'|'text'; minimumFractionDigits?:number; maximumFractionDigits?:number; currency?:string; inputUnit?:'minutes'|'seconds'|'hours'; }
+interface DashboardWidgetConfig { format?: DashboardValueFormat; columnFormats?:Record<string,DashboardValueFormat>; unit?: string; inverse?: boolean; height?: 'small'|'medium'|'large'; missingValues?: 'gap'|'zero'; weekEnding?:'sunday'|'monday'|'tuesday'|'wednesday'|'thursday'|'friday'|'saturday'; graphLow?:number; graphDivision?:number; ownerHeader?:string; ownerLabel?:string; seriesLabel?:string; series2Label?:string; series2Inverse?:boolean; series2GraphLow?:number; series2GraphDivision?:number; measurementId?: number; parameters?: DashboardParameter[]; bindings?:Record<string,string>; }
+interface DashboardWidgetTestInput { id?:number;dashboardId?:number; type:'wise'|'line'|'bar'|'number'|'table'|'manual_entry';query?:string;config?:DashboardWidgetConfig;parameters?:Record<string,unknown>;dashboardParameters?:DashboardParameter[];dashboardValues?:Record<string,unknown>; }
 interface DashboardWidgetSaveInput extends DashboardWidgetTestInput { id?:number;sectionId:number;title:string;width?:'quarter'|'third'|'half'|'two_thirds'|'full';updatedAt?:string; }
 interface DashboardCreateInput {name:string;shared?:boolean;audience?:string[];parameters?:DashboardParameter[];layout?:'scrolling'|'tabs';sections:{name?:string;widgets:Omit<DashboardWidgetSaveInput,"sectionId">[]}[];}
 \`\`\``,

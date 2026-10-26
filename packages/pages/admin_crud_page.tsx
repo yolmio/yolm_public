@@ -336,6 +336,7 @@ function AdminCrudPageContent(props: AdminCrudPageProps) {
             recordName={recordName}
             toolbar={toolbar}
             searchable={props.searchable ?? true}
+            searchDebounceMs={props.searchDebounceMs}
             filterable={props.filterable ?? true}
             filterVariant={props.filterVariant ?? "panel"}
             defaultFilters={props.defaultFilters}
@@ -928,6 +929,7 @@ export function AdminRelatedTable(props: AdminRelatedTableProps) {
           recordName={recordName}
           toolbar={toolbar}
           searchable={props.searchable ?? true}
+          searchDebounceMs={props.searchDebounceMs}
           filterable={props.filterable ?? true}
           filterVariant={props.filterVariant ?? "panel"}
           defaultFilters={props.defaultFilters}

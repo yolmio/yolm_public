@@ -1,5 +1,6 @@
 import { FilePreview } from "components/file_preview";
 import type { DrivePreviewModule } from "components/file_preview";
+import { isPlayableVideoMime, VideoPlayer } from "components/video_player";
 import { sql } from "std/sql_utils";
 import type {
   DriveExtension,
@@ -82,6 +83,32 @@ export class ImageViewerExtension implements DriveExtension {
   };
 
   constructor(readonly opts: DrivePreviewExtensionOpts = {}) {}
+
+  initialize() {}
+}
+
+function renderVideo(
+  props: Pick<FileViewerRenderProps, "fileName" | "fileUrl">,
+) {
+  return (
+    <div className="flex h-full min-h-96 items-center justify-center bg-black">
+      <VideoPlayer
+        src={props.fileUrl}
+        title={props.fileName}
+      />
+    </div>
+  );
+}
+
+/** Browser-native video playback without additional Drive schema. */
+export class VideoViewerExtension implements DriveExtension {
+  readonly name = "video_viewer";
+  readonly viewer: FileViewerContribution = {
+    name: "video_viewer",
+    canView: (version) => isPlayableVideoMime(sql`${version}.content_type`),
+    render: renderVideo,
+    renderReadOnly: renderVideo,
+  };
 
   initialize() {}
 }

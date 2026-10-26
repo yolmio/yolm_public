@@ -7,7 +7,7 @@ tags:
   - navbar
   - navigation
 related:
-  - ui/overview.md
+  - ui/sidebar.md
   - ui/search_dialogs.md
   - ui/button.md
   - ui/site_pages.md
@@ -16,13 +16,10 @@ related:
 
 # Navbar
 
-`Navbar` is the standard top navigation bar for an in-app UI. It renders a Home
-link, a horizontal row of navigation links (with optional dropdown menus), an
-optional primary action button, an optional global search dialog, and a settings
-drawer. On small screens it collapses into a hamburger menu drawer.
-
-Place it once at the top of an app's UI, as a sibling of `AppRoutes` (not inside
-a `Route`). For marketing / landing pages use `TransparentNavbar` instead.
+`Navbar` is the in-app top bar: a Home link, navigation links with optional
+dropdowns, an optional primary action button and search dialog, and a settings
+drawer. Place it once, as a sibling of `AppRoutes`. For landing pages use
+[`TransparentNavbar`](#transparentnavbar).
 
 ```tsx
 import { Navbar } from "components/navbar";
@@ -63,39 +60,32 @@ system.app({
 });
 ```
 
-A plain string link (e.g. `"/orders"`) becomes a link to that URL with a label
-auto-derived from the path (split on `-` and `/`, each word title-cased, so
-`"/time-entries"` renders as `Time Entries`).
+A string link's label is derived from the path (split on `-` and `/`,
+title-cased): `"/time-entries"` renders `Time Entries`.
 
 ## Props
 
-| Prop | Type | Required | Description |
-|------|------|----------|-------------|
-| `variant` | `"soft" \| "solid"` | No | Visual variant. Default `"solid"`. |
-| `color` | `ColorPaletteProp` | No | Theme color (`neutral`, `primary`, `success`, `warning`, `danger`). Default `"neutral"`. |
-| `size` | `"xs" \| "sm" \| "md" \| "lg"` | No | Size of the nav controls. Default `"sm"`. |
-| `links` | `(string \| LinkItem \| LinkItemWithChildren)[]` | No | Navigation links. See link shapes below. |
-| `linkAlignment` | `"left" \| "center" \| "right"` | No | Horizontal alignment of the desktop link row. Default `"left"`. |
-| `primaryActionButton` | `ButtonProps` | No | A prominent action button on the right. Accepts the full [`Button`](./button.md) prop set. |
-| `searchDialog` | `{ table: string; displayValues?: (string \| TableSearchDisplay)[] }` | No | Adds a single-table search dialog and a search button. |
-| `multiTableSearchDialog` | `{ tables: MultiTableSearchDialogTable[] }` | No | Adds a cross-table search dialog and a search button. |
-| `manual` | `boolean` | No | When `false` (default) the navbar also appends links registered through the shared navigation context. Set `true` to control links explicitly. |
-| `className` | `string` | No | Class for the root `<nav>`. |
-| `sx` | `Style` | No | Style overrides for the root `<nav>`. |
+See `NavbarProps` in `components/navbar` for the full contract. `variant`
+(`soft` / `solid`, default `solid`), `color` (default `neutral`), `size`
+(default `sm`), and `linkAlignment` (`left` default, `center`, `right`) are
+static generation-time strings that follow the shared
+[styling props](./styling.md#color-variant-and-size); use a link's `showIf`
+for runtime visibility. Non-obvious props:
 
-`variant`, `color`, `size`, and `linkAlignment` are generation-time strings, not
-SQL expressions. They cannot be computed at runtime.
+- `primaryActionButton` - full [`Button`](./button.md) props; the label goes
+  in `children`.
+- `searchDialog` / `multiTableSearchDialog` - add a search button and dialog
+  (see below).
+- `manual` - when `false` (default) the navbar also appends links registered
+  through the shared navigation context (for example by page templates). Set
+  `true` to show only `links`.
 
 ### Link shapes
 
-`links` entries can be a string, a `LinkItem`, or a `LinkItemWithChildren`:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `url` | `string` | Yes (LinkItem) | Destination path. |
-| `label` | `string` | No (LinkItem) / Yes (with children) | Display text. Derived from `url` when omitted. |
-| `showIf` | `BooleanExpr` | No | SQL boolean controlling whether the link is shown. |
-| `children` | `(string \| LinkItem)[]` | Yes (LinkItemWithChildren) | Sub-links rendered as a hover/keyboard dropdown menu. |
+`links` entries are a string, a `LinkItem` (`url`, optional `label` and
+`showIf`), or a `LinkItemWithChildren` (`label`, `children` of strings or
+`LinkItem`s, optional `showIf`) rendered as a dropdown. `showIf` is a SQL
+boolean.
 
 ```tsx
 <Navbar
@@ -115,28 +105,22 @@ SQL expressions. They cannot be computed at runtime.
 
 ### Search dialog
 
-Pass `searchDialog` for a single table or `multiTableSearchDialog` for several
-tables. Either one adds a search button to the navbar (labeled `Find {table}…`
-for a single table, otherwise `Search…`) and wires up the **Ctrl/Cmd + K**
-shortcut. The two props are mutually exclusive — supplying both throws at
-generation time. See [Search dialogs](./search_dialogs.md) for the `table`,
-`displayValues`, and `tables` configuration in full.
+Pass `searchDialog` for one table or `multiTableSearchDialog` for several. Either
+adds a search button (`Find {table}…` or `Search…`) and the **Ctrl/Cmd + K**
+shortcut; supplying both throws at generation time. Configuration is in
+[Search dialogs](./search_dialogs.md).
 
 ### Responsive behavior
 
-- On large screens the links render as a horizontal row with dropdown menus for
-  entries that have `children`.
-- Below the `lg` breakpoint the links collapse behind a hamburger button that
-  opens a left-side `Drawer`; entries with children expand inline.
-- A settings drawer button is always rendered on the right.
-- Both layouts support arrow-key navigation between links and child links.
+From `lg` up, links render as a row with dropdowns for entries with
+`children`; below `lg` they move into a left-side `Drawer` behind a hamburger
+button, with children expanded inline. A settings drawer button is always on
+the right, and both layouts support arrow-key navigation.
 
 ## TransparentNavbar
 
-`TransparentNavbar` (from `components/transparent_navbar`) is a marketing-style
-navbar that starts transparent over a hero image and fades to a solid surface as
-the user scrolls past 20px. Use it on landing pages, typically paired with a
-`Footer`; for in-app navigation use `Navbar`.
+`TransparentNavbar` is a landing-page navbar that starts transparent over a
+hero and turns solid once the page scrolls past 20px.
 
 ```tsx
 import { TransparentNavbar } from "components/transparent_navbar";
@@ -164,39 +148,25 @@ import { MaterialIcon } from "components/material_icon";
 />
 ```
 
-| Prop | Type | Required | Description |
-|------|------|----------|-------------|
-| `logoIcon` | `({ sx?, className? }) => Node` | Yes | Render function for the logo mark; receives `sx` / `className`. |
-| `logoText` | `Node` | No | Brand text beside the logo (hidden on `xs`). |
-| `links` | `Array<{ label: string; href?: string; children?: { label: string; href: string }[] }>` | Yes | Nav links; entries with `children` render a dropdown. |
-| `primaryActionButton` | `{ label: string; href: string; variant?: "solid" \| "outlined" \| "soft" }` | No | Right-aligned CTA. `variant` defaults to `"solid"`. |
-| `positionFixed` | `boolean` | No | Use absolute positioning instead of fixed (ignored when `hideOnScrollDown` is set). |
-| `textColor` | `string` | No | Override the logo and link text color. |
-| `navZIndex` | `number` | No | Override the nav z-index. Default `1100`. |
-| `navBackground` | `string` | No | Override the initial (pre-scroll) nav background color. |
-| `idPrefix` | `string` | No | Prefix element IDs to avoid collisions when multiple navbars exist. |
-| `extraDesktopContent` | `Node` | No | Extra content rendered after the links and CTA on desktop. |
-| `hideOnScrollDown` | `boolean` | No | Hide the nav on scroll down and reveal it on scroll up. |
+See `TransparentNavbar` props in `components/transparent_navbar`. Note that
+`logoIcon` is a render function receiving `sx` / `className`; `links` use
+`href` (not `url`); `primaryActionButton` is `{ label, href, variant? }`
+(`variant` default `solid`). The nav is `absolute` by default;
+`positionFixed` or `hideOnScrollDown` makes it `fixed`, and `positionFixed`
+also disables the solid scrolled background. `navZIndex` defaults to `1100`; and
+`idPrefix` avoids element ID collisions when several navbars exist.
+`textColor`, `navBackground`, and `extraDesktopContent` customize the look.
 
 When the app uses cookie-based color schemes, `TransparentNavbar` also renders a
 light/dark mode toggle button.
 
 ## Common Mistakes
 
-- Passing both `searchDialog` and `multiTableSearchDialog` — they are mutually
-  exclusive and throw at generation time. Pick one.
-- Wrapping `Navbar` in a `<Route>`. It is not self-routing; place it once at the
-  top of the app UI as a sibling of `AppRoutes`.
-- Trying to compute `variant`, `color`, `size`, or `linkAlignment` from SQL.
-  These are generation-time strings only; use a link's `showIf` for runtime
-  visibility.
-- Mixing up the link field names: `Navbar` links use `url`, while
-  `TransparentNavbar` links use `href`.
-- For `Navbar.primaryActionButton`, the label goes in `children` (it is the full
-  `Button` prop set). For `TransparentNavbar.primaryActionButton`, use the
-  `{ label, href, variant }` object instead.
-- Passing `className` or `sx` to `MaterialIcon` inside `logoIcon` — `MaterialIcon`
-  only accepts `icon`, `color`, `fontSize`, and `title`. Forward the received
-  `className`/`sx` to a wrapping element (e.g. a `<span>`) instead.
-- Using `TransparentNavbar` for in-app navigation. It is built for marketing /
-  landing pages — use `Navbar` inside the application.
+- Wrapping `Navbar` in a `<Route>`. Place it once at the top of the app UI as a
+  sibling of `AppRoutes`.
+- Mixing link shapes: `Navbar` links use `url` and a `Button`-style
+  `primaryActionButton` (label in `children`); `TransparentNavbar` links use
+  `href` and `primaryActionButton` is `{ label, href, variant }`.
+- Passing the received `className` / `sx` to `MaterialIcon` inside `logoIcon`;
+  it accepts only `icon`, `color`, `fontSize`, and `title`, so forward them to
+  a wrapping element.

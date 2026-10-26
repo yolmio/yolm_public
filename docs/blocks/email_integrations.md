@@ -17,45 +17,25 @@ related:
 # Email Integrations
 
 `blocks/email_integrations` lets each user connect their own mailbox over
-managed OAuth, syncs messages into the database via provider push
-notifications, and ships the inbox/compose UI. It defines the
-`EmailIntegration` interface and two implementations:
-
-- `GmailIntegration` — Google Gmail.
-- `OutlookEmailIntegration` — Microsoft 365 / Outlook (Graph API).
-
-Use it together with the [CRM block](./crm.md): register one or both
-integrations, list them in `CrmBlock`'s `emailIntegrations` option, then mount
-`EmailIntegrationsPage` (account connect/disconnect) and `AllEmailsList`
-(combined inbox). Reach for this block instead of building custom mailbox
-schema, OAuth endpoints, and sync reactors yourself.
-
-```ts
-import { GmailIntegration } from "blocks/email_integrations/gmail";
-import { OutlookEmailIntegration } from "blocks/email_integrations/outlook_email";
-import { EmailIntegrationsPage } from "blocks/email_integrations/email_integration_page";
-import type { EmailIntegrationConfig } from "blocks/email_integrations/email_integration_page";
-import {
-  AllEmailsList,
-  EmailBodyFieldNode,
-  EmailItem,
-} from "blocks/email_integrations/common";
-import type {
-  EmailIntegration,
-  SendEmailOpts,
-} from "blocks/email_integrations";
-```
+managed OAuth, syncs messages through provider push notifications, and ships
+inbox/compose UI. It defines the `EmailIntegration` interface (in
+`blocks/email_integrations`) with two implementations: `GmailIntegration`
+(`blocks/email_integrations/gmail`) and `OutlookEmailIntegration`
+(`blocks/email_integrations/outlook_email`, Microsoft Graph). Use it with the
+[CRM block](./crm.md) instead of building mailbox schema, OAuth endpoints, and
+sync reactors yourself.
 
 ## Minimal Setup
 
-Register the integration block(s) in `core.tsx`, then list them in the CRM
-block's `emailIntegrations`. With the CRM block present, messages are stored in
-the shared `user_all_emails` / `user_email_recipients` / `user_email_attachments`
-tables (created by `CrmBlock`).
+Register the integration block(s) in `core.tsx`, then list them in
+`CrmBlock`'s `emailIntegrations`. With the CRM block present, messages are
+stored in the CRM-created `user_all_emails` / `user_email_recipients` /
+`user_email_attachments` tables.
 
 ```ts
 import { CrmBlock } from "blocks/crm";
 import { GmailIntegration } from "blocks/email_integrations/gmail";
+import { OutlookEmailIntegration } from "blocks/email_integrations/outlook_email";
 import { sql } from "std/sql_utils";
 import { system } from "std/system";
 
@@ -70,20 +50,6 @@ system.addBlock(
 );
 
 system.addBlock(
-  new CrmBlock({
-    // ...other CRM options
-    emailIntegrations: [{ integration: GmailIntegration }],
-  }),
-);
-```
-
-Outlook is registered the same way and auto-detects the CRM block at
-generation time (`system.hasBlock(CrmBlock)`); it has no `hasCrmBlock` flag:
-
-```ts
-import { OutlookEmailIntegration } from "blocks/email_integrations/outlook_email";
-
-system.addBlock(
   new OutlookEmailIntegration({
     provider: "outlook_email",
     scopes: sql`json_build_array(
@@ -96,334 +62,176 @@ system.addBlock(
     notificationDomain: "myapp.example.com",
   }),
 );
+
+system.addBlock(
+  new CrmBlock({
+    // ...other CRM options
+    emailIntegrations: [
+      { integration: GmailIntegration },
+      { integration: OutlookEmailIntegration },
+    ],
+  }),
+);
 ```
 
-Inside the app, mount the settings page and the combined inbox:
+`CrmBlock.StandardRoutes` mounts the inbox and account pages. To mount them
+yourself:
 
 ```tsx
-<EmailIntegrationsPage
-  integrations={[{ integration: GmailIntegration }]}
-/>
+<EmailIntegrationsPage integrations={[{ integration: GmailIntegration }]} />
 <Route path="/inbox">
   <AllEmailsList where={sql`true`} />
 </Route>
 ```
 
-`EmailIntegrationsPage` is self-routing and calls each integration's
-`addOauthRedirect`, which registers that provider's OAuth callback, global
-redirect, attachment download endpoint, and (Gmail only) the push-notification
-endpoint.
-
 ## Configuration
 
-### `GmailIntegration` options
+The option interfaces are not exported; all options are listed here.
 
-| Option | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `provider` | `string` | yes | Managed-OAuth provider key (e.g. `"google_gmail"`). |
-| `scopes` | `Sql` | yes | OAuth scopes requested (space-separated literal). |
-| `devNotificationUrl` | `string` | yes | Full URL Gmail pushes notifications to (used as the Pub/Sub `watch` address). |
-| `hasCrmBlock` | `boolean` | no | When `true`, store emails in the shared `user_all_emails` tables instead of Gmail-specific tables. Set this manually when pairing with `CrmBlock` — Gmail does not auto-detect it. |
-| `extensions` | `GmailIntegrationExtensions` | no | Hook bag; see below. |
+### `GmailIntegration`
 
-`GmailIntegrationExtensions` (exported from `blocks/email_integrations/gmail`):
-
-| Field | Type | Meaning |
+| Option | Required | Meaning |
 | --- | --- | --- |
-| `onNotificationReceived` | `(s, { body }) => void` | Runs when a Gmail push webhook is received, with the raw body. |
+| `provider` | yes | Managed-OAuth provider key (e.g. `"google_gmail"`). |
+| `scopes` | yes | `Sql` space-separated scope literal. |
+| `devNotificationUrl` | yes | Full URL Gmail pushes notifications to (the Pub/Sub `watch` address). |
+| `hasCrmBlock` | no | Store emails in the shared `user_all_emails` tables. Gmail does not auto-detect `CrmBlock`; without this flag it writes its own `user_gmail_*` message tables. |
+| `extensions` | no | `GmailIntegrationExtensions`: `onNotificationReceived(s, { body })` runs on each push webhook. |
 
-### `OutlookEmailIntegration` options
+### `OutlookEmailIntegration`
 
-| Option | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `provider` | `string` | yes | Managed-OAuth provider key (e.g. `"outlook_email"`). |
-| `scopes` | `Sql` | yes | OAuth scopes — a space-separated literal or a `json_build_array(...)` of scope URLs. |
-| `notificationDomain` | `string \| string[]` | yes | Domain(s) where the Graph change-notification endpoint (`POST /api/azure-email-notifications`) is registered; the first builds the subscription URL when `devNotificationUrl` is unset. |
-| `participantSync` | `OutlookParticipantSyncConfig` | no | Enables background synchronization of Outlook recipients into a consumer-provided participant table. Requires the configured participant query; see below. |
-| `devNotificationUrl` | `string` | no | Overrides the Graph subscription notification URL (e.g. for local dev / tunneling). |
-| `emails` | `{ define?, recipients?: { define? }, attachments?: { define? } }` | no | Extra column definitions for the Outlook-specific tables (only applied when no CRM block is present). Each `define` receives a `TableBuilder`. |
+Outlook auto-detects `CrmBlock` (`system.hasBlock(CrmBlock)`) and has no
+`hasCrmBlock` flag.
 
-`participantSync` accepts `participants`, a query returning an `address`
-column and optionally a `client_id` column, plus `defaultSince` for the first
-sync window. The integration creates the participant-sync tables and enqueues
-work after Outlook messages are saved; later notification and account-sync
-runs continue to enqueue participant synchronization.
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `provider` | yes | Managed-OAuth provider key (e.g. `"outlook_email"`). |
+| `scopes` | yes | Space-separated literal or `json_build_array(...)` of scope URLs. |
+| `notificationDomain` | yes | `string \| string[]` hosting `POST /api/azure-email-notifications`; the first builds the subscription URL unless `devNotificationUrl` is set. |
+| `devNotificationUrl` | no | Overrides the Graph subscription notification URL (local dev / tunneling). |
+| `participantSync` | no | `OutlookParticipantSyncConfig`: `participants` (query returning `address`, optionally `client_id`) and `defaultSince` (first sync window). Creates participant-sync tables and enqueues work after messages are saved and on later notification/account-sync runs. |
+| `emails` | no | `{ define?, recipients?: { define? }, attachments?: { define? } }` extra columns for the Outlook message tables; applied only without a CRM block. |
+
+OAuth redirect addresses are derived internally; neither constructor accepts
+`redirectUri`.
 
 ## Tables Created
 
-### Gmail
+Inspect the schema for columns.
 
-| Table | When | Purpose / key columns |
+| Table | When | Purpose |
 | --- | --- | --- |
-| `user_gmail_accounts` | always | Connected accounts: `sys_user_id`, `email`, `credential_id`, `status` (`gmail_connection_status`), `sync_status`, `chosen_sync_date`, `chosen_emails`, `notification_history_id`, `notification_expiration`. |
-| `user_gmail_aliases` | always | Send-as aliases for an account. |
-| `user_gmail_sync_logs` | always | Per-account sync log: `message`, `status`. |
-| `user_gmail_emails` | only when not CRM | Messages: `message_id`, `subject`, `snippet`, `from`, `from_email`, `reply_to`, `thread_id`, `date`, `body_text`, `is_read`, `message_reply_id`. |
-| `user_gmail_recipients` | only when not CRM | `email`, `recipient_address`, `recipient_type`. |
-| `user_gmail_email_attachments` | only when not CRM | `filename`, `content_type`, `data` (blob ref), `ccid`, `external_url`. |
+| `user_gmail_accounts`, `user_gmail_aliases`, `user_gmail_sync_logs` | Gmail | Connected accounts, send-as aliases, sync log. |
+| `user_gmail_emails`, `user_gmail_recipients`, `user_gmail_email_attachments` | Gmail without `hasCrmBlock` | Messages, recipients, attachments. |
+| `user_outlook_emails_accounts` | Outlook | Connected accounts and Graph subscription state. |
+| `user_outlook_email_integration_logs` | Outlook | Operation/error log (TTL ~1 week). |
+| `outlook_email_notification_inbox` | Outlook | Authenticated, deduplicated Graph notification work (TTL ~2 days). |
+| `outlook_contact_email_sync_jobs` | Outlook with `participantSync` | Bounded participant synchronization work. |
+| `user_email_identities`, `user_outlook_emails`, `user_outlook_recipients`, `user_outlook_email_attachments` | Outlook without `CrmBlock` | Logical message identities, messages, recipients, attachments. |
+| `user_email_drafts`, `user_email_draft_recipients`, `user_email_draft_attachments` | `CrmBlockOpts.emailDrafts.enabled` | Application-owned drafts (see below). |
 
-When `hasCrmBlock` is set, Gmail writes into the CRM's shared
-`user_all_emails`, `user_email_recipients`, `user_email_attachments` tables.
-Recipient sync replaces the rows for each successfully fetched full message in
-one transaction, deduplicating by message, parsed address, and recipient type.
-This repairs existing duplicate/stale recipients on resync; messages outside the
-fetched set and other accounts are untouched. Failed or incomplete message
-responses are rejected before reconciliation.
+In CRM mode, Gmail recipient sync replaces the rows for each successfully
+fetched full message in one transaction, deduplicating by message, parsed
+address, and recipient type; this repairs duplicate or stale recipients on
+resync. Other messages and accounts are untouched, and failed or incomplete
+message responses are rejected before reconciliation.
 
-### Outlook
+Participant sync spaces provider-page claims two seconds apart across mailbox
+jobs (single active runtime). A job's `started_at` keeps the last page-claim
+time after completion or requeue so pacing survives restarts; deleting the most
+recently claimed job can release the pace early. This is a load-shedding guard,
+not a strict distributed rate limiter.
 
-| Table | When | Purpose / key columns |
-| --- | --- | --- |
-| `user_outlook_emails_accounts` | always | Connected accounts: `sys_user_id`, `email`, `credential_id`, `provider_subject`, `status`, and Graph subscription state. |
-| `user_outlook_email_integration_logs` | always | Operation/error log (TTL ~1 week). |
-| `outlook_email_notification_inbox` | always | Authenticated, deduplicated Graph notification work (TTL ~2 days). |
-| `outlook_contact_email_sync_jobs` | with `participantSync` | Bounded participant synchronization work. |
-| `user_email_identities` | only when no CRM block | Provider-independent logical message identities. |
-| `user_outlook_emails` | only when no CRM block | Message metadata, body/hydration state, provider deletion state, and identity/thread keys. |
-| `user_outlook_recipients` | only when no CRM block | Normalized `email` and `recipient_type`. |
-| `user_outlook_email_attachments` | only when no CRM block | Attachment identity/kind, metadata, blob hash, size, and provider deletion state. |
-
-When `CrmBlock` is present, Outlook writes into the shared `user_all_emails`
-tables instead of its own message tables.
+Enums: `gmail_connection_status` and `outlook_email_connection_status`
+(`active`, `reauth_required`), `gmail_chosen_emails_enum`, `sync_status_enum`
+(Gmail), `outlook_email_attachment_kind` (`file`, `item`, `reference`),
+`outlook_email_notification_event`, `recipient_type_enum` (`to`, `cc`, `bcc`),
+and, with drafts, `user_email_draft_status` (`draft`, `sending`, `failed`,
+`send_unknown`).
 
 ### Application-owned drafts
 
-Set `CrmBlockOpts.emailDrafts.enabled` to create provider-independent draft
-storage for a CRM with an email integration:
+`CrmBlockOpts.emailDrafts.enabled` creates provider-independent drafts (not
+Gmail or Outlook provider drafts). A user can save an incomplete message and
+later send it from any active connected sender they own. Sending revalidates
+that account and address on the server, atomically claims the draft to prevent
+double sends, performs provider I/O outside the database transaction, and
+records `failed` or `send_unknown` when the outcome cannot be confirmed. A send
+claim older than ten minutes is fenced into `send_unknown` and never retried
+automatically; the user must check the mailbox and confirm it was sent or
+discard it. An ambiguous attempt cannot return to editable, because a late
+provider acceptance would make a resend a duplicate. Confirmed sends and
+discarded drafts are deleted with their recipients and attachment references.
+Draft sends accept at most 20 attachments, each under 3 MB and at most 10 MB
+total; larger Outlook attachments (which need a Graph upload session) are
+rejected before blob loading or provider dispatch.
 
-| Table | Purpose |
-| --- | --- |
-| `user_email_drafts` | One user-owned message draft, including its selected integration/account/from address, subject, Lexical body, timestamps, and send state. |
-| `user_email_draft_recipients` | Normalized To, Cc, and Bcc addresses for a draft. |
-| `user_email_draft_attachments` | Blob-backed attachments for a draft. |
+With drafts enabled, `CrmBlock.StandardRoutes` mounts `/email-drafts`,
+`/email-drafts/new`, and `/email-drafts/{record_id}` (override with
+`emailDraftsPath` / `emailDraftDetailPath` in `CrmBlockOpts.routes`, or the
+`emailDrafts` standard-route override). The editor supports To/Cc/Bcc, rich
+text, sender selection, and attachments after the first save. `AllEmailsList`
+shows Save draft only when `enableDraftSaving` is set; standard CRM inbox
+routes set it only when draft routes are enabled.
 
-These are application drafts, not Gmail or Outlook provider drafts. A user can
-save an incomplete message, return later, and choose any active connected
-sender they own. Sending revalidates that exact account and address on the
-server, atomically claims the draft to prevent double sends, performs provider
-I/O outside the database transaction, and records `failed` or `send_unknown`
-when the operation cannot be confirmed. A send claim older than ten minutes is
-fenced into `send_unknown`; it is never automatically retried. After checking
-the connected mailbox, the user must deliberately confirm it was sent or
-discard the unresolved local draft. An ambiguous attempt cannot return to an
-editable state because a late provider acceptance could make a later resend a
-duplicate. Confirmed sends and discarded drafts are deleted with their
-recipients and attachment references rather than retained as hidden history.
-Draft sends accept at most 20 attachments, each smaller than 3 MB and no more
-than 10 MB in total; larger Outlook attachments require a separate Graph upload
-session flow and are rejected before blob loading or provider dispatch.
+## Reactors and Endpoints
 
-## Enums
-
-- Gmail: `gmail_connection_status` (`active`, `reauth_required`),
-  `gmail_chosen_emails_enum` (`allEmails`, `allExceptSpam`,
-  `allExceptSocialSpamPromotions`).
-- Outlook: `outlook_email_connection_status` (`active`, `reauth_required`),
-  `outlook_email_attachment_kind` (`file`, `item`, `reference`), and
-  `outlook_email_notification_event`.
-- Shared: `recipient_type_enum` (`to`, `cc`, `bcc`). Gmail also defines
-  `sync_status_enum`.
-- Application drafts, when enabled: `user_email_draft_status` (`draft`,
-  `sending`, `failed`, `send_unknown`).
-
-## Reactors, Scheduled Jobs & Endpoints
-
-You do not call these directly; they run automatically once the block is
-registered.
+These run automatically once the block is registered.
 
 - Gmail reactors: `gmail_sync_pending`, `gmail_watch_inbox`,
   `gmail_renew_subscriptions`.
-- Application drafts, when enabled:
-  `user_email_draft_stale_send_fence` changes one expired `sending` claim to
-  `send_unknown` per invocation and never retries provider delivery.
 - Outlook reactors: `outlook_renew_subscriptions`,
   `outlook_resubscribe_missing_email_subscription`,
-  `outlook_email_notification_inbox`, and `outlook_email_hydration`. With
-  participant sync configured, the block also registers
-  `outlook_contact_email_sync_job`.
-- With participant sync configured, Outlook schedules
-  `outlook_contact_email_sync_seed` every five minutes.
-- Endpoints registered per app (via `addOauthRedirect`) or, for Outlook
-  notifications, in `populate`: OAuth callback + global redirect, attachment
-  download (`GET /api/<attachmentsTable>/{blob_id}`), and push-notification
-  endpoints (Gmail `POST /api/can-write/google-email-notifications`, Outlook
-  `POST /api/azure-email-notifications`).
+  `outlook_email_notification_inbox`, `outlook_email_hydration`; with
+  participant sync, `outlook_contact_email_sync_job` plus the
+  `outlook_contact_email_sync_seed` job every five minutes.
+- Drafts: `user_email_draft_stale_send_fence` moves one expired `sending`
+  claim to `send_unknown` per invocation.
+- Endpoints, registered by `addOauthRedirect` (called by
+  `EmailIntegrationsPage`) or, for Outlook notifications, in `populate`: OAuth
+  callback + global redirect, attachment download
+  (`GET /api/<attachmentsTable>/{blob_id}`), Gmail
+  `POST /api/can-write/google-email-notifications`, and Outlook
+  `POST /api/azure-email-notifications`.
 
 Outlook subscribes to created and deleted non-draft messages. The webhook
-coalesces delivery retries by account and provider message ID, ignores already
-archived creations and unknown deletions, and queues only work that can change
-the archive. Message reads and provider-deletion handling remain durable
-reactor work.
+coalesces retries by account and provider message ID, ignores already archived
+creations and unknown deletions, and queues only work that can change the
+archive; message reads and deletion handling remain durable reactor work.
 
-## Pages
+## Pages and Components
 
-### Email draft routes
+| Export | Import | Notes |
+| --- | --- | --- |
+| `EmailIntegrationsPage` | `blocks/email_integrations/email_integration_page` | Self-routing account connect/disconnect page. Props: `integrations: EmailIntegrationConfig[]` (`{ integration: <Class> }`), `path?` (default `/email-integrations`), `skipSidebarItem?`. |
+| `AllEmailsList` | `blocks/email_integrations/common` | Searchable, thread-grouped inbox over `user_all_emails`. Not a page: render inside a `<Route>`. Requires `CrmBlock` with at least one `emailIntegrations` entry. `where` is required; `extraStatements` runs in the list's `Data` procedure for `extraActions` / `extraDialogs`. |
+| `EmailItem` | `blocks/email_integrations/common` | One expandable message row. Must run inside an `Each` with record name `email` and a UI scalar `expanded_email_id`. The received flag is spelled `recieved`. |
+| `EmailBodyFieldNode` | `blocks/email_integrations/common` | Renders a body in an iframe, converting AMP HTML and inlining `cid:` attachments. `integrationTable`'s singular name forms the `<singular>_id` attachment FK; `recordName` defaults to `"email_record"`. |
+| `EmailsPage` / `EmailsList` | static on each integration class, or `block.emailsPage(...)` / `block.emailsList(...)` | Provider listing: `EmailsPage` (`{ where, path }`) is self-routing; `EmailsList` takes `{ where }`. |
 
-When `CrmBlockOpts.emailDrafts.enabled` is true,
-`CrmBlock.StandardRoutes` mounts a provider-independent draft list at
-`/email-drafts`, a new-draft editor at `/email-drafts/new`, and an edit route at
-`/email-drafts/{record_id}`. Override `emailDraftsPath` and
-`emailDraftDetailPath` through `CrmBlockOpts.routes`, or suppress/replace the
-standard routes with the `emailDrafts` standard-route override.
+`convertAmpHtmlToHtml(s, sourceExpr, resultScalar)` (from
+`blocks/email_integrations/gmail`) rewrites AMP4EMAIL into HTML;
+`EmailBodyFieldNode` already calls it.
 
-The editor supports multiple To/Cc/Bcc recipients, a rich-text body, sender
-selection across active connected accounts, and blob-backed attachments after
-the first save. The draft list exposes explicit send, discard, and ambiguous
-send-resolution actions without creating provider-side drafts. An
-`AllEmailsList` consumer must explicitly set `enableDraftSaving` to expose Save
-draft from its composer; standard CRM inbox routes do this only when draft
-routes are enabled.
+## Sending and Integration Helpers
 
-### `EmailIntegrationsPage`
+From `system.block(GmailIntegration)` / `system.block(OutlookEmailIntegration)`:
+`sendEmail(s, SendEmailOpts)` (DOM event), `sendEmailFromServer(s,
+SendEmailFromServerOpts)` (server procedure, also accepts `attachmentsQuery`
+for bounded blob-backed attachments), `markAsRead`, `getAttachmentUrl(blobId)`,
+`deleteAccount`, `navigateToOauth(s)`, and display metadata (`integrationName`,
+`icon`, `accountTable`, `emailTable`, `isActiveAccount`, `adminStatus`,
+`bodyFieldNode`).
 
-Import: `blocks/email_integrations/email_integration_page`.
-Self-routing — mount it directly, do **not** wrap it in `<Route>`.
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `integrations` | `EmailIntegrationConfig[]` | yes | Integration classes to surface; each is `{ integration: <Class> }`. |
-| `skipSidebarItem` | `boolean` | no | When `true`, does not add the "Email Integrations" sidebar item. |
-| `path` | `string` | no | Route path. Defaults to `"/email-integrations"`. |
-
-`EmailIntegrationConfig` (exported from the same module):
-`{ integration: EmailIntegrationConstructor }`.
-
-The page wires each integration's OAuth redirect, lists connected accounts with
-sync status, and lets users add/remove accounts.
-
-### Provider listing pages
-
-Each integration exposes a self-routing listing page and an embeddable list,
-both as instance props and static members:
-
-- Instance: `block.emailsPage({ where, path })`, `block.emailsList({ where })`.
-- Static: `GmailIntegration.EmailsPage`, `GmailIntegration.EmailsList`,
-  `OutlookEmailIntegration.EmailsPage`, `OutlookEmailIntegration.EmailsList`.
-
-`EmailsPage` takes `{ where: Sql; path: string }` (self-routing); `EmailsList`
-takes `{ where: Sql }`.
-
-## Components
-
-### `AllEmailsList`
-
-Import: `blocks/email_integrations/common`. Searchable, paginated,
-thread-grouped inbox spanning every configured integration, backed by
-`user_all_emails`. Requires `CrmBlock` with at least one integration in
-`emailIntegrations`. It is a component, not a page — render it inside a
-`<Route>`.
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `where` | `Sql` | yes | Predicate over `user_all_emails` scoping which emails show. |
-| `enableCompose` | `boolean` | no | Show the floating Compose button + Reply/Reply All/Forward. Defaults to `true`. |
-| `composeTo` | `Sql` | no | Address inserted into the To field when a new message opens. |
-| `hideHeader` | `boolean` | no | Suppress the "All Emails" heading. |
-| `extraActions` | `Node` | no | Extra per-row action buttons inside each expanded email. |
-| `extraStatements` | `(s: StateStatements) => void` | no | Runs in the list's `Data` procedure (define scalars/tables for `extraActions` / `extraDialogs`). |
-| `extraDialogs` | `Node` | no | Page-level sibling of the compose dialog; sees `extraStatements` scalars. |
-
-### `EmailItem`
-
-Import: `blocks/email_integrations/common`. A single message row that expands
-inline to show recipients, body, attachments and Reply/Forward actions. Must
-run inside an `Each` over emails with record name `email` and a UI scalar
-`expanded_email_id`.
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `integrationTable` | `string` | yes | Email table to read the expanded row's full record from. |
-| `recipientsTable` | `string` | yes | Table holding to/cc/bcc recipients. |
-| `attachmentsTable` | `string` | yes | Table holding attachments. |
-| `recieved` | `boolean` | yes | `true` for inbox (received) messages; enables mark-as-read on expand. (Note the misspelling: `recieved`.) |
-| `bodyFieldNode` | `Node` | yes | Node that renders the email body (provider-specific). |
-| `markAsRead` | `(s, { messageId }) => void` | no | Marks the message read in the provider when an unread row is expanded. |
-| `enableCompose` | `boolean` | no | Show Reply / Reply All / Forward. Defaults to `true`. |
-| `extraActions` | `Node` | no | Extra action buttons in the expanded action bar. |
-| `forceExpanded` | `boolean` | no | Render the row already expanded. Defaults to `false`. |
-| `hideHeader` | `BooleanExpr` | no | Condition for hiding the collapsed summary header row. Defaults to `false`. |
-
-### `EmailBodyFieldNode`
-
-Import: `blocks/email_integrations/common`. Renders an email body in an iframe,
-converting AMP HTML and inlining `cid:` attachments from `user_email_attachments`.
-
-| Prop | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `integrationTable` | `string` | yes | Email table the body record belongs to; its singular name forms the `<singular>_id` foreign key used to find attachments. |
-| `recordName` | `string` | no | Record holding the body. Defaults to `"email_record"`. |
-
-## Helpers via `system.block(...)`
-
-Both integration classes implement the `EmailIntegration` interface. Fetch an
-instance with `system.block(GmailIntegration)` /
-`system.block(OutlookEmailIntegration)` and use:
-
-- `sendEmail(s, opts: SendEmailOpts)` — send/reply/forward from a DOM event.
-- `markAsRead(s, { emailId, accountId })` — mark a message read in the provider.
-- `getAttachmentUrl(blobId): Sql` — attachment download URL for the block's
-  attachment endpoint.
-- `deleteAccount(s, { accountId })`, `navigateToOauth(s)` — connect/
-  disconnect flows (normally driven by `EmailIntegrationsPage`).
-- `integrationName`, `icon({ sx })`, `accountTable`, `emailTable`,
-  `isActiveAccount`, `adminStatus`, `bodyFieldNode` — display/metadata.
-
-For small mail merges, pass these integrations to
-`ConnectedAccountEmailDeliveryBlock`. Each provider declares mailbox-level
-`deliveryLimits`, and the shared outbox applies them across every queued
-delivery with the same stable provider mailbox identity, including separate
-connections and sender aliases:
-
-| Provider | Messages per rolling minute | Recipients per rolling 24 hours |
-| --- | ---: | ---: |
-| Gmail | 60 | 500 |
-| Outlook | 30 | 10,000 |
-
-The outbox sends one recipient per provider request, so its message and
-recipient counts are the same. Gmail uses the personal-account daily ceiling
-because both personal and Workspace accounts can be connected. Work over a
-mailbox limit remains queued as `rate_limited` and is released when the rolling
-window has capacity. These counters cover sends made through the
-connected-account outbox, not compose sends that call an integration directly
-or mail sent outside Yolm. Historical deliveries without a mailbox identity
-remain in the quota through normalized sender-address matching and by resolving
-their historical account IDs to the account's current canonical mailbox
-identity. Candidate deliveries use the same resolution before admission. This
-preserves quota usage across sender-alias transitions in either direction.
-
-`ConnectedAccountEmailDeliveryReport` is a route-free, read-only component for
-the outbox. It shows overall sent, rate-limited, failed, and uncertain recipient
-counts together with the 100 most recent deliveries. Systems supply their own
-route, page layout, permission boundary, and navigation:
-
-```tsx
-import { ConnectedAccountEmailDeliveryReport } from "blocks/connected_account_email_delivery";
-
-<ConnectedAccountEmailDeliveryReport />;
-```
-
-### Sending email
-
-Both providers accept the same recipient format: `to` is required, `cc` and
-`bcc` are optional, and each is a SQL expression containing comma-separated
-email addresses. Pass address strings, not provider JSON or table references;
-the integration constructs the provider payload. `from` is required.
-
-`sendEmail(s, opts: SendEmailOpts)` runs from a DOM event and supports reply
-fields (`threadId`, `isReply`, `replyAll`, `inReplyTo`) and
-`beforeEmailSent` / `afterEmailSent` / `onEmailSendError` hooks. Gmail replies
-also accept `references` for the complete References header; when omitted, null,
-or empty, Gmail falls back to `inReplyTo`. Outlook uses its native reply endpoint
-and does not consume `references`.
-`sendEmailFromServer(s, opts: SendEmailFromServerOpts)` runs in a server
-procedure and additionally accepts `attachmentsQuery` for bounded blob-backed
-attachments. Both expose the same `to`/`cc`/`bcc` values in hook contexts.
+`to` and `from` are required; `to`, `cc`, and `bcc` are SQL expressions of
+comma-separated addresses, not provider JSON or table references. Reply fields
+are `threadId`, `isReply`, `replyAll`, and `inReplyTo`; Gmail also accepts
+`references` (falls back to `inReplyTo` when absent or empty), while Outlook
+uses its native reply endpoint and ignores it. Hooks `beforeEmailSent` /
+`afterEmailSent` / `onEmailSendError` see the same `to`/`cc`/`bcc` values.
 
 ```typescript
-import { OutlookEmailIntegration } from "blocks/email_integrations/outlook_email";
 import type { SendEmailFromServerOpts } from "blocks/email_integrations";
-import { sql } from "std/sql_utils";
-import { system } from "std/system";
 
 const message: SendEmailFromServerOpts = {
   accountId: sql`selected_account_id`,
@@ -437,30 +245,29 @@ const message: SendEmailFromServerOpts = {
 system.block(OutlookEmailIntegration).sendEmailFromServer(s, message);
 ```
 
-`navigateToOauth(s)` starts authorization without sync-selection options.
-OAuth redirect addresses are derived internally; constructors do not accept
-`redirectUri`. The account connection page does not offer unsupported sync
-category/date controls.
+### Connected-account delivery limits
 
-## Helper functions
+For small mail merges, pass these integrations to
+`ConnectedAccountEmailDeliveryBlock`. Its shared outbox applies each provider's
+`deliveryLimits` across every queued delivery with the same provider mailbox
+identity, including separate connections and sender aliases:
 
-- `convertAmpHtmlToHtml(s, sourceExpr, resultScalar)` — exported from
-  `blocks/email_integrations/gmail`; rewrites AMP4EMAIL markup into standard
-  HTML, writing the result into the named scalar. `EmailBodyFieldNode` already
-  calls this for you.
+| Provider | Messages per rolling minute | Recipients per rolling 24 hours |
+| --- | ---: | ---: |
+| Gmail | 60 | 500 |
+| Outlook | 30 | 10,000 |
 
-## Common Mistakes
+The outbox sends one recipient per request, so both counts match. Gmail uses
+the personal-account ceiling because personal and Workspace accounts can both
+connect. Work over a limit stays queued as `rate_limited` until the window has
+capacity. The counters cover only connected-account outbox sends, not direct
+compose sends or mail sent outside Yolm. Historical deliveries without a
+mailbox identity still count, through normalized sender-address matching and
+by resolving historical account IDs to the current mailbox identity; candidate
+deliveries use the same resolution, so quota survives sender-alias changes.
 
-- Wrapping `EmailIntegrationsPage` (or a provider `EmailsPage`) in `<Route>` —
-  they are self-routing.
-- Rendering `AllEmailsList` without `CrmBlock` and at least one entry in its
-  `emailIntegrations`; it renders "No email integrations configured" otherwise.
-- Forgetting `hasCrmBlock: true` on `GmailIntegration` when using the CRM
-  block — Gmail cannot auto-detect the CRM block, so without the flag it
-  creates and writes its own `user_gmail_emails` tables instead of
-  `user_all_emails`. (Outlook auto-detects.)
-- Using `EmailItem` outside an `Each` that exposes an `email` record and an
-  `expanded_email_id` UI scalar.
-- Misspelling-sensitive prop: `EmailItem`'s received flag is `recieved`.
-- Passing provider-specific JSON to block send methods. Both use comma-separated
-  address strings; low-level provider services own provider-specific payloads.
+`ConnectedAccountEmailDeliveryReport` (from
+`blocks/connected_account_email_delivery`) is a route-free, read-only outbox
+summary: sent, rate-limited, failed, and uncertain counts plus the 100 most
+recent deliveries. Systems supply the route, layout, permission boundary, and
+navigation.

@@ -214,8 +214,8 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
       table.fk("sys_users");
       table.string("operation", 200).notNull();
       table.string("error_type", 500);
-      table.string("error_message", 5000);
-      table.string("error_description", 5000);
+      table.string("error_message", 2000);
+      table.string("error_description", 2000);
       table.json("raw_error");
       table.timestampUtc("logged_at").notNull().default(sql`now()`);
       table.ttlFrom("logged_at", sql`date.add(week, -1, now())`);
@@ -377,6 +377,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
             },
             errorName: "watch_error",
             catch: (s) => {
+              s.rollbackIfInTransaction();
               this.opts.extensions?.onWatchError?.(s, {
                 calendarId: opts.calendarId,
                 errorRecord: sql.ref("watch_error"),
@@ -392,7 +393,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
               s.startTransaction();
               s.modify(
                 sql`insert into user_google_calendar_error_logs (user_google_calendar_id, operation, error_type, error_message, error_description)
-              values (${opts.calendarId}, 'watch', watch_error.type, watch_error.message, watch_error.description)`,
+              values (${opts.calendarId}, 'watch', watch_error.type, left(watch_error.message, 2000), left(watch_error.description, 2000))`,
               );
               s.commitTransaction();
               this.#markReauthOnTokenError(s, {
@@ -433,6 +434,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
       },
       errorName: "stop_watch_error",
       catch: (s) => {
+        s.rollbackIfInTransaction();
         if (system.hasBlockNamed("SchedulingBlock")) {
           s.startTransaction();
           s.modify(
@@ -448,7 +450,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
           sql`insert into user_google_calendar_error_logs (user_google_calendar_id, operation, error_type, error_message, error_description)
             values (${opts.calendarId}, ${
             sql.lit(operation)
-          }, stop_watch_error.type, stop_watch_error.message, stop_watch_error.description)`,
+          }, stop_watch_error.type, left(stop_watch_error.message, 2000), left(stop_watch_error.description, 2000))`,
         );
         s.commitTransaction();
         this.#markReauthOnTokenError(s, {
@@ -640,6 +642,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
         },
         errorName: "google_create_err",
         catch: (s) => {
+          s.rollbackIfInTransaction();
           if (system.hasBlockNamed("SchedulingBlock")) {
             s.startTransaction();
             s.modify(
@@ -796,6 +799,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
       },
       errorName: "google_update_err",
       catch: (s) => {
+        s.rollbackIfInTransaction();
         if (system.hasBlockNamed("SchedulingBlock")) {
           s.startTransaction();
           s.modify(
@@ -862,6 +866,7 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
       },
       errorName: "google_delete_err",
       catch: (s) => {
+        s.rollbackIfInTransaction();
         if (system.hasBlockNamed("SchedulingBlock")) {
           s.startTransaction();
           s.modify(
@@ -944,8 +949,8 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
                 current_user,
                 'oauth_start_flow',
                 start_flow_error->>'type',
-                start_flow_error->>'message',
-                start_flow_error->>'description',
+                left(start_flow_error->>'message', 2000),
+                left(start_flow_error->>'description', 2000),
                 start_flow_error
               )`,
           );
@@ -1278,8 +1283,8 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
               user_id,
               'oauth_google_redirect_error',
               error,
-              error_description,
-              error_uri,
+              left(error_description, 2000),
+              left(error_uri, 2000),
               json_build_object(
                 'error', error,
                 'error_description', error_description,
@@ -1345,8 +1350,8 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
               user_id,
               'oauth_complete_callback',
               callback_error->>'type',
-              callback_error->>'message',
-              callback_error->>'description',
+              left(callback_error->>'message', 2000),
+              left(callback_error->>'description', 2000),
               callback_error
             )`,
         );
@@ -1448,8 +1453,8 @@ export class GoogleCalendarIntegration implements CalendarIntegration {
                 null,
                 'oauth_resolve_callback_target',
                 callback_target_error->>'type',
-                callback_target_error->>'message',
-                callback_target_error->>'description',
+                left(callback_target_error->>'message', 2000),
+                left(callback_target_error->>'description', 2000),
                 callback_target_error
               )`,
           );

@@ -1,6 +1,7 @@
 // deno-lint-ignore-file no-undef
 
 import MsgReader from "@kenjiuno/msgreader";
+import { messageBodyHtml } from "./body_html";
 import { findInlineAttachment } from "./inline_attachment";
 
 const MAX_MSG_BYTES = 100 * 1024 * 1024;
@@ -64,16 +65,22 @@ function attachmentContentType(fileName) {
   })[extension] || "application/octet-stream";
 }
 
-function messageBodySrcdoc(reader, message, objectUrls) {
+function messageBodySrcdoc(reader, message, html, objectUrls) {
   const documentParser = new DOMParser();
   const bodyDocument = documentParser.parseFromString(
-    message.bodyHtml,
+    html,
     "text/html",
   );
+  const inlineUrls = new Map();
   for (const element of bodyDocument.querySelectorAll("[src]")) {
     const source = element.getAttribute("src");
     const metadata = findInlineAttachment(message.attachments, source);
     if (!metadata) continue;
+    const existingUrl = inlineUrls.get(metadata);
+    if (existingUrl) {
+      element.setAttribute("src", existingUrl);
+      continue;
+    }
     try {
       const attachment = reader.getAttachment(metadata);
       if (!attachment?.content) continue;
@@ -84,6 +91,7 @@ function messageBodySrcdoc(reader, message, objectUrls) {
       });
       const url = URL.createObjectURL(blob);
       objectUrls.push(url);
+      inlineUrls.set(metadata, url);
       element.setAttribute("src", url);
     } catch {
       // A broken inline attachment should not prevent the rest of the email
@@ -281,7 +289,8 @@ class OutlookMessageViewer {
 
     const body = document.createElement("section");
     body.style.minHeight = "20rem";
-    if (message.bodyHtml) {
+    const html = messageBodyHtml(message);
+    if (html) {
       const frame = document.createElement("iframe");
       frame.title = "Message body";
       // Blob URLs inherit the parent origin, so the sandbox must preserve that
@@ -294,7 +303,7 @@ class OutlookMessageViewer {
         minHeight: "32rem",
         width: "100%",
       });
-      frame.srcdoc = messageBodySrcdoc(reader, message, this.objectUrls);
+      frame.srcdoc = messageBodySrcdoc(reader, message, html, this.objectUrls);
       body.append(frame);
     } else {
       const text = document.createElement("pre");

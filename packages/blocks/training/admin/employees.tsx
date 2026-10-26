@@ -1,5 +1,4 @@
 import { Button } from "components/button";
-import { Card, CardContent, CardHeader } from "components/card";
 import { Chip } from "components/chip";
 import { FormControl } from "components/form_control";
 import { FormLabel } from "components/form_label";
@@ -7,7 +6,7 @@ import { Input } from "components/input";
 import { Select } from "components/select";
 import { Typography } from "components/typography";
 import { Data } from "std/data";
-import { sql } from "std/sql_utils";
+import { type Sql, sql } from "std/sql_utils";
 import { Each, Show } from "std/ui";
 import type { TrainingBlock } from "../index.tsx";
 import {
@@ -16,13 +15,10 @@ import {
   personTable,
   trainingComplianceLabels,
   trainingFeatureEnabled,
+  workforceProvider,
 } from "../helpers";
-import { EmptyState, StatTile } from "../shared";
-import {
-  adminEmployeeHref,
-  adminSelectClass,
-  TrainingAdminFrame,
-} from "./shared";
+import { EmptyState, PageShell, StatTile } from "../shared";
+import { adminEmployeeHref, adminSelectClass } from "./shared";
 
 export function TrainingAdminPeoplePage(
   props: { block: TrainingBlock },
@@ -32,12 +28,11 @@ export function TrainingAdminPeoplePage(
       local
       procedure={(s) => {
         s.defScalar("employee_search", sql.lit``);
+        s.defScalar("employee_activity_filter", sql.lit`active`);
         s.defScalar("employee_status_filter", sql.lit`all`);
       }}
     >
-      <TrainingAdminFrame>
-        <EmployeeFilesAndCompliance block={props.block} />
-      </TrainingAdminFrame>
+      <EmployeeFilesAndCompliance block={props.block} />
     </Data>
   );
 }
@@ -48,31 +43,34 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
     "compliance",
   );
   const complianceLabels = trainingComplianceLabels;
-  return (
-    <Data
-      watch={[sql`employee_search`, sql`employee_status_filter`]}
-      procedure={(s) => {
-        const employeeBaseSql = sql`select e.id,
+  const employeeBaseSql = sql`select e.id,
                 ${employeeName(props.block.opts, sql`e`)} as name,
                 person_status.open_task_count as open_tasks,
                 person_status.pending_validation_count as pending_validation,
                 ${
-          includeCompliance
-            ? sql`coalesce((select count(*) from db.training_retraining_cases r where r.person_id = e.id and r.status = 'open'), 0)`
-            : sql`0`
-        } as open_retraining,
+    includeCompliance
+      ? sql`coalesce((select count(*) from db.training_retraining_cases r where r.person_id = e.id and r.status = 'open'), 0)`
+      : sql`0`
+  } as open_retraining,
                 ${
-          includeCompliance ? sql`person_status.cert_alert_count` : sql`0`
-        } as cert_alerts,
+    includeCompliance ? sql`person_status.cert_alert_count` : sql`0`
+  } as cert_alerts,
                 ${
-          includeCompliance
-            ? sql`coalesce((select count(*) from db.training_personnel_documents p where p.person_id = e.id), 0)`
-            : sql`0`
-        } as personnel_notes,
+    includeCompliance
+      ? sql`coalesce((select count(*) from db.training_personnel_documents p where p.person_id = e.id), 0)`
+      : sql`0`
+  } as personnel_notes,
                 person_status.last_completion_at as last_completion_at
               from db.${sql.ref(personTable(props.block.opts))} e
               join db.training_person_training_status person_status
-                on person_status.person_id = e.id`;
+                on person_status.person_id = e.id
+              where ui.employee_activity_filter = 'all'
+                 or coalesce(${
+    workforceProvider(props.block.opts).personAccessEligible(sql`e`)
+  }, false) = (ui.employee_activity_filter = 'active')`;
+  return (
+    <Data
+      procedure={(s) => {
         s.defRecord(
           "employee_file_summary",
           sql`with employee_base as (${employeeBaseSql})
@@ -84,9 +82,19 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                 coalesce(sum(cert_alerts), 0) as cert_alerts
               from employee_base`,
         );
-        s.defTable(
-          "employee_files",
-          sql`with employee_base as (${employeeBaseSql})
+      }}
+    >
+      <Data
+        debounce={{ wait: 300 }}
+        watch={[
+          sql`employee_search`,
+          sql`employee_activity_filter`,
+          sql`employee_status_filter`,
+        ]}
+        procedure={(s) => {
+          s.defTable(
+            "employee_files",
+            sql`with employee_base as (${employeeBaseSql})
               select *
               from employee_base
               where (
@@ -104,28 +112,18 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
               order by
                 case when open_tasks > 0 or pending_validation > 0 or open_retraining > 0 or cert_alerts > 0 then 0 else 1 end,
                 name`,
-        );
-      }}
-    >
-      <div className="flex flex-col gap-5">
-        <Card variant="outlined">
-          <CardHeader>
-            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 w-full">
-              <div>
-                <Typography level="title-lg" startIcon="FolderShared">
-                  {includeCompliance
-                    ? "People Files & Compliance"
-                    : "People Training Files"}
-                </Typography>
-                <Typography level="body-sm" className="text-neutral-600 mt-1">
-                  {includeCompliance
-                    ? `Completion history, retraining cases, ${complianceLabels.certificationsTitle.toLowerCase()}, expirations, and ${complianceLabels.personnelTitle.toLowerCase()} by employee.`
-                    : "Completion history, signed policies, check sheets, and essays by employee."}
-                </Typography>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
+          );
+        }}
+      >
+        <PageShell
+          title={includeCompliance
+            ? "People & training"
+            : "People training files"}
+          subtitle={includeCompliance
+            ? `Each person's training record, retraining cases, ${complianceLabels.certificationsTitle.toLowerCase()}, and ${complianceLabels.personnelTitle.toLowerCase()}.`
+            : "Each person's training record: completed courses, signed policies, check sheets, and essays."}
+        >
+          <div>
             <div
               className={`grid grid-cols-2 ${
                 includeCompliance ? "lg:grid-cols-4" : "lg:grid-cols-3"
@@ -158,7 +156,7 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                 />
               )}
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
               <FormControl className="md:col-span-2">
                 <FormLabel>Search people</FormLabel>
                 <Input
@@ -167,14 +165,33 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                 />
               </FormControl>
               <FormControl>
-                <FormLabel>Status</FormLabel>
+                <FormLabel>Personnel</FormLabel>
                 <Select
+                  aria-label="Personnel"
+                  className={adminSelectClass}
+                  value={sql`employee_activity_filter`}
+                  onInput={(s) =>
+                    s.setScalar("employee_activity_filter", sql`target_value`)}
+                >
+                  <Select.Option value="active">Active personnel</Select.Option>
+                  <Select.Option value="inactive">
+                    Inactive personnel
+                  </Select.Option>
+                  <Select.Option value="all">All personnel</Select.Option>
+                </Select>
+              </FormControl>
+              <FormControl>
+                <FormLabel>Training status</FormLabel>
+                <Select
+                  aria-label="Training status"
                   className={adminSelectClass}
                   value={sql`employee_status_filter`}
                   onInput={(s) =>
                     s.setScalar("employee_status_filter", sql`target_value`)}
                 >
-                  <Select.Option value="all">All people</Select.Option>
+                  <Select.Option value="all">
+                    All training statuses
+                  </Select.Option>
                   <Select.Option value="attention">
                     Needs attention
                   </Select.Option>
@@ -195,6 +212,12 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                 </Select>
               </FormControl>
             </div>
+            <Show when={sql`employee_activity_filter = 'inactive'`}>
+              <Typography level="body-sm" className="text-neutral-600 mb-4">
+                Training records and files are retained for inactive personnel.
+                Reactivate their workforce record when they return.
+              </Typography>
+            </Show>
             <div className="overflow-hidden border border-divider rounded-md bg-white">
               <div
                 className={`hidden lg:grid ${
@@ -233,9 +256,9 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
               <Show when={sql`not exists (select 1 from employee_files)`}>
                 <div className="p-4">
                   <EmptyState
-                    icon="PersonSearch"
+                    icon="ManageSearch"
                     title="No matching people"
-                    body="Adjust the employee search or status filter."
+                    body="Adjust the search, personnel, or training status filter."
                   />
                 </div>
               </Show>
@@ -250,7 +273,7 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                       {sql`employee.name`}
                     </Typography>
                     <Typography level="body-sm" className="text-neutral-600">
-                      Last validated:{" "}
+                      Last completed:{" "}
                       {sql`coalesce(${
                         formatDateSql(sql`employee.last_completion_at`)
                       }, 'None yet')`}
@@ -264,12 +287,18 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                       Training
                     </Typography>
                     <div className="flex flex-wrap gap-2">
-                      <Chip size="sm" variant="soft" color="warning">
-                        {sql`employee.open_tasks`} open
-                      </Chip>
-                      <Chip size="sm" variant="soft" color="primary">
-                        {sql`employee.pending_validation`} pending validation
-                      </Chip>
+                      <CountChip
+                        value={sql`employee.open_tasks`}
+                        singular="open"
+                        plural="open"
+                        color="warning"
+                      />
+                      <Show when={sql`employee.pending_validation > 0`}>
+                        <Chip size="sm" variant="soft" color="primary">
+                          {sql`employee.pending_validation::string ||
+                            ' to validate'`}
+                        </Chip>
+                      </Show>
                     </div>
                   </div>
                   {includeCompliance && (
@@ -281,9 +310,12 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                         >
                           Retraining
                         </Typography>
-                        <Chip size="sm" variant="soft" color="warning">
-                          {sql`employee.open_retraining`} open
-                        </Chip>
+                        <CountChip
+                          value={sql`employee.open_retraining`}
+                          singular="open"
+                          plural="open"
+                          color="warning"
+                        />
                       </div>
                       <div>
                         <Typography
@@ -292,9 +324,12 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                         >
                           Certifications
                         </Typography>
-                        <Chip size="sm" variant="soft" color="danger">
-                          {sql`employee.cert_alerts`} alerts
-                        </Chip>
+                        <CountChip
+                          value={sql`employee.cert_alerts`}
+                          singular="alert"
+                          plural="alerts"
+                          color="danger"
+                        />
                       </div>
                       <div>
                         <Typography
@@ -303,9 +338,12 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                         >
                           Personnel file
                         </Typography>
-                        <Chip size="sm" variant="soft" color="neutral">
-                          {sql`employee.personnel_notes`} notes
-                        </Chip>
+                        <CountChip
+                          value={sql`employee.personnel_notes`}
+                          singular="note"
+                          plural="notes"
+                          color="neutral"
+                        />
                       </div>
                     </>
                   )}
@@ -324,9 +362,34 @@ export function EmployeeFilesAndCompliance(props: { block: TrainingBlock }) {
                 </div>
               </Each>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </PageShell>
+      </Data>
     </Data>
+  );
+}
+
+/** A count chip that recedes to a dash at zero so real work stands out. */
+function CountChip(props: {
+  value: Sql;
+  singular: string;
+  plural: string;
+  color: "warning" | "primary" | "danger" | "neutral";
+}) {
+  return (
+    <>
+      <Show when={sql`${props.value} > 0`}>
+        <Chip size="sm" variant="soft" color={props.color}>
+          {sql`${props.value}::string || case when ${props.value} = 1
+            then ${sql.lit(" " + props.singular)}
+            else ${sql.lit(" " + props.plural)} end`}
+        </Chip>
+      </Show>
+      <Show when={sql`coalesce(${props.value}, 0) = 0`}>
+        <Typography level="body-sm" className="text-neutral-500">
+          —
+        </Typography>
+      </Show>
+    </>
   );
 }

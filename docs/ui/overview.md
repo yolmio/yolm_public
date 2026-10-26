@@ -9,9 +9,9 @@ tags:
 
 # UI Overview
 
-In Yolm, UIs are defined in apps using a TSX-like syntax. Components run at generation time and produce a node tree that becomes the runtime UI.
-
-## Simplest App
+In Yolm, UIs are defined in apps using a TSX-like syntax. Components run at
+generation time and produce a node tree that becomes the runtime UI. Runtime
+behavior is expressed with SQL expressions and Yolm statements, not JavaScript.
 
 ```typescript
 system.app({
@@ -20,69 +20,114 @@ system.app({
 })
 ```
 
-## Key Differences from React
+## Generation Time vs Runtime
 
-1. **No `key` props** - Not needed in Yolm, never add them
-2. **Generation time execution** - Components run once at build time, not at runtime
-3. **Automatic optimization** - Single roundtrip happens automatically
-4. **No objects for runtime state** - Use `db.*`, `ui.*`, and procedure scalars,
-   records, or tables intentionally
-5. **Two-phase components** - Gather phase + render phase
+- Component functions run at generation time to build the node tree. They do
+  not re-run when data changes, so TypeScript values (strings, arrays, objects,
+  closures) are fixed once the app is generated. Some parents also walk their
+  children in an extra generation-time [gather pass](./ictx.md#gather-phase),
+  so keep component functions free of side effects.
+- Anything that changes at runtime is a SQL expression (`sql\`...\``) over
+  state: `db.*` tables, `ui.*` state, or procedure-local scalars and tables.
+- Use `<Each>` to iterate runtime tables. Mapping a TypeScript array is fine
+  for fixed generation-time lists. Neither needs a `key` prop.
+- Pages render on the server first, then subsequent navigation renders in the
+  browser. Components are isomorphic; you do not choose server vs client
+  rendering.
+- Data access in one render is batched into a single roundtrip automatically.
 
-## Server Rendering
+## State Scopes
 
-You don't need to worry about server vs client rendering. Yolm serves the first rendered page on the server, then subsequent pages are rendered in the browser by the Yolm DOM runtime. Components are isomorphic.
+| Scope | Lifetime | Declared by |
+| --- | --- | --- |
+| `db.*` | Persistent database | `core.tsx` schema |
+| `ui.*` | In-memory UI state for the mounted tree | `Data` / `State` procedures, `queryParams`, `useGlobalState` |
+| procedure-local | One execution of an event handler or procedure | `s.defScalar` / `s.defTable` inside that handler |
+
+### UI State Scope
+
+`ui.*` state declared by a `Data` (or `State`) node is visible only to that
+node and its descendants, including nested `Route` nodes. Sibling subtrees
+cannot read it; declare shared state on a common ancestor, or use
+[`useGlobalState`](./global_nodes_states.md) for app-wide state.
+
+- Child `Data` procedures can read ancestor state but cannot modify it.
+- Event handlers (including `onMount`) can modify any ancestor state.
+- `Data local` declares client-only state; non-local `Data` runs its procedure
+  on the server and can read `db.*`. See [Data](./data.md#local-state).
+
+### Name Resolution
+
+Unqualified names resolve in this order:
+
+- In UI expressions (`Data` procedures, props, children): `ui`, then `db`.
+- In event handlers and `server`/`tryServer` bodies: procedure-local, then
+  `ui`, then `db`.
+
+Write bare names (`sql\`search\``, `s.setScalar("search", ...)`) for UI state in
+normal code. Write `ui.name` when a procedure-local declaration has the same
+name, or when you want a server body to make the UI source explicit. Always
+write `db.` for database tables so a UI table of the same name cannot capture
+the reference.
+
+```tsx
+<Button
+  onClick={(s) => {
+    s.defScalar("count", sql`(select count(*) from selected_rows)`);
+    s.setScalar("ui.count", sql`count`); // ui.count is the UI scalar, count is local
+  }}
+/>
+```
+
+## Static vs SQL Props
+
+- `className`, `color`, `variant`, `size`, and most configuration props are
+  static generation-time values. Choose among static variants at runtime with
+  `Show` or `Switch`/`Match`.
+- Content children, `value`, `when`, `style` values, and props typed as `Sql`
+  or `...Expr` accept SQL expressions. `sx` is compiled to a static CSS class
+  and does not accept SQL.
+- Runtime-conditional classes use `dynamicClassNames` (Tailwind) or
+  `dynamicClass`/`dynamicClasses` (raw class names). See
+  [Styling](./styling.md#dynamic-classes).
+
+## Derived and Display Values
+
+Compute display values in the query that loads the data: formatted labels,
+totals, status colors, joined names, and flags belong in `Data` procedures,
+SQL expressions, or [datagrid virtual columns](./datagrid_virtual_columns.md).
+UI work never requires adding `db` fields for derived or display values; add a
+column only when the value is real persistent business data.
+
+## Mutations and Refresh
+
+- Field editing (insert, update, upsert): [`Form`](./form.md).
+- Commands (delete, approve, sync, archive): [`ActionButton`](./action_button.md).
+- After a mutation, `s.refetch()` re-runs every non-local `Data` that has not
+  set `noRefetch`. `Form` and `ActionButton` handle this for you. There is no
+  `refresh_key` scalar to increment.
+
+See [Data, Form, and ActionButton](./data_vs_form.md) for the decision table.
 
 ## Styling
 
-Yolm supports both Tailwind and CSS-in-JS:
-
-- Use `className` prop with Tailwind classes (preferred)
-- Use `sx` prop for things that can't be done in Tailwind
-
-## Design Principles
-
-Follow Refactoring UI principles:
-
-- **Visual Language**: Minimalism with subtle shadows, rounded corners, white space
-- **Color Philosophy**: Use consistent palette with four treatment types:
-  - plain (minimal styling)
-  - outlined (bordered with transparent backgrounds)
-  - soft (subtle colored backgrounds)
-  - solid (full-color with high contrast)
-- **Typography**: Clear hierarchy with 3-4 heading levels and body sizes
-  - Readable line heights (1.5-1.7× for body text)
-- **Page Structure**:
-  - Create visual rhythm with consistent spacing between sections
-  - Group related elements with proximity and shared background treatments
-  - Use card-based layouts for content organization
-  - Maintain generous margins and padding for breathing room
-- **Interface Patterns**:
-  - Design forms with clear labels and consistent input styling
-  - Use subtle animations for state changes
-  - Structure dashboards with card-based modules and clear visual hierarchy
-
-## Important Rules
-
-- Only use components and props from documentation or examples
-- NEVER add a `key` prop
-- Use `<Each>` for runtime iteration over tables
-- Generation-time array iteration doesn't need keys
+Use `className` with Tailwind classes for static styling, `sx` for static style
+objects, theme tokens, and selectors, and `style` for runtime SQL values. See
+[Styling](./styling.md) and [Theming](./theming.md).
 
 ## URL and Query Parameters
 
-Yolm provides several ways to work with URLs and query parameters:
+Route parameters use `{name:type}` segments and are available as scalars:
 
-### Route Parameters
-Use `{param_name:type}` syntax in routes to capture URL segments:
 ```tsx
 <Route path="/users/{user_id:id}">
   {/* user_id is available as a scalar */}
 </Route>
 ```
 
-### Query Parameters
-Use `Data`'s `queryParams` prop to access URL query parameters:
+URL query parameters are declared with `Data` `queryParams` (use `default`,
+not `expr`):
+
 ```tsx
 import { Data } from "std/data";
 
@@ -92,12 +137,30 @@ import { Data } from "std/data";
     page: { default: sql`1`, type: "BigInt" },
   }}
   procedure={(s) => {
-  // q and page are available as scalars
-  s.defTable("results", sql`select * from db.items where name like '%' || q || '%'`);
+    s.defTable("results", sql`select * from db.items where name like '%' || q || '%'`);
   }}
 >
-  {/* children can use q and page scalars */}
+  {/* children can use q, page, and results */}
 </Data>
 ```
 
-See the [Routing](./routing.md) documentation for more details.
+Every write to a query param updates the URL (replace by default; declare
+`history: "push"` for navigation-like state). Links back to a list should set
+`backLink` so filters and scroll are restored. See
+[Routing](./routing.md#returning-to-a-list).
+
+## Common Mistakes
+
+These apply to every component; component pages list only their own pitfalls.
+
+- Adding React `key` props, hooks, or component-level JavaScript state. Use
+  `Data`, `Each`, `Show`, and Yolm statements.
+- Passing SQL to `color`, `variant`, `size`, or other static props.
+- Building `className` from SQL or template strings; use `dynamicClassNames`.
+- Filtering, sorting, or formatting rows in TypeScript instead of SQL.
+- Reading `ui.*` state from a sibling subtree that did not declare it.
+- Hand-rolling `Button` + `s.tryServer` + loading/error scalars for ordinary
+  forms or commands instead of `Form` or `ActionButton`.
+- Incrementing a made-up `refresh_key` instead of calling `s.refetch()`.
+- Adding `db` columns to hold display or derived values.
+- Using props or components that are not in the docs or exported types.

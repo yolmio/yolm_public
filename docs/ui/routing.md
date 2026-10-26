@@ -102,9 +102,9 @@ Route params become SQL scalars inside the route.
 ```tsx
 <Route path="/users/{user_id:id}">
   <Data procedure={(s) => {
-    s.defRecord("user", sql`select * from db.users where id = user_id`);
+    s.defRecord("user_record", sql`select * from db.users where id = user_id`);
   }}>
-    <span>{sql`user.name`}</span>
+    <span>{sql`user_record.name`}</span>
   </Data>
 </Route>
 ```
@@ -155,7 +155,80 @@ Use `Data queryParams` for bookmarkable filters.
 </Data>
 ```
 
-Use `default`, not `expr`, in `queryParams`.
+Use `default`, not `expr`, in `queryParams`. Query-param scalars, like other
+`Data` state, are visible to that `Data` and its descendants, including nested
+routes. The low-level `QueryParams` node and `useQueryParams` hook (array of
+`{ name, type, default }`) exist for package primitives; solution code should
+use `Data` `queryParams`.
+
+Every write to a query-param scalar updates the URL: `s.setScalar`,
+`bindScalar`, and `s.setQueryParam` all behave the same. By default a write
+replaces the current history entry, which is right for filters, search, sort,
+and paging. Declare `history: "push"` on navigation-like state where the
+browser Back button should step back, such as page-like tabs or folder
+navigation:
+
+```tsx
+<Data
+  queryParams={{
+    search: { default: sql.lit``, type: "String" },
+    tab: { default: sql.lit`overview`, type: "String", history: "push" },
+  }}
+>
+  <Results />
+</Data>
+```
+
+`s.setQueryParam(param, value, replace)` can still override the history mode
+for one write.
+
+## Returning to a List
+
+A link back to a list or parent page should set `backLink`. It is supported on
+`Link`, `Button`, `IconButton`, and `ListItemButton`, and requires `href`.
+When the user came from that page, the link returns to the most recent earlier
+history entry whose path exactly matches `href`'s path, restoring that entry's
+query string (filters, search, paging) and scroll position. With no matching
+entry, such as a fresh tab, or without the Navigation API, it is a plain link to
+`href`. Older runtimes treat it as a plain link. Hover, focus, and press
+rewrite the rendered `href` to the resolved URL, so middle-click and copy-link
+carry the filters.
+
+Keep the list's filters in `Data queryParams` (not local `defScalar` state) so
+there is something to restore.
+
+```tsx
+// List page at /issues
+<Data
+  queryParams={{ status: { default: sql.lit`open`, type: "String" } }}
+  procedure={(s) => {
+    s.defTable("issues", sql`select * from db.issues where status = status`);
+  }}
+>
+  <Input
+    value={sql`status`}
+    onInput={(s) => s.setScalar("status", sql`target_value`)}
+  />
+  <Each table="issues" recordName="issue">
+    <Link href={sql`'/issues/' || issue.id`}>{sql`issue.title`}</Link>
+  </Each>
+</Data>
+
+// Detail page at /issues/{issue_id:id}
+<Button href="/issues" backLink startIcon="ArrowBack" variant="plain">
+  Issues
+</Button>
+```
+
+The path match is exact, including IDs: a link to `/projects/12/parts` returns
+only to an earlier `/projects/12/parts` entry, and `/issues/` does not match
+`/issues`.
+
+Do not use `backLink` for sidebar or nav items, breadcrumbs (a fixed
+hierarchy, not history), forward navigation, in-page "back" state driven by
+`setScalar` such as wizard steps or panels, buttons that do work before
+navigating, external links, or links whose target is chosen by explicit
+return-source logic.
 
 ## Route Wrappers
 
@@ -186,3 +259,9 @@ function AdminRoute({ children }: { children: Node }) {
 - Using local state for pages users should bookmark/share.
 - Using `expr` instead of `default` in `Data queryParams`.
 - Reading route params from JavaScript variables instead of SQL scalars.
+- Hardcoding a back link to a list without `backLink`, which drops the list's
+  filters and scroll.
+- Using `s.history.back()` to return to a list; it is not a reliable return
+  target. Use `backLink`.
+- Keeping list filters in local `defScalar` state instead of `queryParams`.
+- Declaring `history: "push"` on filters or search, which floods history.

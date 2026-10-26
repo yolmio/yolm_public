@@ -35,20 +35,8 @@ api.post("/refresh_token", {
       s.return(sql`json_build_object('error', 'invalid_token')`);
     });
 
-    // Extract claims from the decoded token
-    s.defScalar("token_session_id", sql`(decoded->>'sub')::uuid`);
-    s.defRecord(
-      "existing_session",
-      sql`select *
-          from db.auth_session_tokens
-          where public_id = token_session_id
-            and now() < date.add(year, 1, issued)`
-    );
-
-    s.if(sql`existing_session.sys_user_id is null`, (s) => {
-      s.setHttpStatus(401);
-      s.return(sql`json_build_object('error', 'invalid_token')`);
-    });
+    // The subject claim carries the session token; see requireSession below.
+    requireSession(s, sql`try_cast(decoded->>'sub' as uuid)`);
 
     // Return success with new token
     s.return(sql`json_build_object('token', 'new_token_value')`);
@@ -107,73 +95,67 @@ api.post("/export_config", {
 
 ## Session Token Validation
 
-For cookie-backed app APIs, prefer `AuthBlock.validateApi`; it applies the
-standard session-token lifetime check.
+For cookie-backed app APIs, prefer `AuthBlock.validateApi`. Pass the same
+expression as the auth component's `cookieExpiration`; without it, the helper
+falls back to a one-year session lifetime. Check permissions with
+`userHasPermission` against `auth_user_id`, which resolves direct grants,
+overrides, and inherited roles. `currentUserHasPermission` is the same check
+bound to `current_user` for app UI and server statements.
 
 ```typescript
+import { AuthBlock, userHasPermission } from "blocks/auth";
+
+// Must match the auth component's cookieExpiration.
+const sessionExpiration = sql`date.add(hour, 24, now())`;
+
 api.post("/studio/get_data", {
   procedure: (s) => {
-    AuthBlock.validateApi(s, sql.lit`y-t`);
+    AuthBlock.validateApi(s, sql.lit`y-t`, sessionExpiration);
     s.if(sql`auth_user_id is null`, (s) => {
       s.setHttpStatus(401);
       s.return(sql`json_build_object('error', 'invalid_token')`);
     });
+    s.if(
+      sql`not ${userHasPermission(sql.lit`can_access_api`, sql`auth_user_id`)}`,
+      (s) => {
+        s.setHttpStatus(403);
+        s.return(sql`json_build_object('error', 'unauthorized')`);
+      },
+    );
 
-    // User is authenticated.
+    // User is authenticated and authorized.
   },
 });
 ```
 
-When validating a session token from a request body, apply the same session
-expiration expression configured on the auth component. The example below
-uses a 24-hour lifetime; replace `session_expiration` with the exact expression
-used by the app's `cookieExpiration` setting.
+When the session token arrives in a request body or header instead of the
+cookie, apply the same lifetime check. The examples below share this helper,
+which sets `auth_user_id` like `validateApi` and returns `401` when the token
+is missing, unknown, or expired:
 
 ```typescript
-api.post("/studio/get_data", {
-  jsonBodyScalar: "body",
-  procedure: (s) => {
-    s.defScalar("token_id", sql`(body->>'token_id')::uuid`);
-    s.defScalar("session_expiration", sql`date.add(hour, 24, now())`);
-    s.defScalar(
-      "session_seconds",
-      sql`cast(greatest(0, date.diff(second, now(), session_expiration)) as int)`,
-    );
+import type { EndpointStatements } from "std/statements";
+import type { Sql } from "std/sql_utils";
 
-    // Verify token exists and is valid
-    s.defRecord(
-      "existing_session",
-      sql`select *
-          from db.auth_session_tokens
-          where public_id = token_id
-            and now() < date.add(second, session_seconds, issued)`
-    );
-
-    s.if(sql`existing_session.sys_user_id is null`, (s) => {
-      s.setHttpStatus(401);
-      s.return(sql`json_build_object('error', 'invalid_token')`);
-    });
-
-    s.defScalar("sys_user_id", sql`existing_session.sys_user_id`);
-
-    // Check user permissions
-    s.if(
-      sql`not exists (
-        select 1 from db.auth_user_permissions
-        where sys_user_id = ${sql`sys_user_id`}
-        and permission = 'can_access_api'
-        and is_allowed = true
-      )`,
-      (s) => {
-        s.setHttpStatus(403);
-        s.return(sql`json_build_object('error', 'unauthorized')`);
-      }
-    );
-
-    // User is authenticated and authorized
-    // ... proceed with business logic
-  },
-});
+function requireSession(s: EndpointStatements, tokenId: Sql) {
+  s.defScalar(
+    "auth_user_id",
+    sql`(
+      select sys_user_id
+      from db.auth_session_tokens
+      where public_id = ${tokenId}
+        and now() < date.add(
+          second,
+          cast(greatest(0, date.diff(second, now(), ${sessionExpiration})) as int),
+          issued
+        )
+    )`,
+  );
+  s.if(sql`auth_user_id is null`, (s) => {
+    s.setHttpStatus(401);
+    s.return(sql`json_build_object('error', 'invalid_token')`);
+  });
+}
 ```
 
 ## Permission Checks in APIs
@@ -185,29 +167,15 @@ api.post("/deploy", {
   jsonBodyScalar: "body",
   procedure: (s) => {
     s.defScalar("system_id", sql`(body->>'system_id')::bigint`);
-    s.defScalar("token_id", sql`(body->>'token_id')::uuid`);
-
-    // Verify session
-    s.defRecord(
-      "session",
-      sql`select *
-          from db.auth_session_tokens
-          where public_id = token_id
-            and now() < date.add(year, 1, issued)`
-    );
-
-    s.if(sql`session.sys_user_id is null`, (s) => {
-      s.setHttpStatus(401);
-      s.return(sql`json_build_object('error', 'invalid_token')`);
-    });
+    requireSession(s, sql`try_cast(body->>'token_id' as uuid)`);
 
     // Check specific permission for this system
     s.if(
       sql`not exists (
         select 1 from db.system_studio_users
         where system_id = ${sql`system_id`}
-        and sys_user_id = session.sys_user_id
-        and can_publish = true
+          and sys_user_id = auth_user_id
+          and can_publish
       )`,
       (s) => {
         s.setHttpStatus(403);
@@ -225,38 +193,26 @@ api.post("/deploy", {
 });
 ```
 
-## GET Endpoint with Query-Based Auth
+## GET Endpoint with Header Auth
 
-Authenticate via query parameters:
+Send session tokens in a request header, not the query string; URLs are
+recorded in browser history, proxy logs, and referrer headers.
 
 ```typescript
 api.get("/check_permission", {
   query: [
     { name: "system_id", type: { type: "String", maxLength: 1000 } },
-    { name: "token", type: { type: "String", maxLength: 1000 } },
   ],
   procedure: (s) => {
-    s.defScalar("token_id", sql`token::uuid`);
-
-    s.defRecord(
-      "session",
-      sql`select *
-          from db.auth_session_tokens
-          where public_id = token_id
-            and now() < date.add(year, 1, issued)`
-    );
-
-    s.if(sql`session.sys_user_id is null`, (s) => {
-      s.setHttpStatus(401);
-      s.return(sql`json_build_object('error', 'invalid_token')`);
-    });
+    s.getHeader(sql.lit`x-session-token`, { defScalar: "session_token" });
+    requireSession(s, sql`try_cast(session_token as uuid)`);
 
     s.defScalar(
       "can_access",
       sql`exists (
         select 1 from db.system_studio_users
         where system_id = ${sql`system_id`}
-        and sys_user_id = session.sys_user_id
+          and sys_user_id = auth_user_id
       )`
     );
 
@@ -289,85 +245,6 @@ Secrets are:
 - Accessed at runtime via the SQL expression returned by `getStaticSecret`
 - Never exposed to client-side code
 
-## Common Authentication Patterns
-
-### 1. Session + Permission Check
-
-```typescript
-function verifySessionAndPermission(s, requiredPermission: string) {
-  s.defScalar("token_id", sql`(body->>'token_id')::uuid`);
-  s.defRecord("session", sql`
-    select *
-    from db.auth_session_tokens
-    where public_id = token_id
-      and now() < date.add(year, 1, issued)
-  `);
-
-  s.if(sql`session.sys_user_id is null`, (s) => {
-    s.setHttpStatus(401);
-    s.return(sql`json_build_object('error', 'invalid_token')`);
-  });
-
-  s.if(
-    sql`not exists (
-      select 1 from db.auth_user_permissions
-      where sys_user_id = session.sys_user_id
-      and permission = ${sql.lit(requiredPermission)}
-      and is_allowed = true
-    )`,
-    (s) => {
-      s.setHttpStatus(403);
-      s.return(sql`json_build_object('error', 'unauthorized')`);
-    }
-  );
-}
-
-// Usage
-api.post("/admin_action", {
-  jsonBodyScalar: "body",
-  procedure: (s) => {
-    verifySessionAndPermission(s, "admin_access");
-    // ... continue with authorized logic
-  },
-});
-```
-
-### 2. Resource-Specific Authorization
-
-```typescript
-api.post("/update_system", {
-  jsonBodyScalar: "body",
-  procedure: (s) => {
-    s.defScalar("system_id", sql`(body->>'system_id')::bigint`);
-    s.defScalar("token_id", sql`(body->>'token_id')::uuid`);
-
-    // Check if user can edit THIS specific system
-    s.defScalar(
-      "can_edit",
-      sql`exists (
-        select 1
-        from db.auth_session_tokens ast
-        join db.system_studio_users ssu on ssu.sys_user_id = ast.sys_user_id
-        where ast.public_id = token_id
-        and now() < date.add(year, 1, ast.issued)
-        and ssu.system_id = ${sql`system_id`}
-        and ssu.can_edit = true
-      )`
-    );
-
-    s.if(sql`not can_edit`, (s) => {
-      s.setHttpStatus(403);
-      s.return(sql`json_build_object('error', 'unauthorized')`);
-    });
-
-    // User can edit this system
-    s.startTransaction();
-    // ... perform update
-    s.commitTransaction();
-  },
-});
-```
-
 ## Best Practices
 
 1. **Always validate tokens** - Never trust client-provided data
@@ -375,6 +252,7 @@ api.post("/update_system", {
 3. **Return consistent errors** - Use standard error format
 4. **Check permissions early** - Fail fast if unauthorized
 5. **Use transactions** - Wrap modifications in transactions
-6. **Log authentication attempts** - Track failed attempts for security
+6. **Audit with transaction history** - Use [transaction queries](../sql/transaction_queries.md)
+   to see who changed what; do not add bespoke authentication log tables
 7. **Implement rate limiting** - Prevent brute force attacks
 8. **Use HTTPS only** - Never send tokens over unencrypted connections

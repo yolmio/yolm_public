@@ -122,8 +122,10 @@ export function ManualEntry(
   })`;
   const groups = props.statGroups ??
     sql`select null::bigint as stat_id,null::string as group_name,null::bigint as sort_order where false`;
-  const period =
-    sql`case when stat.frequency = 'weekly' then date.end_of_week(entry_date) else entry_date end`;
+  const currentWeeklyPeriod = b.weeklyPeriodDate(sql`current_date()`);
+  const period = sql`case when stat.frequency = 'weekly' then ${
+    b.weeklyPeriodDate(sql`entry_date`)
+  } else entry_date end`;
   return (
     <ServerShow
       when={sql`(${b.opts.permissions.view}) and (${b.opts.permissions.enter})`}
@@ -132,7 +134,7 @@ export function ManualEntry(
       <Data
         local
         procedure={(s) => {
-          s.defScalar("entry_date", sql`date.end_of_week(current_date())`);
+          s.defScalar("entry_date", currentWeeklyPeriod);
           s.defScalar("stats_saved", false);
           s.defScalar("stats_requested_date", sql`null::date`);
         }}
@@ -146,16 +148,15 @@ export function ManualEntry(
           watch={sql`entry_date`}
           beforeUnloadCheck
           afterTransactionStart={(s) => {
-            b.validateEntries(
-              s,
-              sql`select stat_id, period_date, try_cast(value as decimal(18,4)) as value from ui.stats_entry_rows`,
+            s.defTable("manual_stat_entry_rows", {
+              fields: b.entryRowsFields,
+            });
+            s.modify(
+              sql`insert into manual_stat_entry_rows (stat_id, period_date, value, write_db_id, entered_at) select stat_id, period_date, try_cast(value as decimal(18,4)), write_db_id, entered_at from ui.stats_entry_rows`,
             );
-            s.throwErrorIf(
-              sql`exists(select 1 from ui.stats_entry_rows input where input.write_db_id is not null and not exists(select 1 from ${
-                b.ref(b.entriesTable)
-              } entry where entry.id = input.write_db_id and entry.stat_id = input.stat_id and entry.period_date = input.period_date and entry.entered_at = cast(input.entered_at as timestamptz)))`,
-              sql.lit`The entry changed. Reload before saving.`,
-            );
+            s.callStoredProcedure("manual_stats_validate_entry_rows", {
+              inputTables: { manual_stat_entry_rows: "manual_stat_entry_rows" },
+            });
             s.modify(
               sql`update ui.stats_entry_rows set entered_by = current_user, entered_at = now()`,
             );
@@ -185,17 +186,19 @@ export function ManualEntry(
                     data-testid="manual-stats-selected-week"
                   >
                     <Typography level="title-sm">
-                      {sql`case when entry_date=date.end_of_week(current_date()) then 'This Week' else 'Previous Week' end`}
+                      {sql`case when entry_date=${currentWeeklyPeriod} then 'This Week' else 'Previous Week' end`}
                     </Typography>
                     <Typography level="body-sm">
-                      {sql`'Ending Sunday, ' || format.date(entry_date,'%b %-d, %Y')`}
+                      {sql`${
+                        sql.lit(b.opts.weeklyPeriodLabel ?? "Ending Sunday")
+                      } || ', ' || format.date(entry_date,'%b %-d, %Y')`}
                     </Typography>
                   </div>
                   <IconButton
                     icon="ChevronRight"
                     aria-label="Next week"
                     variant="plain"
-                    disabled={sql`entry_date >= date.end_of_week(current_date())`}
+                    disabled={sql`entry_date >= ${currentWeeklyPeriod}`}
                     onClick={(s) =>
                       s.setScalar(
                         "stats_requested_date",
@@ -238,7 +241,9 @@ export function ManualEntry(
               "entered_by",
               "entered_at",
             ]}
-            where={sql`stat_id in (select stat.id from db.manual_stats stat where ${eligible}) and period_date = (select case when stat.frequency = 'weekly' then date.end_of_week(entry_date) else entry_date end from db.manual_stats stat where stat.id = stat_id)`}
+            where={sql`stat_id in (select stat.id from db.manual_stats stat where ${eligible}) and period_date = (select case when stat.frequency = 'weekly' then ${
+              b.weeklyPeriodDate(sql`entry_date`)
+            } else entry_date end from db.manual_stats stat where stat.id = stat_id)`}
             initializeSource={sql`select entry.id, stat.id as stat_id, ${period} as period_date, entry.value, entry.note, entry.entered_by, coalesce(entry.entered_at, now()) as entered_at
               from db.manual_stats stat left join db.manual_stat_entries entry on entry.stat_id = stat.id and entry.period_date = ${period}
               where ${eligible} order by (select sort_order from (${groups}) stat_group where stat_group.stat_id=stat.id) nulls last, stat.name, stat.id`}

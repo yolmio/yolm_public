@@ -124,6 +124,16 @@ table.money("price", { precision: 15, scale: 2 });
 table.money("amount_in_cents", "BigInt");
 ```
 
+Signedness differs from `decimal`:
+
+- `table.money("amount")` (no options) is signed: precision 13, scale 2.
+- With an explicit `{ precision, scale }` object, `signed` defaults to
+  `false`, so the field rejects negative values. Pass `signed: true` for
+  amounts that can be negative, such as adjustments or balances:
+  `table.money("adjustment", { precision: 15, scale: 2, signed: true })`.
+- With an integer backing type, signedness follows that type (`"BigInt"` is
+  signed, `"BigUint"` is unsigned).
+
 ### Floating Point (real / double)
 
 ```ts
@@ -164,7 +174,7 @@ Yolm has three timestamp types for different use cases:
 
 | Type | Use Case | Storage |
 |------|----------|---------|
-| `timestampUtc` | Past events, audit logs | Stored as UTC, converted to client timezone |
+| `timestampUtc` | Past events (`created_at`, `paid_at`) | Stored as UTC, converted to client timezone |
 | `timestampTz` | Future events, appointments | Stored with timezone info |
 | `timestampNaive` | Statically-known timezone | No timezone conversion |
 

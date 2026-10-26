@@ -1,3 +1,5 @@
+import type { Node } from "std/ui";
+import type { Style } from "std/style_types";
 import { sql } from "../../std/sql_utils";
 import { db } from "std/system";
 import type { Block } from "std/system";
@@ -28,9 +30,9 @@ export class KanbanProjectsBlock implements Block {
   columnTableIdent = sql.ref("kanban_columns");
 
   /** UI pages exported by the block (lazily attached by `index.tsx`). */
-  static Pages: any;
+  static Pages: () => Node;
   /** Helper for queries listing "your tasks" across projects. */
-  static YourTasksQueryTable: any;
+  static YourTasksQueryTable: (props: { sx?: Style }) => Node;
 
   constructor(
     opts: {

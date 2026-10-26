@@ -56,7 +56,9 @@ function LineSpacingMenu() {
 // =============================================
 // HOME TAB
 // =============================================
-function HomeTab() {
+function HomeTab(
+  { standardFormatting = false }: { standardFormatting?: boolean },
+) {
   return (
     <div
       sx={{
@@ -93,100 +95,102 @@ function HomeTab() {
       {/* Font group */}
       <RibbonGroup label="Font">
         <div className="flex flex-col gap-1">
-          <div className="flex gap-1 items-center">
-            <Select
-              size="sm"
-              value={sql`coalesce(font_family, 'Arial')`}
-              onInput={(s) => {
-                s.jsCall({
-                  module: "lexical_editor",
-                  exportName: "executeCommand",
-                  handle: sql`ui.editor_handle`,
-                  argJson:
-                    sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontFamily', 'family', target_value)`,
-                });
-                s.setScalar("font_family", sql`target_value`);
-              }}
-              sx={{ width: "130px" }}
-            >
-              <Each table="fonts" recordName="font">
-                <Select.Option value={sql`font.name`}>
-                  {sql`font.name`}
-                </Select.Option>
-              </Each>
-            </Select>
-
-            <Input
-              size="sm"
-              sx={{
-                width: "80px",
-                "& input": { textAlign: "center" },
-                "& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button":
-                  {
-                    appearance: "none",
-                    margin: 0,
-                  },
-              }}
-              value={sql`coalesce(font_size, '11')`}
-              type="number"
-              startDecorator={
-                <IconButton
-                  aria-label="Decrease font size"
-                  icon="Remove"
-                  variant="plain"
-                  size="sm"
-                  color="neutral"
-                  onClick={(s) => {
-                    s.jsCall({
-                      module: "lexical_editor",
-                      exportName: "executeCommand",
-                      handle: sql`ui.editor_handle`,
-                      argJson:
-                        sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', cast(coalesce(font_size::int, 11) - 1 as text))`,
-                    });
-                    s.setScalar(
-                      "font_size",
-                      sql`cast(coalesce(font_size::int, 11) - 1 as text)`,
-                    );
-                  }}
-                />
-              }
-              endDecorator={
-                <IconButton
-                  aria-label="Increase font size"
-                  icon="Add"
-                  variant="plain"
-                  size="sm"
-                  color="neutral"
-                  onClick={(s) => {
-                    s.jsCall({
-                      module: "lexical_editor",
-                      exportName: "executeCommand",
-                      handle: sql`ui.editor_handle`,
-                      argJson:
-                        sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', cast(coalesce(font_size::int, 11) + 1 as text))`,
-                    });
-                    s.setScalar(
-                      "font_size",
-                      sql`cast(coalesce(font_size::int, 11) + 1 as text)`,
-                    );
-                  }}
-                />
-              }
-              onInput={(s) => {
-                s.if(sql`try_cast(target_value as int) is not null`, (s) => {
+          {!standardFormatting && (
+            <div className="flex gap-1 items-center">
+              <Select
+                size="sm"
+                value={sql`coalesce(font_family, 'Arial')`}
+                onInput={(s) => {
                   s.jsCall({
                     module: "lexical_editor",
                     exportName: "executeCommand",
                     handle: sql`ui.editor_handle`,
                     argJson:
-                      sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', target_value)`,
+                      sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontFamily', 'family', target_value)`,
                   });
-                  s.setScalar("font_size", sql`target_value`);
-                });
-              }}
-            />
-          </div>
+                  s.setScalar("font_family", sql`target_value`);
+                }}
+                sx={{ width: "130px" }}
+              >
+                <Each table="fonts" recordName="font">
+                  <Select.Option value={sql`font.name`}>
+                    {sql`font.name`}
+                  </Select.Option>
+                </Each>
+              </Select>
+
+              <Input
+                size="sm"
+                sx={{
+                  width: "80px",
+                  "& input": { textAlign: "center" },
+                  "& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button":
+                    {
+                      appearance: "none",
+                      margin: 0,
+                    },
+                }}
+                value={sql`coalesce(font_size, '11')`}
+                type="number"
+                startDecorator={
+                  <IconButton
+                    aria-label="Decrease font size"
+                    icon="Remove"
+                    variant="plain"
+                    size="sm"
+                    color="neutral"
+                    onClick={(s) => {
+                      s.jsCall({
+                        module: "lexical_editor",
+                        exportName: "executeCommand",
+                        handle: sql`ui.editor_handle`,
+                        argJson:
+                          sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', cast(coalesce(font_size::int, 11) - 1 as text))`,
+                      });
+                      s.setScalar(
+                        "font_size",
+                        sql`cast(coalesce(font_size::int, 11) - 1 as text)`,
+                      );
+                    }}
+                  />
+                }
+                endDecorator={
+                  <IconButton
+                    aria-label="Increase font size"
+                    icon="Add"
+                    variant="plain"
+                    size="sm"
+                    color="neutral"
+                    onClick={(s) => {
+                      s.jsCall({
+                        module: "lexical_editor",
+                        exportName: "executeCommand",
+                        handle: sql`ui.editor_handle`,
+                        argJson:
+                          sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', cast(coalesce(font_size::int, 11) + 1 as text))`,
+                      });
+                      s.setScalar(
+                        "font_size",
+                        sql`cast(coalesce(font_size::int, 11) + 1 as text)`,
+                      );
+                    }}
+                  />
+                }
+                onInput={(s) => {
+                  s.if(sql`try_cast(target_value as int) is not null`, (s) => {
+                    s.jsCall({
+                      module: "lexical_editor",
+                      exportName: "executeCommand",
+                      handle: sql`ui.editor_handle`,
+                      argJson:
+                        sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontSize', 'size', target_value)`,
+                    });
+                    s.setScalar("font_size", sql`target_value`);
+                  });
+                }}
+              />
+            </div>
+          )}
           <div className="flex gap-0.5 items-center">
             <ButtonGroup variant="outlined" color="neutral" size="sm">
               <IconButton
@@ -232,36 +236,40 @@ function HomeTab() {
                 onClick={(s) => execCmd(s, "formatSuperscript")}
               />
             </ButtonGroup>
-            <ColorButton
-              icon="FormatColorText"
-              value={sql`coalesce(font_color, '#000000')`}
-              onChange={(s) => {
-                s.jsCall({
-                  module: "lexical_editor",
-                  exportName: "executeCommand",
-                  handle: sql`ui.editor_handle`,
-                  argJson:
-                    sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontColor', 'color', target_value)`,
-                });
-                s.setScalar("font_color", sql`target_value`);
-              }}
-              label="Text color"
-            />
-            <ColorButton
-              icon="FormatColorFill"
-              value={sql`coalesce(background_color, '#ffffff')`}
-              onChange={(s) => {
-                s.jsCall({
-                  module: "lexical_editor",
-                  exportName: "executeCommand",
-                  handle: sql`ui.editor_handle`,
-                  argJson:
-                    sql`json_build_object('handle', ui.editor_handle, 'command', 'formatBackgroundColor', 'color', target_value)`,
-                });
-                s.setScalar("background_color", sql`target_value`);
-              }}
-              label="Highlight color"
-            />
+            {!standardFormatting && (
+              <ColorButton
+                icon="FormatColorText"
+                value={sql`coalesce(font_color, '#000000')`}
+                onChange={(s) => {
+                  s.jsCall({
+                    module: "lexical_editor",
+                    exportName: "executeCommand",
+                    handle: sql`ui.editor_handle`,
+                    argJson:
+                      sql`json_build_object('handle', ui.editor_handle, 'command', 'formatFontColor', 'color', target_value)`,
+                  });
+                  s.setScalar("font_color", sql`target_value`);
+                }}
+                label="Text color"
+              />
+            )}
+            {!standardFormatting && (
+              <ColorButton
+                icon="FormatColorFill"
+                value={sql`coalesce(background_color, '#ffffff')`}
+                onChange={(s) => {
+                  s.jsCall({
+                    module: "lexical_editor",
+                    exportName: "executeCommand",
+                    handle: sql`ui.editor_handle`,
+                    argJson:
+                      sql`json_build_object('handle', ui.editor_handle, 'command', 'formatBackgroundColor', 'color', target_value)`,
+                  });
+                  s.setScalar("background_color", sql`target_value`);
+                }}
+                label="Highlight color"
+              />
+            )}
           </div>
         </div>
       </RibbonGroup>
@@ -376,7 +384,7 @@ function HomeTab() {
                 onClick={(s) => execCmd(s, "indent")}
               />
             </ButtonGroup>
-            <LineSpacingMenu />
+            {!standardFormatting && <LineSpacingMenu />}
           </div>
         </div>
       </RibbonGroup>
@@ -548,7 +556,12 @@ function LayoutTab() {
 // =============================================
 // RIBBON COMPONENT
 // =============================================
-export function Ribbon({ pictureControl }: { pictureControl?: JSX.Element }) {
+export function Ribbon(
+  { pictureControl, standardFormatting = false }: {
+    pictureControl?: JSX.Element;
+    standardFormatting?: boolean;
+  },
+) {
   return (
     <Sheet
       variant="plain"
@@ -567,29 +580,31 @@ export function Ribbon({ pictureControl }: { pictureControl?: JSX.Element }) {
           borderColor: "divider",
         }}
       >
-        {["Home", "Insert", "Layout"].map((label, index) => (
-          <Button
-            variant="plain"
-            color="neutral"
-            size="sm"
-            aria-pressed={sql`ribbon_tab = ${index}`}
-            sx={{
-              borderRadius: 0,
-              px: 3,
-              py: 1,
-              fontWeight: 500,
-              fontSize: "13px",
-            }}
-            onClick={(s) => s.setScalar("ribbon_tab", sql`${index}`)}
-          >
-            {sql.lit(label)}
-          </Button>
-        ))}
+        {(standardFormatting
+          ? ["Home", "Insert"]
+          : ["Home", "Insert", "Layout"]).map((label, index) => (
+            <Button
+              variant="plain"
+              color="neutral"
+              size="sm"
+              aria-pressed={sql`ribbon_tab = ${index}`}
+              sx={{
+                borderRadius: 0,
+                px: 3,
+                py: 1,
+                fontWeight: 500,
+                fontSize: "13px",
+              }}
+              onClick={(s) => s.setScalar("ribbon_tab", sql`${index}`)}
+            >
+              {sql.lit(label)}
+            </Button>
+          ))}
       </div>
 
       {/* Tab content */}
       <Show when={sql`ribbon_tab = 0`}>
-        <HomeTab />
+        <HomeTab standardFormatting={standardFormatting} />
       </Show>
       <Show when={sql`ribbon_tab = 1`}>
         <InsertTab pictureControl={pictureControl} />

@@ -19,10 +19,7 @@ import type { DomStatements, UiServerStatements } from "std/statements";
 import { Each, Show } from "std/ui";
 import {
   assessmentTaskStateChip,
-  deleteAssessmentChoiceSelectionSql,
-  insertAssessmentChoiceSelectionSql,
   saveAssessmentResponseManualScore,
-  selectAssessmentSingleChoiceSql,
 } from "../assessment_helpers";
 import {
   currentEmployeeId,
@@ -34,9 +31,11 @@ import {
 } from "../helpers";
 import type { TrainingBlock } from "../index.tsx";
 import {
+  BackLink,
   callSaveAssessmentMetadataResponse,
   callSaveAssessmentResponse,
   EmptyState,
+  PageShell,
   SignaturePad,
 } from "../shared";
 import { assessmentExecutionModeLabelSql } from "./assessments";
@@ -54,23 +53,21 @@ export function TrainingAdminAssessmentReviewsPage(
   const opts = props.block.opts;
   return (
     <Data local procedure={() => {}}>
-      <TrainingAdminFrame>
+      <PageShell
+        back={
+          <BackLink
+            href={adminAssessmentsHref(props.block)}
+            label="Back to assessments"
+          />
+        }
+        title="Assessment review queue"
+        subtitle="Submitted attempts that need a reviewer decision, and evaluations a trainer still has to record."
+      >
         <div className="flex flex-col gap-5">
-          <div>
-            <Button
-              component="a"
-              href={adminAssessmentsHref(props.block)}
-              variant="plain"
-              color="neutral"
-              startIcon="ArrowBack"
-            >
-              Back to assessments
-            </Button>
-          </div>
           <Card variant="outlined">
             <CardHeader>
               <Typography level="title-lg" startIcon="RateReview">
-                Attempts Pending Review
+                Attempts pending review
               </Typography>
             </CardHeader>
             <CardContent>
@@ -116,7 +113,7 @@ export function TrainingAdminAssessmentReviewsPage(
                   table="review_pending_attempts"
                   recordName="pending_attempt"
                 >
-                  <div className="flex items-center justify-between gap-3 border border-divider rounded-md px-4 py-2 mb-2 bg-white">
+                  <div className="flex items-center justify-between gap-3 py-3 border-b border-divider last:border-b-0">
                     <div>
                       <Typography level="body-md">
                         {sql`pending_attempt.person_name || ' · ' ||
@@ -151,7 +148,7 @@ export function TrainingAdminAssessmentReviewsPage(
           <Card variant="outlined">
             <CardHeader>
               <Typography level="title-lg" startIcon="FactCheck">
-                Evaluations To Record
+                Evaluations to record
               </Typography>
             </CardHeader>
             <CardContent>
@@ -197,7 +194,7 @@ export function TrainingAdminAssessmentReviewsPage(
                   table="trainer_recorded_tasks"
                   recordName="trainer_task"
                 >
-                  <div className="flex items-center justify-between gap-3 border border-divider rounded-md px-4 py-2 mb-2 bg-white">
+                  <div className="flex items-center justify-between gap-3 py-3 border-b border-divider last:border-b-0">
                     <div className="flex items-center gap-2">
                       <div>
                         <Typography level="body-md">
@@ -226,7 +223,7 @@ export function TrainingAdminAssessmentReviewsPage(
             </CardContent>
           </Card>
         </div>
-      </TrainingAdminFrame>
+      </PageShell>
     </Data>
   );
 }
@@ -272,16 +269,11 @@ export function TrainingAdminAssessmentTaskPage(
     >
       <TrainingAdminFrame>
         <div className="flex flex-col gap-5">
-          <div>
-            <Button
-              component="a"
+          <div className="-ml-2">
+            <BackLink
               href={adminAssessmentReviewsHref(props.block)}
-              variant="plain"
-              color="neutral"
-              startIcon="ArrowBack"
-            >
-              Back to review queue
-            </Button>
+              label="Back to review queue"
+            />
           </div>
           <Data
             hoistKey={sql`training_task_id`}
@@ -439,7 +431,7 @@ export function TrainingAdminAssessmentTaskPage(
           >
             <Show when={sql`assessment_task.id is null`}>
               <EmptyState
-                icon="Quiz"
+                icon="Grading"
                 title="Assessment task not found"
                 body="The task may have been removed or is not an assessment step."
               />
@@ -455,7 +447,7 @@ export function TrainingAdminAssessmentTaskPage(
                   <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <Typography level="title-lg" startIcon="Quiz">
+                        <Typography level="title-lg" startIcon="Grading">
                           {sql`assessment_task.assessment_name`}
                         </Typography>
                         {assessmentTaskStateChip(
@@ -535,7 +527,7 @@ export function TrainingAdminAssessmentTaskPage(
                       <Chip size="sm" variant="soft" color="neutral">
                         {sql`'Attempt ' ||
                           display_attempt.attempt_number::string ||
-                          ' · ' || display_attempt.version_label`}
+                          ' · Version ' || display_attempt.version_label`}
                       </Chip>
                       <Chip size="sm" variant="soft" color="neutral">
                         {sql`case display_attempt.status::string
@@ -568,11 +560,19 @@ export function TrainingAdminAssessmentTaskPage(
                       level="body-sm"
                       className="text-neutral-600 mb-4"
                     >
-                      {sql`'Started by ' ||
-                        coalesce(display_attempt.started_by_name, 'Unknown') ||
+                      {sql`coalesce(
+                          'Started by ' || display_attempt.started_by_name
+                            || ' · ',
+                          ''
+                        ) ||
                         coalesce(
-                          ' · Submitted by ' ||
-                            display_attempt.submitted_by_name,
+                          'Submitted ' || ${
+                        formatDateTimeSql(sql`display_attempt.submitted_at`)
+                      },
+                          'Not submitted yet'
+                        ) ||
+                        coalesce(
+                          ' by ' || display_attempt.submitted_by_name,
                           ''
                         )`}
                     </Typography>
@@ -1010,42 +1010,17 @@ function AssessmentResponseList(
                         s.tryServer({
                           body: (s) => {
                             s.startTransaction();
-                            s.if(
-                              sql`attempt_response.selection_mode = 'single'`,
-                              (s) => {
-                                for (
-                                  const statement
-                                    of selectAssessmentSingleChoiceSql({
-                                      attemptId: sql`display_attempt.id`,
-                                      itemId: sql`attempt_response.item_id`,
-                                      choiceId: sql`attempt_choice.id`,
-                                    })
-                                ) {
-                                  s.modify(statement);
-                                }
-                              },
-                              (s) => {
-                                s.if(
-                                  sql`target_checked`,
-                                  (s) => {
-                                    s.modify(
-                                      insertAssessmentChoiceSelectionSql({
-                                        attemptId: sql`display_attempt.id`,
-                                        itemId: sql`attempt_response.item_id`,
-                                        choiceId: sql`attempt_choice.id`,
-                                      }),
-                                    );
-                                  },
-                                  (s) => {
-                                    s.modify(
-                                      deleteAssessmentChoiceSelectionSql({
-                                        attemptId: sql`display_attempt.id`,
-                                        itemId: sql`attempt_response.item_id`,
-                                        choiceId: sql`attempt_choice.id`,
-                                      }),
-                                    );
-                                  },
-                                );
+                            s.callStoredProcedure(
+                              "training_toggle_assessment_choice",
+                              {
+                                inputScalars: {
+                                  p_attempt_id: sql`display_attempt.id`,
+                                  p_item_id: sql`attempt_response.item_id`,
+                                  p_choice_id: sql`attempt_choice.id`,
+                                  p_single_selection:
+                                    sql`attempt_response.selection_mode = 'single'`,
+                                  p_checked: sql`target_checked`,
+                                },
                               },
                             );
                             s.commitTransaction();
@@ -1430,6 +1405,9 @@ function AssessmentReviewPanel(_props: { block: TrainingBlock }) {
               label="Evaluator signature"
               onSigned={(s, signatureData) => {
                 s.setScalar("review_signature_data", signatureData);
+              }}
+              onClear={(s) => {
+                s.setScalar("review_signature_data", sql`null`);
               }}
             />
             <Show when={sql`review_signature_data is not null`}>

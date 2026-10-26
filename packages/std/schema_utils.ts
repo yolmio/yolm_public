@@ -30,6 +30,19 @@ export interface SchemaSource {
   name: string;
 }
 
+const warnedUnboundDevDatabases = new Set<string>();
+
+function boundDevDatabase(name: string): ImportSourceSchema | undefined {
+  const db = getDevDatabases()[name];
+  if (!db && !warnedUnboundDevDatabases.has(name)) {
+    warnedUnboundDevDatabases.add(name);
+    console.warn(
+      `Dev database "${name}" is not bound for this generation; its schema is empty. Bind it by name in the database mapping.`,
+    );
+  }
+  return db;
+}
+
 /**
  * Get a table schema from any source type.
  *
@@ -55,9 +68,9 @@ export function getSourceTable(
 ): SourceTable | undefined {
   switch (source.type) {
     case "devDatabase": {
-      const dbs = getDevDatabases();
-      const db = dbs[source.name];
-      return db?.tables.find((t) => t.name === tableName);
+      return boundDevDatabase(source.name)?.tables.find((t) =>
+        t.name === tableName
+      );
     }
     case "currentSystem": {
       const table = system.db.tables[tableName];
@@ -83,8 +96,7 @@ export function getSourceTable(
 export function getSourceTables(source: SchemaSource): SourceTable[] {
   switch (source.type) {
     case "devDatabase": {
-      const dbs = getDevDatabases();
-      return dbs[source.name]?.tables ?? [];
+      return boundDevDatabase(source.name)?.tables ?? [];
     }
     case "currentSystem": {
       return Object.values(system.db.tables).map((t) => ({

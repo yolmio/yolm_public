@@ -1,46 +1,159 @@
 import { sql } from "std/sql_utils";
 import type { Sql } from "std/sql_utils";
-import type { SparkCapability } from "./index";
-import { hasSparkPermissionGate } from "./permissions";
+import { system } from "std/system";
+import type { SparkCapability, SparkTableFields } from "./index";
+import {
+  hasSparkPermissionGateDescriptor,
+  sparkPermissionGateDescriptor,
+} from "./permissions";
 
 type ReadCapability = Pick<
   SparkCapability,
-  "name" | "permission" | "permissions" | "views" | "tables" | "fieldWhitelist"
+  | "name"
+  | "permission"
+  | "permissions"
+  | "views"
+  | "tables"
+  | "fieldWhitelist"
+  | "fieldBlacklist"
 >;
+
+/**
+ * The column-restricted grants of one capability: its `fieldWhitelist` entries
+ * plus each `fieldBlacklist` table resolved to its readable columns (primary
+ * key and real fields, minus the listed ones). Virtual columns are never part
+ * of a column-restricted grant. Every consumer of column restrictions (query
+ * policy, render_ui policy, schema reference) reads through this helper so a
+ * blacklist behaves exactly like the equivalent whitelist.
+ */
+export function capabilityFieldGrants(
+  capability: Pick<SparkCapability, "fieldWhitelist" | "fieldBlacklist">,
+): SparkTableFields[] {
+  const grants = [...(capability.fieldWhitelist ?? [])];
+  const hidden = new Map<string, Set<string>>();
+  for (const entry of capability.fieldBlacklist ?? []) {
+    const fields = hidden.get(entry.table) ?? new Set<string>();
+    for (const field of entry.fields) fields.add(field);
+    hidden.set(entry.table, fields);
+  }
+  for (const [name, fields] of hidden) {
+    const table = system.db.tables[name];
+    if (!table) continue;
+    grants.push({
+      table: name,
+      fields: [
+        table.primaryKeyFieldName,
+        ...Object.values(table.fields).map((field) => field.name),
+      ].filter((field) => !fields.has(field)),
+    });
+  }
+  return grants;
+}
 
 export function effectiveCapabilitiesJsonExpr(
   capabilities: readonly ReadCapability[],
   storedCapabilities: Sql,
   ownerId: Sql,
 ) {
-  let items: Sql = sql`''`;
-  for (const capability of capabilities) {
-    const hasPermissionGate = capability.permission !== undefined ||
-      capability.permissions !== undefined;
-    const permitted = hasPermissionGate
-      ? sql`(${ownerId} is null or ${
-        hasSparkPermissionGate(
-          capability.permission,
-          capability.permissions,
-          ownerId,
-        )
-      })`
-      : sql`true`;
-    items = sql`${items} || case
-      when ${storedCapabilities} @> json_build_array(${
-      sql.lit(capability.name)
-    }) and ${permitted}
-      then ${sql.lit(`"${capability.name}",`)}
-      else '' end`;
+  const catalog = capabilities.map((capability) => ({
+    name: capability.name,
+    gate: sparkPermissionGateDescriptor(
+      capability.permission,
+      capability.permissions,
+    ),
+  }));
+  return sql`coalesce((
+    select json_array_agg(spark_capability.value->>'name' order by spark_capability.index)
+    from json.array_each(${
+    sql.lit(JSON.stringify(catalog))
+  }::json) spark_capability
+    where ${storedCapabilities} @> json_build_array(spark_capability.value->>'name')
+      and (${ownerId} is null or ${
+    hasSparkPermissionGateDescriptor(
+      sql`spark_capability.value->'gate'`,
+      ownerId,
+    )
+  })
+  ), '[]'::json)`;
+}
+
+/**
+ * Generation-time checks for `fieldBlacklist` and for one table appearing in
+ * more than one grant form of a capability. `fieldWhitelist`, `tables`, and
+ * `views` existence checks stay with the block's other schema validation.
+ */
+export function validateCapabilityReadGrants(
+  cap: Pick<
+    SparkCapability,
+    "name" | "tables" | "fieldWhitelist" | "fieldBlacklist"
+  >,
+) {
+  for (const fb of cap.fieldBlacklist ?? []) {
+    const table = system.db.tables[fb.table];
+    if (!table) {
+      throw new Error(
+        `Spark capability "${cap.name}": fieldBlacklist references table ` +
+          `"${fb.table}" which does not exist.`,
+      );
+    }
+    const cols = new Set<string>([
+      table.primaryKeyFieldName,
+      ...Object.values(table.fields).map((f) => f.name),
+    ]);
+    for (const field of fb.fields) {
+      if (!cols.has(field)) {
+        throw new Error(
+          `Spark capability "${cap.name}": fieldBlacklist field ` +
+            `"${fb.table}.${field}" is not a real column of table ` +
+            `"${fb.table}". Virtual columns are never exposed under a ` +
+            `column restriction, so they need no blacklist entry.`,
+        );
+      }
+    }
   }
-  return sql`(case when (${items}) = '' then '[]'
-    else '[' || left(${items}, length(${items}) - 1) || ']' end)::json`;
+  for (
+    const grant of capabilityFieldGrants({ fieldBlacklist: cap.fieldBlacklist })
+  ) {
+    if (grant.fields.length === 0) {
+      throw new Error(
+        `Spark capability "${cap.name}": fieldBlacklist hides every ` +
+          `column of table "${grant.table}". Remove the table instead.`,
+      );
+    }
+  }
+  // A blacklisted table takes no other grant form in the same capability:
+  // combining it with tables or fieldWhitelist is ambiguous. tables plus
+  // fieldWhitelist keeps its established meaning (the restriction applies).
+  const grantForms = new Map<string, string>();
+  const forms: [string, string[]][] = [
+    ["tables", cap.tables ?? []],
+    ["fieldWhitelist", (cap.fieldWhitelist ?? []).map((e) => e.table)],
+    ["fieldBlacklist", (cap.fieldBlacklist ?? []).map((e) => e.table)],
+  ];
+  for (const [form, names] of forms) {
+    for (const name of new Set(names)) {
+      const previous = grantForms.get(name);
+      if (
+        previous && (previous === "fieldBlacklist" || form === "fieldBlacklist")
+      ) {
+        throw new Error(
+          `Spark capability "${cap.name}": table "${name}" is listed in ` +
+            `both ${previous} and ${form}. A blacklisted table takes no ` +
+            `other grant in the same capability.`,
+        );
+      }
+      grantForms.set(name, form);
+    }
+  }
 }
 
 // Builds scalar definitions for the runtime view/table/field whitelists
 // derived from a JSON skill-name array scalar. View/table whitelists are JSON
 // arrays. Field whitelists are either the object shape used by query
-// validation or the array shape used by dynamic UI accessPolicy.
+// validation or the array shape used by dynamic UI accessPolicy. Column
+// restrictions come from capabilityFieldGrants, so `fieldBlacklist` merges
+// exactly like `fieldWhitelist`: allowed columns union across held
+// capabilities, and a wholesale `tables` grant wins.
 
 export function defQueryWhitelists<
   T extends import("std/statements").IStatementsBase,
@@ -58,11 +171,13 @@ export function defQueryWhitelists<
   let fieldObjectItems: Sql = sql`''`;
   let fieldArrayItems: Sql = sql`''`;
   const fieldPolicyShape = opts?.fieldPolicyShape ?? "query";
+  const fieldGrants = capabilities.map((skill) => ({
+    skill,
+    grants: capabilityFieldGrants(skill),
+  }));
   const fieldTables = [
     ...new Set(
-      capabilities.flatMap((skill) =>
-        (skill.fieldWhitelist ?? []).map((item) => item.table)
-      ),
+      fieldGrants.flatMap(({ grants }) => grants.map((item) => item.table)),
     ),
   ];
   for (const skill of capabilities) {
@@ -91,16 +206,17 @@ export function defQueryWhitelists<
     // table appears there at all, so an un-suppressed entry would silently
     // shrink the wholesale grant). The table stays visible via that capability's
     // entry in the table whitelist.
-    const wholesaleCaps = capabilities.filter(
-      (skill) =>
+    const wholesaleCaps = fieldGrants
+      .filter(({ skill, grants }) =>
         (skill.tables ?? []).includes(table) &&
-        !(skill.fieldWhitelist ?? []).some((item) => item.table === table),
-    );
+        !grants.some((item) => item.table === table)
+      )
+      .map(({ skill }) => skill);
     let fieldItems: Sql = sql`''`;
-    for (const skill of capabilities) {
+    for (const { skill, grants } of fieldGrants) {
       const fields = [
         ...new Set(
-          (skill.fieldWhitelist ?? [])
+          grants
             .filter((item) => item.table === table)
             .flatMap((item) => item.fields),
         ),

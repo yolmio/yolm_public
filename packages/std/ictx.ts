@@ -639,6 +639,8 @@ export interface DynamicDatagridICtx {
   viewStateHash: (s: StateStatements) => Sql;
   triggerChangesInToolbar: (s: DomStatements) => unknown;
   clearChangesInToolbar: (s: DomStatements) => unknown;
+  /** Reload the saved/default view, discarding unsaved grid settings. */
+  resetView: (s: DomStatements) => unknown;
 }
 
 export const DynamicDatagridICtxKey = createICtxKey<DynamicDatagridICtx>(

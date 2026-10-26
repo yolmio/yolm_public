@@ -98,6 +98,7 @@ For non-GET endpoints, declare the request body scalar explicitly:
 api.post("/todos", {
   jsonBodyScalar: "body",
   procedure: (s) => {
+    s.defScalar("new_todo_id", { type: "BigInt" });
     s.startTransaction();
     s.modify(sql`
       insert into db.todos (title, completed)
@@ -256,6 +257,7 @@ api.get("/todos", {
 api.post("/todos", {
   jsonBodyScalar: "body",
   procedure: (s) => {
+    s.defScalar("todo_id", { type: "BigInt" });
     s.startTransaction();
     s.modify(sql`
       insert into db.todos (title, completed)

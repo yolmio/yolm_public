@@ -1,131 +1,19 @@
+import { assertEmailTemplateEditable } from "./editing";
+import { FormFieldWithVariables } from "./variable_menu";
 import { LabelOnTopFormField } from "components/label_on_top_form_field";
-import { Menu } from "components/menu";
 import { Snackbar } from "components/snackbar";
 import { Typography } from "components/typography";
 import { EmailTemplatesBlock } from "./index";
 import { sql } from "../../std/sql_utils";
 import type { NumericExpr } from "../../std/sql_utils";
-import type { DomStatements } from "std/statements";
 import { flexGrowStyles } from "std/style_utils";
 import { useBlockOptional } from "std/system";
-import type { Node } from "std/ui";
-import { Show, useOptionalICtx, usePhase } from "std/ui";
+import { Show, useOptionalICtx } from "std/ui";
 import { SidebarPresenceICtxKey } from "std/ictx";
 import { Sidebar } from "components/sidebar";
 import { Data } from "std/data";
 import { Form, useFieldHelper } from "std/form";
-import type { Color } from "components/types";
 import { LexicalBasicEmailEditor } from "components/lexical/components/lexical_editor";
-
-// Component to wrap form fields with variable insertion capability
-function FormFieldWithVariables(props: {
-  children: Node;
-  fieldName: string;
-}) {
-  if (usePhase() === "gather") {
-    return props.children;
-  }
-
-  const fieldHelper = useFieldHelper();
-
-  return (
-    <div className="flex gap-2 items-end">
-      <div className="flex-1">{props.children}</div>
-      <VariableInsertMenu
-        onClick={(s, key) => {
-          const currentValue = fieldHelper.value || sql.lit``;
-          s.if(sql`${currentValue} = '' or ${currentValue} is null`, (s) => {
-            fieldHelper.setValue(s, sql.lit`{{${key}}}`);
-          }).else((s) => {
-            fieldHelper.setValue(
-              s,
-              sql.concat(currentValue, sql.lit` {{${key}}}`),
-            );
-          });
-        }}
-      />
-    </div>
-  );
-}
-
-// Component to insert variables into email templates
-function VariableInsertMenu(props: {
-  onClick?: (s: DomStatements, key: string) => void;
-  variableType?: "recipient" | "link";
-}) {
-  let variables: Record<string, string> = {};
-
-  try {
-    const explicitVariables = props.variableType === "link"
-      ? useBlockOptional(EmailTemplatesBlock)?.getLinkVariables()
-      : useBlockOptional(EmailTemplatesBlock)?.getRecipientVariables();
-    variables = explicitVariables ?? {};
-
-    return (
-      <Menu>
-        <Menu.IconButton
-          variant="outlined"
-          color={"neutral" as Color}
-          size="sm"
-          aria-controls="email-variables-menu"
-          aria-haspopup="true"
-          icon="Code"
-        />
-        <Menu.Content className="max-h-[200px] overflow-auto">
-          {Object.entries(variables).map(([key, description]) => (
-            <Menu.Item
-              onClick={(s) => {
-                if (props.onClick) {
-                  props.onClick(s, key);
-                }
-              }}
-            >
-              {sql.concat(
-                sql.lit`{{${key}}} - `,
-                sql.lit(description || key),
-              )}
-            </Menu.Item>
-          ))}
-        </Menu.Content>
-      </Menu>
-    );
-  } catch (_error) {
-    // If variable lookup fails, show a basic set of variables.
-    const defaultVariables = {
-      email: "Recipient email address",
-      name: "Recipient name",
-    };
-
-    return (
-      <Menu>
-        <Menu.IconButton
-          variant="outlined"
-          color={"neutral" as Color}
-          size="sm"
-          aria-controls="email-variables-menu"
-          aria-haspopup="true"
-          icon="Code"
-        />
-        <Menu.Content className="max-h-[200px] overflow-auto">
-          {Object.entries(defaultVariables).map(([key, description]) => (
-            <Menu.Item
-              onClick={(s) => {
-                if (props.onClick) {
-                  props.onClick(s, key);
-                }
-              }}
-            >
-              {sql.concat(
-                sql.lit`{{${key}}} - `,
-                sql.lit(description),
-              )}
-            </Menu.Item>
-          ))}
-        </Menu.Content>
-      </Menu>
-    );
-  }
-}
 
 interface BasicEmailEditorProps {
   recordId: NumericExpr;
@@ -147,6 +35,10 @@ export function BasicEmailEditorLexical(props: BasicEmailEditorProps) {
         defaultFieldComponent={LabelOnTopFormField}
         keepHistory
         beforeTransactionCommit={(s) => {
+          assertEmailTemplateEditable(
+            s,
+            sql`coalesce(${props.recordId}::bigint, saved_template_id)`,
+          );
           s.setScalar(
             "saved_template_id",
             sql`coalesce(${props.recordId}, last_record_id(db.email_templates))`,
@@ -197,6 +89,7 @@ export function BasicEmailEditorLexical(props: BasicEmailEditorProps) {
                 >
                   Save Changes
                 </Form.SubmitButton>
+                <Form.ErrorAlert mode="all" />
               </div>
 
               <div className="flex flex-col gap-2">
@@ -212,7 +105,7 @@ export function BasicEmailEditorLexical(props: BasicEmailEditorProps) {
                     <LabelOnTopFormField label="Template Name" size="lg" />
                   </Form.Field>
                   <Form.Field field="subject">
-                    <FormFieldWithVariables fieldName="subject">
+                    <FormFieldWithVariables>
                       <LabelOnTopFormField label="Subject Line" size="lg" />
                     </FormFieldWithVariables>
                   </Form.Field>
@@ -259,19 +152,8 @@ export function BasicEmailEditorLexical(props: BasicEmailEditorProps) {
 function LexicalEditorField() {
   const fieldHelper = useFieldHelper();
 
-  // Get variables from the email template block if available.
-  let variables: Record<string, string> = {
-    email: "Recipient email address",
-    name: "Recipient name",
-  };
-
-  try {
-    const explicitVariables = useBlockOptional(EmailTemplatesBlock)
-      ?.getRecipientVariables();
-    variables = explicitVariables ?? variables;
-  } catch (_error) {
-    // Use default variables
-  }
+  const variables = useBlockOptional(EmailTemplatesBlock)
+    ?.getRecipientVariables() ?? {};
 
   return (
     <LexicalBasicEmailEditor

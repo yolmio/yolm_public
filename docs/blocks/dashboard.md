@@ -11,8 +11,8 @@ policy. Viewing dashboards does not require Spark chat permission. A dashboard
 has ordered sections containing ordered widgets; neither sections nor widgets
 nest. Layout is scrolling or tabs. Widget widths snap to quarter, third, half,
 two-thirds or full width and stack on small screens.
-Section names are optional. A single unnamed section renders without a heading
-or tab bar; multi-section navigation uses numbered fallback labels where needed.
+Section names are optional; a single unnamed section renders without a
+heading or tab bar.
 
 ```tsx
 import { DashboardBlock, DashboardPage, DashboardListPage } from "blocks/dashboard";
@@ -36,67 +36,83 @@ system.addBlock(dashboards);
 // Mount DashboardListPage, DashboardPage and ManualMeasurementsPage in AppRoutes.
 ```
 
-The block owns `dashboards`, `dashboard_sections`, `dashboard_widgets` and
-`dashboard_capabilities`.
-Null owners denote shared dashboards; only dashboard admins create or edit them.
-Personal dashboards are visible and editable only by their owner, including when
-another user is an admin. There is no individual viewer/editor sharing table.
+The block owns `dashboards` (null owner = shared), `dashboard_sections`,
+`dashboard_widgets` and `dashboard_capabilities` (audience: one row per
+dashboard and Spark capability name, selected from the developer registry).
 
-`dashboard_capabilities` stores audience selections: one row per dashboard and
-capability name, with a uniqueness constraint and cascade deletion. These are
-selections from Spark's developer registry, not user-authored capabilities.
-Any matching current capability permission permits viewing; an empty audience
-permits only dashboard admins. Audience selection never grants data access.
-There is no capability kind or saved dashboard data selection.
-The create permission controls personal creation/copying; shared creation also
-requires admin permission. Copies preserve sections, widgets and declarations,
-but receive a new owner and no audience. Measurements are never copied.
+- Personal dashboards are visible and editable only by their owner, even to
+  admins. Shared dashboards are created and edited only by dashboard admins.
+  There is no per-user sharing table.
+- A shared dashboard is visible to anyone holding any audience capability; an
+  empty audience means admins only. Audience never grants data access.
+- The create permission controls personal creation and copying. Copies keep
+  sections, widgets and declarations, get a new owner and no audience, and
+  never copy measurements.
+- Spark is the only authoring interface (no manual widget, layout or settings
+  editors). New dashboard and Ask Spark are plain `sparkHref` links using
+  Spark's `?prompt=` parameter (Ask Spark includes the dashboard name, ID and
+  current filters); opening one sends nothing. Both require Spark access;
+  viewing does not. Owners/admins can request edits; viewers can request a
+  personal copy.
+- Host apps provide navigation and must mount the library and ID routes
+  (`basePath` defaults to `/dashboards`); the same dashboard key can be mounted
+  in several apps. Keep operational pages separate from reporting.
 
-Mount the same dashboard key in multiple apps to expose the same saved layout.
-Host apps provide dashboard navigation, such as database-backed sidebar links.
-Empty personal dashboard groups are hidden. There is no dashboard switcher modal. Spark is the only user-facing authoring interface; there are no
-manual widget, layout or settings editors. New dashboard and Ask Spark are plain
-links through `sparkHref`, using Spark's existing `?prompt=` parameter to prefill
-the editable composer. Ask Spark includes the dashboard name, ID and current
-filters. Opening either link creates no conversation and sends no message;
-the user submits when ready. No Spark panel is embedded in the dashboard.
-Owners/admins can request edits; viewers can request a
-personal copy. Both entry points require Spark access, while viewing does not. Switching changes the current route, not an
-app's configured default. Mount the library and ID route in every host app;
-`basePath` defaults to `/dashboards`. Keep operational pages such as Sales Home
-separate from reporting.
+Every saved SQL execution uses the view/table/field allowlists of all
+registered, non-internal Spark capabilities currently permitted to the viewer;
+empty grants deny execution. Capabilities must encode record scope in views
+using `current_user`. A capability granting a whole table grants every row and
+column; dashboard IDs, audiences and inputs never authorize data.
 
-Every saved SQL execution derives all registered, non-internal Spark capabilities
-currently permitted to the viewer, then uses their view/table/field allowlists.
-Empty grants deny query execution. Developer capabilities must encode record
-scope in views using `current_user`; dashboard IDs, audiences and input parameters
-are not substitutes for tenant/record authorization. A capability granting a
-whole table grants every row and column in it.
+Widgets are fixed renderers: `wise`, `line`, `bar`, `number`, `table` and
+`manual_entry`; there is no saved JavaScript/TSX renderer or formula language.
 
-Widgets are fixed renderers: `wise`, `line`, `bar`, `number`, `table`, and
-`manual_entry`. Chart SQL returns `x,value`, with unique x and numeric or null
-values. Line/WISE x values are dates; WISE dates are Sunday week ends. Number
-queries return at most one row with a value column. Tables allow arbitrary
-approved columns. Empty results are valid; results exceeding 1,000 rows are
-rejected. Queries may be bespoke, but writes and unauthorized data are rejected.
-There is no saved JavaScript/TSX renderer or formula language. Users describe
-changes to Spark; it uses the validated mutation tools.
+- Chart SQL returns `x,value` with unique x and numeric or null values;
+  line/WISE x values are dates. WISE weeks end Sunday unless `config.weekEnding`
+  names another weekday; with `config.series2Label` a WISE query may also
+  return `value2` (dashed second series, own axis). `config.inverse` sets WISE
+  direction. WISE axes have 10 divisions starting at `config.graphLow`, or at
+  the data low when it is omitted; `config.graphDivision` sets the division
+  and grows by 1-2-5 multiples of itself when too small for the data
+  (`series2GraphLow`/`series2GraphDivision` for the second axis). WISE cards
+  label only the latest value per series; expanded charts label every
+  observation; lines never connect across missing dates.
+- Number queries return at most one row; tables allow any approved columns.
+  Empty results are valid; more than 1,000 rows is rejected. Writes and
+  unauthorized data are rejected.
 
-Dashboard `parameters` and widget `config.parameters` each declare at most twelve
-inputs. Each input has a unique `name`, `label`, `type`, optional `default`, and
-`optional` (false by default). Types are text, number, date, date_range, enum and
-record. Enums declare string `options`; records reference a developer-registered
-`source`. Optional missing values resolve to null. Numbers must be finite, text
-is bounded to 1,000 characters, and date ranges must be ordered and at most ten
-years long. Required inputs need usable defaults for saving/initial rendering.
+Display metadata is an object (new writes reject legacy string formats; an
+unchanged saved string may be kept and is normalized only when rendered or
+copied):
 
-Widgets explicitly bind their input names to dashboard input names using
-`config.bindings`. A binding must accept the dashboard input's **entire domain**:
-matching types and record sources, every offered enum option, and null when the
-dashboard input is optional. These checks run during execution, preview/save,
-Spark creation and declaration edits. Removing an input used by a widget is
-rejected until its binding is updated. Unbound widget inputs use their defaults.
-A current-state widget can declare no inputs and ignore the reporting period.
+```json
+{
+  "format": {"type":"currency", "currency":"USD", "minimumFractionDigits":2, "maximumFractionDigits":2},
+  "columnFormats": {"count": {"type":"number", "maximumFractionDigits":0}, "tat_minutes": {"type":"duration"}, "client_code": {"type":"text"}}
+}
+```
+
+Format types: `number` (grouped, at most two fraction digits by default),
+`number_thousands`, `currency` (default USD, two digits), `percentage` (takes
+fractions: 0.125 is 12.5%), `duration` (`inputUnit` minutes by default, or
+seconds/hours; shown as hours/minutes) and `text` (table-column override only).
+Precision options are integers 0-20 with minimum <= maximum. `columnFormats`
+keys must match returned aliases; numeric formats require numeric values. Nulls
+show an em dash. The same formatter drives cards, tables, axes, tooltips and
+View data.
+
+Dashboard `parameters` and widget `config.parameters` each declare at most
+twelve inputs: unique `name`, `label`, `type` (`text`, `number`, `date`,
+`date_range`, `enum` with string `options`, `record` with a registered
+`source`), optional `default`, and `optional` (default false; missing optional
+values are null). Text is at most 1,000 characters; date ranges are ordered
+and at most ten years. Required inputs need usable defaults.
+
+`config.bindings` maps widget input names to dashboard input names. A binding
+must accept the dashboard input's **entire domain**: matching type and record
+source, every enum option, and null when the dashboard input is optional.
+Removing a bound dashboard input is rejected. Unbound widget inputs use their
+defaults.
 
 ```json
 {
@@ -108,61 +124,49 @@ A current-state widget can declare no inputs and ignore the reporting period.
 }
 ```
 
-Query parameters are values, never SQL substitutions. Widget queries read only
-`current_context()->'parameters'`; a bound range is
-`current_context()->'parameters'->'period'->>'start'` / `->>'end'`. There are no
-special top-level start/end dates or `date_filter` flag. Context is restored on
-success and failure. Date ranges can default to `last_12_weeks`: exactly 12 completed Monday–Sunday
-weeks, excluding the current week. This is resolved on each
-open, or `{start,end}` ISO dates. Inputs stay visible above the widgets. Date ranges open the shared calendar picker in an anchored popover;
-Apply updates both endpoints together. Record inputs use a scoped searchable picker.
-Viewing controls use dates, enum choices and searchable record selectors. Spark
-manages their declarations and bindings.
+Parameters are values, never SQL substitutions. Widget queries read only
+`current_context()->'parameters'` (a bound range is
+`current_context()->'parameters'->'period'->>'start'` / `->>'end'`); there are
+no top-level start/end dates or `date_filter` flag. Date-range defaults are
+`{start,end}` ISO dates or `last_12_weeks` (12 completed Monday-Sunday weeks,
+excluding the current week, resolved on each open).
 
-Register `recordSources` on the block: `{name,label,permission,query,currentValue?}`.
-The developer SQL relation returns `id,label` and must enforce viewer row scope;
-the permission expression guards lookup and selected-ID validation. Search is
-bounded to fifty choices. A record default may be `current` only when its source
-provides `currentValue`; arbitrary saved lookup SQL is unsupported. Spark's
-`lookupRecords` uses the same sources and permission checks.
+Register `recordSources` on the block as `{name,label,permission,query,currentValue?}`.
+`query` returns `id,label` and must enforce viewer row scope; `permission`
+guards lookup and selected-ID validation. Search returns at most 50 choices. A
+record default may be `current` only when the source provides `currentValue`.
+Spark's `lookupRecords` uses the same sources.
 
-`DashboardPage.initialValues` can supply a server SQL JSON object of initial
-values; `DashboardWidget.parameters` supplies dashboard values to an embedded
-widget. Both pass through the same validation. Initial values and record IDs
-never authorize data access: capability views must independently enforce scope.
+`DashboardPage.initialValues` (server SQL JSON object) and
+`DashboardWidget.parameters` (for an embedded widget) pass through the same
+validation and never authorize data access.
 
-`testWidget` uses the same query executor as previews, saves and rendering. It
-returns validity, row count, empty status, effective viewer capabilities and
-at most five sample rows. Query execution precedes the save transaction because
-it may suspend; authorization and stale edit checks run during mutation. Runtime
-execution always rechecks permissions. Spark actions create private or admin-managed shared dashboards,
-save/remove/move widgets, save/remove sections, configure inputs/audience, make
-personal copies and remove dashboards.
-Mutating actions use Spark's reversible transaction receipts.
+`testWidget` uses the same executor as previews, saves and rendering and
+returns validity, row count, empty status, effective viewer capabilities and up
+to five sample rows. Query execution precedes the save transaction (it may
+suspend); authorization and stale-edit checks run during the mutation. Spark
+dashboard actions use reversible transaction receipts.
 
 # Manual measurements
 
-`ManualMeasurementsBlock` owns `manual_stats` and `manual_stat_entries`.
-`ManualMeasurementsSetupPage` provides a separate, management-permission-gated
-Stats setup route (default `/measurements/setup`) for definitions and archiving.
-`ManualMeasurementsPage` only handles entry and supports `weekly` for compact weekly entry with a sticky
-Save toolbar and guarded previous/next navigation. Its optional `statGroups`
-relation returns one row per `stat_id`, with `group_name` and numeric `sort_order`.
-System 6 uses its existing measurement definitions for division order; changing a
-dashboard layout does not change measurement entry order. Existing notes remain
-stored when using the compact entry view.
+`ManualMeasurementsBlock` owns `manual_stats` (definitions: name, format,
+daily/weekly frequency, unit, active flag) and `manual_stat_entries`
+(observations, unique per definition and date, with value, note, actor and
+timestamp). Measurements belong to no dashboard or widget: removing layout does
+not remove them, and several widgets can query the same observations. Archive a
+definition to stop new entry while keeping history.
 
-Definitions have a name, format, daily/weekly frequency, unit and active flag.
-Direction belongs exclusively to WISE widgets through `config.inverse`; it is
-not stored on stat definitions. Observations are unique per definition/date and retain
-value, note, actor and timestamp. Percentage storage is fractional; entry fields
-display percent. Blank is missing, zero is zero. Weekly entry dates map to Sunday.
+- `ManualMeasurementsSetupPage` is the management-permission-gated setup route
+  (default `/measurements/setup`). `ManualMeasurementsPage` handles entry only;
+  `weekly` gives compact weekly entry with a sticky Save toolbar. Optional
+  `statGroups` returns one row per `stat_id` with `group_name` and numeric
+  `sort_order`; dashboard layout does not change entry order.
+- Weekly periods end Sunday unless `weeklyPeriodDate`/`weeklyPeriodLabel` are
+  configured. Percentages are stored as fractions and entered as percent.
+  Blank is missing; zero is zero.
+- Direction lives only on WISE widgets (`config.inverse`), not on definitions.
+- `manual_entry` widgets select a definition with `config.measurementId` and
+  enforce the block's entry permissions. Query capabilities for measurement
+  reads are supplied by the consuming system.
 
-Manual definitions and observations do not belong to a dashboard or widget.
-Removing dashboard layout does not remove measurements. Multiple widgets can
-query the same observations. Archive definitions to stop new entry while retaining
-history. `manual_entry` widgets select a definition using `config.measurementId`
-and enforce the block's entry permissions. Query capabilities for measurement
-reads are supplied by the consuming system, as with other application data.
-
-See `examples/stats` and System 6 for complete registrations and seeds.
+See `examples/stats` for a complete registration and seeds.

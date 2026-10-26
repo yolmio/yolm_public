@@ -8,6 +8,7 @@ import { Input } from "./input";
 import { useJsModule } from "std/js_modules";
 import type { DomStatements } from "std/statements";
 import type { Sql } from "std/sql_utils";
+import { qrScannerText } from "./qr_scanner_i18n";
 
 /**
  * Props for {@link QrScanner}. Choose `"automatic"` mode for kiosk-style
@@ -34,8 +35,8 @@ interface QrScannerProps {
   onClearError?: (s: DomStatements) => void;
   /** Optional camera-error fallback for entering a barcode or QR value manually. */
   onManualEntry?: (s: DomStatements, enteredValue: Sql) => void;
-  manualEntryLabel?: string;
-  manualEntryPlaceholder?: string;
+  manualEntryLabel?: string | Sql;
+  manualEntryPlaceholder?: string | Sql;
 
   // Display message for confirmation panel (set by onDetect callback)
   detectMessage?: Sql;
@@ -182,7 +183,7 @@ function ScannerHeader({
         />
         <Show when={itemCount ? sql`true` : sql`false`}>
           <span className="text-white/80 text-sm font-medium">
-            {itemCount ?? sql.lit``} scanned
+            {itemCount ?? sql.lit``} {qrScannerText("scanned")}
           </span>
         </Show>
         {extraStatus?.()}
@@ -261,7 +262,9 @@ function CameraContainer({
             icon="CameraAlt"
             className="text-5xl mb-3 opacity-50 animate-pulse"
           />
-          <p className="text-sm opacity-75">Starting camera...</p>
+          <p className="text-sm opacity-75">
+            {qrScannerText("startingCamera")}
+          </p>
         </div>
       </Show>
     </div>
@@ -294,8 +297,8 @@ function CameraErrorOverlay({
   manualEntryPlaceholder,
 }: {
   onManualEntry?: (s: DomStatements, enteredValue: Sql) => void;
-  manualEntryLabel?: string;
-  manualEntryPlaceholder?: string;
+  manualEntryLabel?: string | Sql;
+  manualEntryPlaceholder?: string | Sql;
 }) {
   const manualInputId = useUniqueId();
   return (
@@ -306,7 +309,9 @@ function CameraErrorOverlay({
           className="text-5xl text-danger-400 mb-3"
         />
         <p className="text-white text-center mb-4">
-          {sql`camera_error`}
+          {onManualEntry
+            ? qrScannerText("cameraUnavailable")
+            : sql`camera_error`}
         </p>
         {onManualEntry
           ? (
@@ -315,14 +320,15 @@ function CameraErrorOverlay({
                 htmlFor={manualInputId}
                 className="mb-2 block text-sm font-semibold text-neutral-900"
               >
-                {manualEntryLabel ?? "Enter code instead"}
+                {manualEntryLabel ?? qrScannerText("enterCode")}
               </label>
               <Input
                 id={manualInputId}
                 bindScalar="manual_entry_value"
                 size="lg"
                 fullWidth
-                placeholder={manualEntryPlaceholder ?? "Scan or type a code"}
+                placeholder={manualEntryPlaceholder ??
+                  qrScannerText("scanOrType")}
               />
               <Button
                 size="lg"
@@ -330,13 +336,13 @@ function CameraErrorOverlay({
                 disabled={sql`trim(manual_entry_value) = ''`}
                 onClick={(s) => onManualEntry(s, sql`trim(manual_entry_value)`)}
               >
-                Open
+                {qrScannerText("open")}
               </Button>
             </div>
           )
           : (
             <p className="text-white/60 text-sm text-center">
-              You can still use a hardware scanner
+              {qrScannerText("hardwareAvailable")}
             </p>
           )}
       </div>
@@ -377,7 +383,7 @@ function ErrorPanel({
             if (onClearError) onClearError(s);
           }}
         >
-          Dismiss
+          {qrScannerText("dismiss")}
         </Button>
       </div>
     </Show>
@@ -400,8 +406,8 @@ interface ExplicitScannerProps {
   errorMessage?: Sql;
   onClearError?: (s: DomStatements) => void;
   onManualEntry?: (s: DomStatements, enteredValue: Sql) => void;
-  manualEntryLabel?: string;
-  manualEntryPlaceholder?: string;
+  manualEntryLabel?: string | Sql;
+  manualEntryPlaceholder?: string | Sql;
   detectMessage?: Sql;
   candidateValue?: Sql;
   scanPhase?: Sql;
@@ -587,7 +593,7 @@ function ExplicitScanner({
             <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
               <div className="text-white text-center">
                 <MaterialIcon icon="Sync" className="text-4xl animate-spin" />
-                <p className="text-sm mt-2">Validating...</p>
+                <p className="text-sm mt-2">{qrScannerText("validating")}</p>
               </div>
             </div>
           </Show>
@@ -602,7 +608,7 @@ function ExplicitScanner({
           <Show when={sql`hw_toast_visible`}>
             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-gray-800/90 text-white px-4 py-2 rounded-full text-sm flex items-center gap-2 z-30">
               <MaterialIcon icon="QrCodeScanner" className="text-base" />
-              Scanned via hardware
+              {qrScannerText("hardwareScan")}
             </div>
           </Show>
 
@@ -665,7 +671,7 @@ function ExplicitScanner({
                     },
                   }}
               >
-                Confirm
+                {qrScannerText("confirm")}
               </Button>
             </div>
           </Show>
@@ -705,7 +711,7 @@ function ExplicitScanner({
                       });
                     }}
                   >
-                    Back
+                    {qrScannerText("back")}
                   </Button>
                   <Button
                     variant="solid"
@@ -727,7 +733,7 @@ function ExplicitScanner({
                     }}
                   >
                     <MaterialIcon icon="CameraAlt" />
-                    <span className="ml-2">Take Photo</span>
+                    <span className="ml-2">{qrScannerText("takePhoto")}</span>
                   </Button>
                 </div>
               </div>
@@ -763,8 +769,8 @@ interface AutomaticScannerProps {
   errorMessage?: Sql;
   onClearError?: (s: DomStatements) => void;
   onManualEntry?: (s: DomStatements, enteredValue: Sql) => void;
-  manualEntryLabel?: string;
-  manualEntryPlaceholder?: string;
+  manualEntryLabel?: string | Sql;
+  manualEntryPlaceholder?: string | Sql;
   scanPhase?: Sql;
   confirmMessage?: Sql;
   onConfirm?: (s: DomStatements) => void;
@@ -933,9 +939,13 @@ function AutomaticScanner({
               <div className="text-white text-center">
                 <MaterialIcon icon="Sync" className="text-4xl animate-spin" />
                 <p className="text-sm mt-2">
-                  {confirmMode ? "Validating..." : "Processing..."}
+                  {confirmMode
+                    ? qrScannerText("validating")
+                    : qrScannerText("processing")}
                 </p>
-                <p className="text-xs mt-3 opacity-50">Tap to dismiss</p>
+                <p className="text-xs mt-3 opacity-50">
+                  {qrScannerText("tapToDismiss")}
+                </p>
               </div>
             </div>
           </Show>
@@ -975,7 +985,7 @@ function AutomaticScanner({
                       onReject(s);
                     }}
                   >
-                    Reject
+                    {qrScannerText("reject")}
                   </Button>
                   <Button
                     variant="solid"
@@ -1005,7 +1015,9 @@ function AutomaticScanner({
                     }}
                   >
                     <MaterialIcon icon="CameraAlt" />
-                    <span className="ml-2">Confirm + Snap</span>
+                    <span className="ml-2">
+                      {qrScannerText("confirmAndSnap")}
+                    </span>
                   </Button>
                 </div>
               </div>

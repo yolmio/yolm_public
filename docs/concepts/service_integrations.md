@@ -166,7 +166,8 @@ export function syncHubspotClients<T extends IServerBaseStatements>(s: T) {
 
 ### Scheduled Sync
 
-Set up a recurring job to sync HubSpot data:
+Set up a recurring job to sync HubSpot data (wrap the call in `s.try` as shown
+in [Error Handling](#error-handling) when a failed sync needs a fallback):
 
 ```typescript
 system.scheduledProc({
@@ -215,12 +216,12 @@ function TwilioAuth({ children, ...props }: { children: Node } & DefaultAuthComp
       channels={{
         email: {
           getEmailFromUserId: (userId) =>
-            sql`(select email from db.users where sys_user_id = ${userId})`,
+            sql`(select users.email from db.users auto join db.sys_users where sys_users.id = ${userId})`,
           fromEmail: sql.lit`notifications@example.com`,
         },
         sms: {
           getPhoneFromUserId: (userId) =>
-            sql`(select phone::string from db.users where sys_user_id = ${userId})`,
+            sql`(select users.phone::string from db.users auto join db.sys_users where sys_users.id = ${userId})`,
           sendSms: (s, opts) => {
             twilio.sendSms(s, {
               to: opts.to,
@@ -232,7 +233,7 @@ function TwilioAuth({ children, ...props }: { children: Node } & DefaultAuthComp
       identifier={{
         field: "email",
         getUserFromIdentifier: (email) =>
-          sql`(select sys_user_id from db.users where email = ${email})`,
+          sql`(select sys_users.id from db.users auto join db.sys_users where users.email = ${email})`,
       }}
       {...props}
     >
@@ -241,7 +242,8 @@ function TwilioAuth({ children, ...props }: { children: Node } & DefaultAuthComp
   );
 }
 
-// Use in your app
+// AuthBlock({ userTypes: ["users"] }) adds sys_users.user_id; never add a
+// reverse sys_users FK to the users table.
 system.app({
   domain: "myapp.com",
   ui: (
@@ -309,17 +311,6 @@ Secrets are configured outside the codebase and injected at runtime.
 
 ## Webhook Patterns
 
-### Setting up a Webhook Table
-
-```typescript
-db.table("incoming_webhooks", (table) => {
-  table.string("event_type", 100).notNull();
-  table.json("payload").notNull();
-  table.timestampUtc("received_at").notNull().default(sql`now()`);
-  table.bool("processed").notNull().default(false);
-});
-```
-
 ### Processing Webhooks
 
 ```typescript
@@ -331,14 +322,7 @@ api.post("/webhooks/external-service", {
     s.defScalar("event_type", sql`body->>'event_type'`);
     s.defScalar("payload", sql`body->'payload'`);
 
-    // Store webhook
     s.startTransaction();
-    s.modify(sql`
-      insert into db.incoming_webhooks (event_type, payload)
-      values (event_type, payload)
-    `);
-
-    // Process based on event type
     s.if(sql`event_type = 'customer.created'`, (s) => {
       s.modify(sql`
         insert into db.customers (external_id, email, name)
@@ -356,6 +340,11 @@ api.post("/webhooks/external-service", {
   },
 });
 ```
+
+Write only the business rows the webhook changes; do not add a table that logs
+raw payloads. With `db.enableTransactionQueries = true`, the transaction log
+records what each webhook changed and when (see
+[Transaction Queries](../sql/transaction_queries.md)).
 
 ## OAuth Integrations
 
@@ -396,12 +385,11 @@ system.scheduledProc({
       using contact
       on c.external_id = contact.id
       when matched then update set
-        email = contact.properties->>'email',
-        updated_at = now()
+        email = contact.properties->>'email'
       when not matched then insert
-        (external_id, email, created_at)
+        (external_id, email)
       values
-        (contact.id, contact.properties->>'email', now())
+        (contact.id, contact.properties->>'email')
     `);
     s.commitTransaction();
   },
@@ -412,7 +400,7 @@ system.scheduledProc({
 
 1. **Use static secrets** - Never hardcode API keys
 2. **Handle errors** - Wrap service calls in try/catch
-3. **Store webhook data** - Log all incoming webhooks for debugging
+3. **Audit through transaction history** - Use [transaction queries](../sql/transaction_queries.md) instead of webhook or error log tables
 4. **Idempotent operations** - Use `on conflict` or `merge` for upserts
 5. **Schedule syncs wisely** - Balance freshness with API rate limits
 6. **Opt in outbound requests where needed** - Use service/request opt-in settings for preview or local environments
@@ -438,12 +426,6 @@ s.try({
   catch: (s) => {
     s.debugExpr(sql`api_error.message`);
 
-    // Log error
-    s.modify(sql`
-      insert into db.api_errors (service, error_message, occurred_at)
-      values ('external_api', api_error.message, now())
-    `);
-
     // Set fallback data
     s.defScalar("data", sql`'{}'::json`);
   },
@@ -466,57 +448,4 @@ system.scheduledProc({
     // ... sync logic
   },
 });
-```
-
-## Real-World Integration Example
-
-Complete HubSpot contact sync with error handling:
-
-```typescript
-export function syncHubspotClients<T extends IServerBaseStatements>(s: T) {
-  s.try({
-    body: (s) => {
-      s.statements(
-        hubspot.contacts.listAll({
-          properties: [sql.lit`email`, sql.lit`hs_additional_emails`],
-          archived: false,
-        })
-      );
-
-      s.modify(
-        sql`delete from contact where (properties->>'email') is null or (properties->>'email') = ''`
-      );
-
-      s.defTable(
-        "client_emails",
-        sql`select (properties->>'email') as email, split.value as additional_email
-            from contact left join string.split(properties->>'hs_additional_emails', ';') as split`
-      );
-
-      s.startTransaction();
-      s.modify(sql`insert into db.clients
-        select distinct email
-        from client_emails
-        where not exists (select 1 from db.clients where email = client_emails.email)`);
-
-      s.modify(sql`insert into db.client_additional_emails
-        select additional_email as email, (select id from db.clients where email = client_emails.email) as client_id
-        from client_emails
-        where not exists (
-          select 1
-          from db.client_additional_emails
-          auto join db.clients
-          where client_additional_emails.email = client_emails.additional_email and
-          clients.email = client_emails.email
-        ) and
-        additional_email is not null`);
-      s.commitTransaction();
-    },
-    errorName: "sync_error",
-    catch: (s) => {
-      s.debugExpr(sql.lit`HubSpot sync failed`);
-      s.debugExpr(sql`sync_error.message`);
-    },
-  });
-}
 ```

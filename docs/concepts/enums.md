@@ -104,7 +104,6 @@ db.table("orders", (table) => {
   table.fk("customer_id", "customers").notNull();
   table.enum("status", "order_status").notNull();
   table.enum("priority", "priority");
-  table.decimal("total", { precision: 10, scale: 2 });
 });
 ```
 
@@ -345,6 +344,6 @@ s.modify(sql`
 sql`
   select * from db.tasks
   where status = 'todo'::enums.task_status
-  order by created_at
+  order by title
 `
 ```

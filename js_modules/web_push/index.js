@@ -169,7 +169,7 @@ async function subscribe(args) {
     return { state: "unsupported" };
   }
   try {
-    const requestPermission = args?.json?.requestPermission === true;
+    const requestPermission = args?.requestPermission === true;
     if (
       globalThis.Notification.permission === "default" && requestPermission
     ) {

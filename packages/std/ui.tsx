@@ -239,7 +239,7 @@ export function mergeFloatingOpts(
 
 /** Props for {@link Route}. */
 export interface RouteProps {
-  /** URL path matched by the route (e.g. `"/customers/:id"`). */
+  /** URL path matched by the route (e.g. `"/customers/{customer_id:id}"`). */
   path: string;
   /** Whether the path should match exactly or allow sub-paths. */
   exact?: boolean;
@@ -636,6 +636,11 @@ export interface QueryParam {
   /** Initial value when the param is absent from the URL (note: `default`, not `expr`). */
   default?: Sql;
   allowNoRead?: boolean;
+  /**
+   * How writes update browser history. `"replace"` (default) updates the
+   * current entry; `"push"` adds one so Back steps through changes.
+   */
+  history?: yom.QueryParamHistory;
 }
 
 /**

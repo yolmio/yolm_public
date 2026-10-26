@@ -99,7 +99,11 @@ function RolesList(
     <DataTable
       query={sql`select
         r.*,
-        (select count(distinct sys_user_id) from db.auth_user_roles where auth_role_id = r.id) as user_count,
+        (select count(distinct sys_user_id) from (
+          select sys_user_id, auth_role_id from db.auth_user_roles
+          union all
+          select sys_user_id, auth_role_id from db.auth_user_role_sources
+        ) membership where membership.auth_role_id = r.id) as user_count,
         ${countRolePermissions(sql`r.id`)} as permission_count,
         e.name as extends_name
       from db.auth_roles r
@@ -194,7 +198,11 @@ function RoleDetailPage(
             "role_detail",
             sql`select
               (select name from db.auth_roles where id = record.extends) as extends_name,
-              (select count(*) from db.auth_user_roles where auth_role_id = ui.record_id) as user_count,
+              (select count(distinct sys_user_id) from (
+                select sys_user_id, auth_role_id from db.auth_user_roles
+                union all
+                select sys_user_id, auth_role_id from db.auth_user_role_sources
+              ) membership where membership.auth_role_id = ui.record_id) as user_count,
               format.date(record.created_at, '%Y-%m-%d') as created_at_fmt`,
           );
           s.defScalar(
@@ -210,6 +218,7 @@ function RoleDetailPage(
               variant="plain"
               color="neutral"
               href="/roles"
+              backLink
               aria-label="Back"
             />
             <Typography
